@@ -48,6 +48,11 @@ public class AfdianUtil {
         Config config = ConfigUtil.CONFIG;
         Long expirationTime = config.getExpirationTime();
 
+        // 默认激活：expirationTime 为 0 或 null 时视为有效
+        if (expirationTime == null || expirationTime == 0) {
+            return true;
+        }
+
         long time = new Date().getTime();
         return time < expirationTime;
     }

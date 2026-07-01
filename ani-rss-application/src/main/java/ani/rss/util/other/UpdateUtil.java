@@ -40,6 +40,14 @@ public class UpdateUtil {
                 .setAutoUpdate(false)
                 .setLatest("")
                 .setMarkdownBody("");
+
+        // Fork版本禁止检查更新
+        if (Boolean.TRUE.equals(config.getDisableUpdate())) {
+            log.info("已禁用更新检查（Fork版本）");
+            CacheUtils.put(key, about, 1000 * 60);
+            return about;
+        }
+
         try {
             HttpRequest request = HttpReq.get("https://api.github.com/repos/wushuo894/ani-rss/releases/latest")
                     .timeout(3000);

@@ -479,6 +479,12 @@ public class Config implements Serializable {
     private String version;
 
     /**
+     * 禁止检查更新（Fork版本使用）
+     */
+    @Schema(description = "禁止检查更新（Fork版本使用）")
+    private Boolean disableUpdate;
+
+    /**
      * 获取BGM封面图片质量
      */
     @Schema(description = "BGM 封面图片质量")

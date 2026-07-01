@@ -208,6 +208,7 @@ public class ConfigUtil {
                 .setProcrastinating(false)
                 .setProcrastinatingDay(14)
                 .setGithubToken("")
+                .setDisableUpdate(true)
                 .setAlistRefresh(false)
                 .setAlistRefreshDelayed(0L)
                 .setUpdateTotalEpisodeNumber(false)

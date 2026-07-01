@@ -246,7 +246,21 @@ public class OpenListUploadNotification implements BaseNotification {
 
             if (openListUploadDeleteLocalFile) {
                 log.info("删除本地文件 {}", file);
-                FileUtil.del(file);
+                // 等待文件句柄释放
+                ThreadUtil.sleep(2000);
+                for (int i = 0; i < 3; i++) {
+                    try {
+                        FileUtil.del(file);
+                        break;
+                    } catch (Exception e) {
+                        if (i == 2) {
+                            log.error("删除本地文件失败: {}", file, e);
+                        } else {
+                            log.warn("删除本地文件失败，重试 ({}/3): {}", i + 1, file);
+                            ThreadUtil.sleep(3000);
+                        }
+                    }
+                }
             }
         }
     }
@@ -275,10 +289,12 @@ public class OpenListUploadNotification implements BaseNotification {
         String filename = FileUtil.getName(localFilePath);
 
         try {
-            java.net.http.HttpClient client = java.net.http.HttpClient.newHttpClient();
+            java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
+                    .connectTimeout(java.time.Duration.ofSeconds(30))
+                    .build();
             java.net.http.HttpRequest request = java.net.http.HttpRequest.newBuilder()
                     .uri(java.net.URI.create(url))
-                    .timeout(java.time.Duration.ofMinutes(2))
+                    .timeout(java.time.Duration.ofMinutes(5))
                     .header("Authorization", openListUploadApiKey)
                     .header("As-Task", "false")
                     .header("File-Path", URLUtil.encode(cloudFilePath + "/" + filename))
