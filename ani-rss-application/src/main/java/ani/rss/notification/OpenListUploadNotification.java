@@ -12,7 +12,6 @@ import ani.rss.service.DownloadService;
 import ani.rss.util.basic.HttpReq;
 import cn.hutool.core.collection.ListUtil;
 import cn.hutool.core.io.FileUtil;
-import cn.hutool.core.io.resource.ResourceUtil;
 import cn.hutool.core.lang.Assert;
 import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.core.util.ObjectUtil;
@@ -285,7 +284,7 @@ public class OpenListUploadNotification implements BaseNotification {
                 .header("As-Task", "false")
                 .header("File-Path", URLUtil.encode(cloudFilePath + "/" + filename))
                 .contentType("application/octet-stream")
-                .body(ResourceUtil.getResourceObj(localFilePath))
+                .body(new File(localFilePath))
                 .then(res -> {
                     Assert.isTrue(res.isOk(), "上传失败 {} 状态码:{}", localFilePath, res.getStatus());
                     JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);

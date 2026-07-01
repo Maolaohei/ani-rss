@@ -13,6 +13,29 @@ INSTALL_DIR="/opt/ani-rss"
 SERVICE_USER="ani-rss"
 SERVICE_NAME="ani-rss.service"
 SERVER_PORT="7789"
+REPO_FILE="$INSTALL_DIR/repo.conf"
+
+# 仓库源定义
+REPO_OFFICIAL="wushuo894/ani-rss"
+REPO_FORK="Maolaohei/ani-rss"
+
+# 选择仓库源
+select_repo() {
+    echo -e "${YELLOW}请选择安装版本:${NC}"
+    echo "  1) 分支版 (Maolaohei/ani-rss) - AList上传修复等优化"
+    echo "  2) 官方版 (wushuo894/ani-rss) - 原版官方仓库"
+    read -p "请选择 [1/2] (默认1): " repo_choice
+    case "$repo_choice" in
+        2)
+            GITHUB_REPO="$REPO_OFFICIAL"
+            echo -e "${GREEN}已选择: 官方版${NC}"
+            ;;
+        *)
+            GITHUB_REPO="$REPO_FORK"
+            echo -e "${GREEN}已选择: 分支版${NC}"
+            ;;
+    esac
+}
 
 # 检查root权限
 check_root() {
@@ -59,30 +82,30 @@ deploy_app() {
     mkdir -p "$INSTALL_DIR" || exit 1
 
     echo "正在下载 ani-rss.jar"
-    # 下载jar包
-    if ! wget -q https://github.com/wushuo894/ani-rss/releases/latest/download/ani-rss.jar -O "$INSTALL_DIR/ani-rss.jar"; then
+    if ! wget -q "https://github.com/${GITHUB_REPO}/releases/latest/download/ani-rss.jar" -O "$INSTALL_DIR/ani-rss.jar"; then
         echo -e "${RED}下载 ani-rss.jar 失败${NC}"
         exit 1
     fi
     echo "下载完成 ani-rss.jar"
 
     echo "正在下载 run.sh"
-    # 下载启动脚本
-    if ! wget -q https://github.com/wushuo894/ani-rss/raw/master/docker/run.sh -O "$INSTALL_DIR/run.sh"; then
+    if ! wget -q "https://github.com/${GITHUB_REPO}/raw/master/docker/run.sh" -O "$INSTALL_DIR/run.sh"; then
         echo -e "${RED}下载启动脚本失败${NC}"
         exit 1
     fi
     echo "下载完成 run.sh"
 
     echo "正在下载 ani-rss.sh"
-    # 下载管理脚本
-    if ! wget -q https://github.com/wushuo894/ani-rss/raw/master/linux/ani-rss.sh -O "/usr/local/bin/ani-rss"; then
+    if ! wget -q "https://github.com/${GITHUB_REPO}/raw/master/linux/ani-rss.sh" -O "/usr/local/bin/ani-rss"; then
         echo -e "${RED}下载启动脚本失败${NC}"
         exit 1
     fi
     echo "下载完成 ani-rss.sh"
 
     sudo chmod +x /usr/local/bin/ani-rss
+
+    # 保存仓库源配置
+    echo "$GITHUB_REPO" > "$REPO_FILE"
 
     # 设置权限
     chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
@@ -175,6 +198,7 @@ show_info() {
 # 主流程
 main() {
     check_root
+    select_repo
     install_jdk
     create_user
     deploy_app
