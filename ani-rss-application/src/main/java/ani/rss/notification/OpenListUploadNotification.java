@@ -284,7 +284,7 @@ public class OpenListUploadNotification implements BaseNotification {
                 .header("As-Task", "false")
                 .header("File-Path", URLUtil.encode(cloudFilePath + "/" + filename))
                 .contentType("application/octet-stream")
-                .body(new File(localFilePath))
+                .body(FileUtil.readBytes(localFilePath))
                 .then(res -> {
                     Assert.isTrue(res.isOk(), "上传失败 {} 状态码:{}", localFilePath, res.getStatus());
                     JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
