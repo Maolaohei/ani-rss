@@ -37,6 +37,29 @@ select_repo() {
     esac
 }
 
+# 检查是否已安装
+check_installed() {
+    systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null || [ -f "$INSTALL_DIR/ani-rss.jar" ]
+}
+
+# 已安装：仅更新管理脚本
+update_management_script() {
+    echo -e "${YELLOW}检测到 ani-rss 已安装，更新管理脚本...${NC}"
+    if ! wget -q "https://github.com/${GITHUB_REPO}/raw/master/linux/ani-rss.sh" -O "/usr/local/bin/ani-rss"; then
+        echo -e "${RED}下载管理脚本失败${NC}"
+        exit 1
+    fi
+    chmod +x /usr/local/bin/ani-rss
+
+    # 保存仓库源配置
+    mkdir -p "$INSTALL_DIR"
+    echo "$GITHUB_REPO" > "$REPO_FILE"
+
+    echo -e "${GREEN}管理脚本已更新，现在可以使用 ani-rss switch 切换版本${NC}"
+    ani-rss help
+    exit 0
+}
+
 # 检查root权限
 check_root() {
     [ "$EUID" -ne 0 ] && echo -e "${RED}错误：请使用sudo或以root运行${NC}" && exit 1
@@ -199,6 +222,9 @@ show_info() {
 main() {
     check_root
     select_repo
+    if check_installed; then
+        update_management_script
+    fi
     install_jdk
     create_user
     deploy_app
