@@ -272,28 +272,35 @@ public class OpenListUploadNotification implements BaseNotification {
         String openListUploadApiKey = notificationConfig.getOpenListUploadApiKey();
 
         String url = StrUtil.format("{}/api/fs/put", openListUploadHost);
-
-
         String filename = FileUtil.getName(localFilePath);
 
-        HttpReq
-                .put(url)
-                .timeout(1000 * 60 * 2)
-                .setConfig(httpConfig)
-                .header(Header.AUTHORIZATION, openListUploadApiKey)
-                .header("As-Task", "false")
-                .header("File-Path", URLUtil.encode(cloudFilePath + "/" + filename))
-                .contentType("application/octet-stream")
-                .body(FileUtil.readBytes(localFilePath))
-                .then(res -> {
-                    Assert.isTrue(res.isOk(), "上传失败 {} 状态码:{}", localFilePath, res.getStatus());
-                    JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                    int code = jsonObject.get("code").getAsInt();
-                    log.info(jsonObject.toString());
-                    Assert.isTrue(code == 200, "上传失败 {} 状态码:{}", localFilePath, code);
+        try {
+            java.net.http.HttpClient client = java.net.http.HttpClient.newHttpClient();
+            java.net.http.HttpRequest request = java.net.http.HttpRequest.newBuilder()
+                    .uri(java.net.URI.create(url))
+                    .timeout(java.time.Duration.ofMinutes(2))
+                    .header("Authorization", openListUploadApiKey)
+                    .header("As-Task", "false")
+                    .header("File-Path", URLUtil.encode(cloudFilePath + "/" + filename))
+                    .header("Content-Type", "application/octet-stream")
+                    .PUT(java.net.http.HttpRequest.BodyPublishers.ofFile(java.nio.file.Path.of(localFilePath)))
+                    .build();
 
-                    log.info("OpenList 上传完成 {}", filename);
-                });
+            java.net.http.HttpResponse<String> response = client.send(request,
+                    java.net.http.HttpResponse.BodyHandlers.ofString());
+
+            Assert.isTrue(response.statusCode() == 200,
+                    "上传失败 {} 状态码:{}", localFilePath, response.statusCode());
+
+            JsonObject jsonObject = GsonStatic.fromJson(response.body(), JsonObject.class);
+            int code = jsonObject.get("code").getAsInt();
+            log.info(jsonObject.toString());
+            Assert.isTrue(code == 200, "上传失败 {} 状态码:{}", localFilePath, code);
+
+            log.info("OpenList 上传完成 {}", filename);
+        } catch (Exception e) {
+            throw new RuntimeException("上传失败 " + localFilePath, e);
+        }
     }
 
     /**
