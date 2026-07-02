@@ -122,6 +122,81 @@ public class UpdateUtil {
         return about;
     }
 
+    /**
+     * 获取 Fork 最新版本信息（强制更新，不检查当前版本）
+     */
+    public static synchronized About forkAbout() {
+        String version = MavenUtils.getVersion();
+        About about = new About()
+                .setVersion(version)
+                .setUpdate(true)
+                .setAutoUpdate(false)
+                .setLatest("")
+                .setMarkdownBody("");
+
+        try {
+            HttpRequest request = HttpReq.get("https://api.github.com/repos/Maolaohei/ani-rss/releases/latest")
+                    .timeout(10000);
+
+            String githubToken = ConfigUtil.CONFIG.getGithubToken();
+            if (StrUtil.isNotBlank(githubToken)) {
+                request.header(Header.AUTHORIZATION, "Bearer " + githubToken);
+            }
+
+            request.then(response -> {
+                HttpReq.assertStatus(response);
+
+                Github.Release release = GsonStatic.fromJson(response.body(), Github.Release.class);
+
+                String latest = release.getTagName().replace("v", "");
+
+                about
+                        .setDate(release.getPublishedAt())
+                        .setUpdate(true)
+                        .setLatest(latest)
+                        .setMarkdownBody(release.getBody());
+
+                MavenUtils.CurrentFile currentFile = MavenUtils.getCurrentFile();
+                String filename = currentFile.isJar() ? "ani-rss.jar" : "ani-rss.exe";
+
+                List<Github.Assets> assets = release.getAssets();
+                for (Github.Assets asset : assets) {
+                    if (!filename.equals(asset.getName())) {
+                        continue;
+                    }
+                    about.setDownloadUrl(asset.getBrowserDownloadUrl())
+                            .setSha256(asset.getDigest().replace("sha256:", ""))
+                            .setSize(asset.getSize())
+                            .setFormatSize(FileUtils.formatSize(asset.getSize(), true));
+                }
+            });
+        } catch (Exception e) {
+            log.error("获取 Fork 版本信息失败: {}", e.getMessage());
+        }
+        return about;
+    }
+
+    /**
+     * 执行 Fork 更新（强制覆盖，不检查版本差异）
+     */
+    public static synchronized void forkUpdate(About about) {
+        Assert.isTrue(StrUtil.isNotBlank(about.getDownloadUrl()), "未获取到下载地址");
+
+        MavenUtils.CurrentFile currentFile = MavenUtils.getCurrentFile();
+        Assert.isTrue(currentFile.isFile(), "不支持更新");
+
+        BaseUpdate baseUpdate = BaseUpdate.getInstance();
+        File updateFile = baseUpdate.downloadUpdateFile(about);
+
+        ThreadUtil.execute(() -> {
+            try {
+                baseUpdate.update(updateFile);
+            } catch (Exception e) {
+                log.error("Fork 更新失败: {}", e.getMessage(), e);
+            }
+        });
+    }
+
     public static synchronized void update(About about) {
         Boolean update = about.getUpdate();
         if (!update) {

@@ -56,6 +56,10 @@ export let about = () => api.post('api/about')
  */
 export let update = () => api.post('api/update')
 
+export let forkAbout = () => api.post('api/forkUpdate')
+
+export let doForkUpdate = () => api.post('api/doForkUpdate')
+
 /**
  * 获取Mikan番剧列表
  * @param text 关键词

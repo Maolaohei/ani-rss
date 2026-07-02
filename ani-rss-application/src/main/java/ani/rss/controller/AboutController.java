@@ -64,6 +64,28 @@ public class AboutController extends BaseController {
         }
     }
 
+    @Auth
+    @Operation(summary = "Fork更新")
+    @PostMapping("/forkUpdate")
+    public Result<About> forkAbout() {
+        return Result.success(UpdateUtil.forkAbout());
+    }
+
+    @Auth
+    @Operation(summary = "执行Fork更新")
+    @PostMapping("/doForkUpdate")
+    public Result<Void> doForkUpdate() {
+        About about = UpdateUtil.forkAbout();
+        try {
+            UpdateUtil.forkUpdate(about);
+            return Result.success("Fork更新成功, 正在重启...");
+        } catch (Exception e) {
+            String message = ExceptionUtils.getMessage(e);
+            log.error("Fork更新失败 {}", message);
+            return Result.error("Fork更新失败: " + message);
+        }
+    }
+
     private final IpWhitelist ipWhitelist = new IpWhitelist();
 
     @Operation(summary = "IP白名单测试")

@@ -48,6 +48,14 @@
           更新
         </el-button>
       </el-badge>
+      <div class="about-action-spacer"></div>
+      <popconfirm title="将从 Fork 仓库强制拉取最新版本并重启，确认更新？" @confirm="forkUpdateAction">
+        <template #reference>
+          <el-button bg icon="Upload" text type="primary">
+            Fork更新
+          </el-button>
+        </template>
+      </popconfirm>
     </div>
   </div>
   <el-dialog v-if="dialogVisible" v-model="dialogVisible" align-center center title="版本更新"
@@ -152,6 +160,34 @@ const update = async () => {
 
   actionLoading.value = true
   http.update()
+      .then(async res => {
+        ElMessage.success(res.message)
+        for (let i = 0; i < 24; i++) {
+          await sleep(5000)
+          try {
+            let pingRes = await http.ping()
+            if (pingRes.code === 200) {
+              authorization.value = ''
+              location.reload()
+              return
+            }
+          } catch (e) {
+          }
+        }
+        ElMessage.error("重启时遇到错误")
+      })
+      .finally(() => {
+        actionLoading.value = false
+      })
+}
+
+const forkUpdateAction = async () => {
+  let sleep = ms => {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  actionLoading.value = true
+  http.doForkUpdate()
       .then(async res => {
         ElMessage.success(res.message)
         for (let i = 0; i < 24; i++) {
