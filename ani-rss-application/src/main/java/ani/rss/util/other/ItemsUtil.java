@@ -272,9 +272,9 @@ public class ItemsUtil {
     public static String getRss(String url) {
         Config config = ConfigUtil.CONFIG;
 
-        String xml = HttpReq.get(url)
-                .timeout(config.getRssTimeout() * 1000)
-                .thenFunction(res -> {
+        String xml = HttpReq.thenClose(
+                HttpReq.get(url).timeout(config.getRssTimeout() * 1000),
+                res -> {
                     HttpReq.assertStatus(res);
                     HttpReq.assertXml(res);
                     return res.body();

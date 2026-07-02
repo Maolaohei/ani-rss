@@ -124,8 +124,9 @@ public class TorrentUtil {
                 return saveTorrentFile;
             }
 
-            return HttpReq.get(torrent)
-                    .thenFunction(res -> {
+            return HttpReq.thenClose(
+                    HttpReq.get(torrent),
+                    res -> {
                         int status = res.getStatus();
                         if (status == 404) {
                             // 如果为 404 则写入空文件 已在 getMagnet 处理过

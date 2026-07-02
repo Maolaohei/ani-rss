@@ -323,11 +323,11 @@ public class ScrapeService {
         Config config = ConfigUtil.CONFIG;
         String tmdbImage = config.getTmdbImage();
 
-        HttpReq.get(tmdbImage + "/t/p/original" + tmdbPath)
-                .then(res -> {
+        HttpReq.thenClose(
+                HttpReq.get(tmdbImage + "/t/p/original" + tmdbPath),
+                res -> {
                     try (InputStream inputStream = res.bodyStream()) {
                         FileUtil.writeFromStream(inputStream, saveFile, true);
-                    } catch (Exception ignored) {
                     }
                 });
 

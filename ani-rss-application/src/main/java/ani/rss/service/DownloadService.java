@@ -123,7 +123,7 @@ public class DownloadService {
             }
 
             // 只下载最新集
-            if (downloadNew) {
+            if (Boolean.TRUE.equals(downloadNew)) {
                 Item newItem = items.get(items.size() - 1);
 
                 // 日期一致也可下载, 防止字幕组同时发多集
@@ -533,12 +533,12 @@ public class DownloadService {
 
         String downloadPathTemplate = config.getDownloadPathTemplate();
         String ovaDownloadPathTemplate = config.getOvaDownloadPathTemplate();
-        if (ova && StrUtil.isNotBlank(ovaDownloadPathTemplate)) {
+        if (Boolean.TRUE.equals(ova) && StrUtil.isNotBlank(ovaDownloadPathTemplate)) {
             // 剧场版位置
             downloadPathTemplate = ovaDownloadPathTemplate;
         }
 
-        if (customDownloadPath && StrUtil.isNotBlank(aniDownloadPath)) {
+        if (Boolean.TRUE.equals(customDownloadPath) && StrUtil.isNotBlank(aniDownloadPath)) {
             // 自定义下载位置
             downloadPathTemplate = StrUtil.split(aniDownloadPath, "\n", true, true)
                     .stream()
@@ -701,7 +701,7 @@ public class DownloadService {
                     return true;
                 })
                 .anyMatch(file -> {
-                    if (ova) {
+                    if (Boolean.TRUE.equals(ova)) {
                         return true;
                     }
 

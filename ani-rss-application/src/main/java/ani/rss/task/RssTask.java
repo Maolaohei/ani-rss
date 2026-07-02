@@ -40,8 +40,7 @@ public class RssTask implements BaseTask {
                 }
 
                 String title = ani.getTitle();
-                Boolean enable = ani.getEnable();
-                if (!enable) {
+                if (!Boolean.TRUE.equals(ani.getEnable())) {
                     log.debug("{} 未启用", title);
                     continue;
                 }

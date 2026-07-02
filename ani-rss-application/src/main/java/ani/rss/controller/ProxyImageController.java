@@ -87,8 +87,9 @@ public class ProxyImageController extends BaseController {
 
     public void getImg(String url, Consumer<InputStream> consumer) {
         URI host = URLUtil.getHost(URLUtil.url(url));
-        HttpReq.get(url)
-                .then(res -> {
+        HttpReq.thenClose(
+                HttpReq.get(url),
+                res -> {
                     HttpConnection httpConnection = (HttpConnection) ReflectUtil.getFieldValue(res, "httpConnection");
                     URI host1 = URLUtil.getHost(httpConnection.getUrl());
 
