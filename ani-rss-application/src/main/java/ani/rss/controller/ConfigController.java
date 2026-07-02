@@ -158,7 +158,8 @@ public class ConfigController extends BaseController {
         }
         // 网络协议发生改变，更新 systemd 服务配置并重启
         String newNetworkPrefer = config.getNetworkPrefer();
-        if (!Objects.equals(networkPrefer, newNetworkPrefer)) {
+        boolean networkChanged = !Objects.equals(networkPrefer, newNetworkPrefer);
+        if (networkChanged) {
             applyNetworkPrefer(newNetworkPrefer);
         }
         // 开机自启发生改变
@@ -169,6 +170,9 @@ public class ConfigController extends BaseController {
             }
         }
 
+        if (networkChanged) {
+            return Result.success("网络协议设置已保存，请手动重启服务: systemctl restart ani-rss 或 ani-rss restart");
+        }
         return Result.success("修改成功");
     }
 
@@ -332,44 +336,9 @@ public class ConfigController extends BaseController {
     }
 
     /**
-     * 应用网络协议偏好设置，更新 systemd 服务 JAVA_OPTS 并重启
+     * 应用网络协议偏好设置 - 提示用户手动重启
      */
     private void applyNetworkPrefer(String networkPrefer) {
-        try {
-            // 检测是否为 systemd 环境
-            if (!new File("/run/systemd/system").exists()) {
-                log.info("非 systemd 环境，跳过网络协议设置更新");
-                return;
-            }
-
-            String serviceFile = "/etc/systemd/system/ani-rss.service";
-            File file = new File(serviceFile);
-            if (!file.exists()) {
-                log.info("未找到 ani-rss 服务文件，跳过网络协议设置更新");
-                return;
-            }
-
-            String baseOpts = "-Xms64m -Xmx512m -Xss256k -XX:+UseG1GC";
-            String networkFlag = "";
-            if ("ipv4".equals(networkPrefer)) {
-                networkFlag = " -Djava.net.preferIPv4Stack=true";
-            } else if ("ipv6".equals(networkPrefer)) {
-                networkFlag = " -Djava.net.preferIPv6Addresses=true";
-            }
-
-            String content = FileUtil.readUtf8String(file);
-            String newJavaOpts = baseOpts + networkFlag;
-            content = content.replaceAll(
-                    "(?m)^Environment=\"JAVA_OPTS=.*\"$",
-                    "Environment=\"" + newJavaOpts + "\""
-            );
-            FileUtil.writeUtf8String(content, file);
-
-            // 重启 systemd 服务
-            Runtime.getRuntime().exec(new String[]{"systemctl", "restart", "ani-rss.service"});
-            log.info("网络协议已切换为: {}, 服务正在重启", networkPrefer.isEmpty() ? "系统默认" : networkPrefer);
-        } catch (Exception e) {
-            log.error("更新网络协议设置失败", e);
-        }
+        log.info("网络协议已切换为: {}, 请手动重启服务", networkPrefer.isEmpty() ? "系统默认" : networkPrefer);
     }
 }
