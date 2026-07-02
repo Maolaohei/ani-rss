@@ -14,6 +14,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * RSS
@@ -22,9 +23,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @Component
 public class RssTask implements BaseTask {
     public static final AtomicBoolean download = new AtomicBoolean(false);
+    private static final AtomicLong downloadStartTime = new AtomicLong(0);
+    private static final long MAX_DOWNLOAD_DURATION_MS = TimeUnit.MINUTES.toMillis(30);
 
     public static void download(AtomicBoolean loop) {
         DownloadService downloadService = SpringUtil.getBean(DownloadService.class);
+        downloadStartTime.set(System.currentTimeMillis());
 
         try {
             if (!TorrentUtil.login()) {
@@ -59,15 +63,25 @@ public class RssTask implements BaseTask {
             log.error(message, e);
         } finally {
             download.set(false);
+            downloadStartTime.set(0);
         }
     }
 
     public static void sync() {
-        synchronized (download) {
-            if (download.get()) {
+        // 如果标记为正在下载，检查是否已超时（可能是上次崩溃残留）
+        if (download.get()) {
+            long elapsed = System.currentTimeMillis() - downloadStartTime.get();
+            if (elapsed > MAX_DOWNLOAD_DURATION_MS) {
+                log.warn("检测到残留任务标记（已运行 {} 分钟），自动重置", elapsed / 60000);
+                download.set(false);
+                downloadStartTime.set(0);
+            } else {
                 throw new IllegalStateException("存在未完成任务，请等待...");
             }
-            download.set(true);
+        }
+        // CAS 确保线程安全：从 false 改为 true，失败则说明有并发竞争
+        if (!download.compareAndSet(false, true)) {
+            throw new IllegalStateException("存在未完成任务，请等待...");
         }
     }
 
