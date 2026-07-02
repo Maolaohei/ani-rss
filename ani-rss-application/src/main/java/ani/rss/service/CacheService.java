@@ -35,15 +35,14 @@ public class CacheService {
     }
 
     public JsonObject getScore(String source) {
-        if (!AfdianUtil.verifyExpirationTime()) {
-            return new JsonObject();
-        }
-        Config config = ConfigUtil.CONFIG;
-        String outTradeNo = config.getOutTradeNo();
-        boolean tryOut = config.getTryOut();
-        if (StrUtil.isBlank(outTradeNo) || tryOut) {
-            return new JsonObject();
-        }
+        // Fork版本：跳过捐赠验证，直接获取评分
+        return getScoreFromCache(source, "");
+    }
+
+    /**
+     * 从缓存服务获取评分（带订单号验证）
+     */
+    private JsonObject getScoreFromCache(String source, String outTradeNo) {
 
         JsonObject jsonObject = new JsonObject();
         try {
