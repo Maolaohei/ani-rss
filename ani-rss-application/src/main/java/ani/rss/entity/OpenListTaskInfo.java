@@ -22,7 +22,7 @@ public class OpenListTaskInfo implements Serializable {
     private String creator;
 
     @SerializedName(value = "creatorRole", alternate = "creator_role")
-    private Integer creatorRole;
+    private Object creatorRole;
 
     private State state;
 
