@@ -28,7 +28,6 @@ public class RssTask implements BaseTask {
 
     public static void download(AtomicBoolean loop) {
         DownloadService downloadService = SpringUtil.getBean(DownloadService.class);
-        downloadStartTime.set(System.currentTimeMillis());
 
         try {
             if (!TorrentUtil.login()) {
@@ -83,6 +82,8 @@ public class RssTask implements BaseTask {
         if (!download.compareAndSet(false, true)) {
             throw new IllegalStateException("存在未完成任务，请等待...");
         }
+        // CAS 成功后立即记录开始时间，避免其他线程误判超时
+        downloadStartTime.set(System.currentTimeMillis());
     }
 
     @Override
