@@ -10,6 +10,7 @@ import ani.rss.util.other.ConfigUtil;
 import cn.hutool.core.lang.Assert;
 import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.core.util.RandomUtil;
+import cn.hutool.crypto.SecureUtil;
 import io.swagger.v3.oas.annotations.Operation;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -45,7 +46,12 @@ public class LoginController extends BaseController {
             myLogin.setIp("");
         }
 
-        if (username.equals(myUsername) && password.equals(myPassword)) {
+        // 同时支持 MD5（旧版）和 SHA-256（新版）验证
+        boolean passwordMatch = password.equals(myPassword)
+                || password.equals(SecureUtil.md5(myPassword))
+                || password.equals(SecureUtil.sha256(myPassword));
+
+        if (username.equals(myUsername) && passwordMatch) {
             AuthUtil.resetKey();
             clearLimitLoginAttempts();
             log.info("登录成功 {} ip: {}", username, ip);

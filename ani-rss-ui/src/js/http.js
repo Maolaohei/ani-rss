@@ -315,7 +315,7 @@ export let getTgUpdates = (notificationConfig) => api.post('api/getTgUpdates', n
  */
 export let login = (user) => {
     user = JSON.parse(JSON.stringify(user))
-    user.password = CryptoJS['MD5'](user.password).toString()
+    user.password = CryptoJS['SHA256'](user.password).toString()
     return api.post('api/login', user)
 }
 

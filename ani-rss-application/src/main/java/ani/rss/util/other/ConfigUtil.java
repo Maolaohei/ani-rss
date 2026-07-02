@@ -65,7 +65,7 @@ public class ConfigUtil {
         String ovaDownloadPathTemplate = StrFormatter.format("{}/${title}", ovaDownloadPath);
         String completedPathTemplate = StrFormatter.format("{}/${title}/Season ${season}", completedPath);
 
-        String password = SecureUtil.md5("admin");
+        String password = SecureUtil.sha256("admin");
 
         String notificationTemplate = """
                 ${emoji}${emoji}${emoji}

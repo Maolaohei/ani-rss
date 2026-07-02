@@ -165,6 +165,7 @@ public class TorrentUtil {
         try {
             return DOWNLOAD.login(ConfigUtil.CONFIG);
         } catch (Exception e) {
+            log.error("下载工具登录失败: {}", e.getMessage());
             return false;
         }
     }

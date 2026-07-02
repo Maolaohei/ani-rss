@@ -93,7 +93,7 @@ const saveConfig = () => {
 
   my_config.login.username = username
   if (password) {
-    my_config.login.password = CryptoJS['MD5'](password).toString();
+    my_config.login.password = CryptoJS['SHA256'](password).toString();
   }
 
   http.setConfig(my_config)

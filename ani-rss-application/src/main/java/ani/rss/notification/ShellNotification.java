@@ -55,6 +55,12 @@ public class ShellNotification implements BaseNotification {
         shell = replaceNotificationTemplate(ani, notificationConfig, text, notificationStatusEnum);
         shell = shell.trim();
 
+        // 安全检查：检测常见 shell 注入模式
+        if (containsShellInjection(shell)) {
+            log.error("检测到潜在 shell 注入，已阻止执行: {}", shell);
+            return false;
+        }
+
         log.debug(shell);
 
         Process process = null;
@@ -116,6 +122,29 @@ public class ShellNotification implements BaseNotification {
                 throw new CompletionException("流读取异常", e);
             }
         });
+    }
+
+    /**
+     * 检测 shell 注入模式
+     */
+    private static boolean containsShellInjection(String command) {
+        // 检测管道、命令替换、后台执行等危险模式
+        String[] dangerousPatterns = {
+                "\\$\\(",        // $(command)
+                "`[^`]*`",      // `command`
+                ";\\s*rm\\s",   // ; rm
+                "\\|\\s*rm\\s", // | rm
+                "&&\\s*rm\\s",  // && rm
+                ">\\s*/dev",    // > /dev
+                "mkfs\\s",      // mkfs
+                "dd\\s+if=",    // dd if=
+        };
+        for (String pattern : dangerousPatterns) {
+            if (command.matches("(?i).*" + pattern + ".*")) {
+                return true;
+            }
+        }
+        return false;
     }
 
 }
