@@ -352,9 +352,7 @@ let batchAddition = async () => {
     }
     ElMessage.success("添加成功")
 
-    setTimeout(() => {
-      location.reload()
-    }, 1000)
+    window.$reLoadList()
   } catch (e) {
     ElMessage.error(e)
   } finally {
