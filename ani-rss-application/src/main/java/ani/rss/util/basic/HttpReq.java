@@ -20,6 +20,7 @@ import java.net.*;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
 @Slf4j
@@ -204,15 +205,10 @@ public class HttpReq {
     /**
      * 执行请求并自动关闭响应（无返回值）
      */
-    public static void thenClose(HttpRequest req, ThrowingConsumer<HttpResponse> consumer) {
+    public static void thenClose(HttpRequest req, Consumer<HttpResponse> consumer) {
         try (HttpResponse res = req.execute()) {
             consumer.accept(res);
         }
-    }
-
-    @FunctionalInterface
-    public interface ThrowingConsumer<T> {
-        void accept(T t) throws Exception;
     }
 
 }
