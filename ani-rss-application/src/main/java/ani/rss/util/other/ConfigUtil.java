@@ -239,6 +239,7 @@ public class ConfigUtil {
                 .setBgmApi("https://api.bgm.tv")
                 .setAutoStart(false)
                 .setAllowCors(false)
+                .setNetworkPrefer("")
                 .setUuid(UUID.randomUUID().toString());
     }
 

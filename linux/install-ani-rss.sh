@@ -130,6 +130,9 @@ deploy_app() {
     # 保存仓库源配置
     echo "$GITHUB_REPO" > "$REPO_FILE"
 
+    # 保存网络配置
+    echo "$NETWORK_OPTS" > "$INSTALL_DIR/network.conf"
+
     # 设置权限
     chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
     chmod 750 "$INSTALL_DIR"
@@ -157,6 +160,24 @@ configure_port() {
     echo -e "${GREEN}已选择端口: $SERVER_PORT${NC}"
 }
 
+# 配置网络协议优先级
+configure_network() {
+    echo -e "${YELLOW}正在配置网络协议...${NC}"
+    echo "  1) IPv4 优先 (推荐海外VPS, 解决连接超时问题)"
+    echo "  2) IPv6 优先 (默认)"
+    read -p "请选择 [1/2] (默认2): " network_choice
+    case "$network_choice" in
+        1)
+            NETWORK_OPTS="-Djava.net.preferIPv4Stack=true"
+            echo -e "${GREEN}已选择: IPv4 优先${NC}"
+            ;;
+        *)
+            NETWORK_OPTS=""
+            echo -e "${GREEN}已选择: IPv6 优先 (默认)${NC}"
+            ;;
+    esac
+}
+
 # 配置系统服务
 setup_service() {
     echo -e "${YELLOW}正在配置系统服务...${NC}"
@@ -180,7 +201,7 @@ Environment="SERVER_PORT=$SERVER_PORT"
 Environment="CONFIG=$INSTALL_DIR/config"
 Environment="SWAGGER_ENABLED=false"
 Environment="MCP_ENABLED=false"
-Environment="JAVA_OPTS=-Xms64m -Xmx512m -Xss256k -XX:+UseG1GC"
+Environment="JAVA_OPTS=-Xms64m -Xmx512m -Xss256k -XX:+UseG1GC $NETWORK_OPTS"
 
 [Install]
 WantedBy=multi-user.target
@@ -227,8 +248,9 @@ main() {
     fi
     install_jdk
     create_user
-    deploy_app
     configure_port
+    configure_network
+    deploy_app
     setup_service
     verify_install
     show_info

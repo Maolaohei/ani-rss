@@ -729,4 +729,13 @@ public class Config implements Serializable {
 
     @Schema(description = "唯一ID")
     private String uuid;
+
+    /**
+     * 网络协议优先级
+     * "" 或 null - 系统默认
+     * "ipv4" - IPv4 优先
+     * "ipv6" - IPv6 优先
+     */
+    @Schema(description = "网络协议优先级")
+    private String networkPrefer;
 }

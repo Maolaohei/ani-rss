@@ -12,6 +12,7 @@ SERVICE="ani-rss.service"
 SERVICE_FILE="/etc/systemd/system/${SERVICE}"
 INSTALL_DIR="/opt/ani-rss"
 REPO_FILE="$INSTALL_DIR/repo.conf"
+NETWORK_CONF="$INSTALL_DIR/network.conf"
 
 # 仓库源定义
 REPO_OFFICIAL="wushuo894/ani-rss"
@@ -36,6 +37,7 @@ show_help() {
     echo "  ani-rss status    查看服务状态"
     echo "  ani-rss log       查看服务日志"
     echo "  ani-rss switch    切换版本(分支版/官方版)"
+    echo "  ani-rss network   切换IPv4/IPv6优先级"
     echo "  ani-rss uninstall 卸载"
     echo -e "  ani-rss help      显示帮助信息${NC}"
 }
@@ -80,6 +82,50 @@ switch_version() {
     echo -e "${GREEN}已切换到: ${GITHUB_REPO}${NC}"
 }
 
+# 切换网络协议优先级
+switch_network() {
+    current_opts=$(cat "$NETWORK_CONF" 2>/dev/null || echo "")
+
+    if [ -n "$current_opts" ]; then
+        echo -e "${YELLOW}当前网络: IPv4 优先${NC}"
+    else
+        echo -e "${YELLOW}当前网络: IPv6 优先${NC}"
+    fi
+
+    echo ""
+    echo -e "${YELLOW}请选择网络协议:${NC}"
+    echo "  1) IPv4 优先 (推荐海外VPS, 解决连接超时问题)"
+    echo "  2) IPv6 优先 (默认)"
+    read -p "请选择 [1/2]: " network_choice
+
+    case "$network_choice" in
+        1) new_opts="-Djava.net.preferIPv4Stack=true" ;;
+        2) new_opts="" ;;
+        *) echo -e "${RED}无效选择${NC}" && exit 1 ;;
+    esac
+
+    if [ "$current_opts" = "$new_opts" ]; then
+        echo -e "${GREEN}设置未变化，无需修改${NC}"
+        return
+    fi
+
+    echo "$new_opts" > "$NETWORK_CONF"
+
+    # 更新 systemd 服务文件中的 JAVA_OPTS
+    base_opts="-Xms64m -Xmx512m -Xss256k -XX:+UseG1GC"
+    new_java_opts="$base_opts $new_opts"
+    sed -i "s|^Environment=\"JAVA_OPTS=.*\"|Environment=\"JAVA_OPTS=$new_java_opts\"|" "$SERVICE_FILE"
+
+    systemctl daemon-reload
+    systemctl restart "$SERVICE"
+
+    if [ -z "$new_opts" ]; then
+        echo -e "${GREEN}已切换到 IPv6 优先，服务已重启${NC}"
+    else
+        echo -e "${GREEN}已切换到 IPv4 优先，服务已重启${NC}"
+    fi
+}
+
 # 操作执行函数
 service_action() {
     case $1 in
@@ -115,6 +161,9 @@ service_action() {
             ;;
         switch)
             switch_version
+            ;;
+        network)
+            switch_network
             ;;
         uninstall)
             /bin/bash -c "$(curl -fsSL https://github.com/Maolaohei/ani-rss/raw/master/linux/uninstall-ani-rss.sh)"

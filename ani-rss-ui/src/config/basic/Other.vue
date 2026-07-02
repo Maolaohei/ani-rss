@@ -69,6 +69,20 @@
     <el-form-item label="开机自启">
       <el-switch v-model="props.config['autoStart']"/>
     </el-form-item>
+    <el-form-item label="网络协议">
+      <div class="full-width">
+        <el-select v-model="props.config['networkPrefer']" style="width: 200px;">
+          <el-option label="系统默认" value=""/>
+          <el-option label="IPv4 优先" value="ipv4"/>
+          <el-option label="IPv6 优先" value="ipv6"/>
+        </el-select>
+        <div style="margin-top: 4px;">
+          <el-text class="mx-1" size="small" type="warning">
+            切换后服务将自动重启，海外 VPS 推荐选择 IPv4 优先
+          </el-text>
+        </div>
+      </div>
+    </el-form-item>
   </el-form>
 </template>
 
