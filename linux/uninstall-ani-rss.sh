@@ -12,6 +12,7 @@ NC='\033[0m' # 重置颜色
 SERVICE_NAME="ani-rss.service"
 INSTALL_DIR="/opt/ani-rss"
 SERVICE_USER="ani-rss"
+RUN_MODE_FILE="$INSTALL_DIR/run.mode"
 
 # 检查root权限
 check_root() {
@@ -78,6 +79,12 @@ remove_install_dir() {
 
 # 删除系统用户
 remove_service_user() {
+    local run_mode=$(cat "$RUN_MODE_FILE" 2>/dev/null || echo "root")
+    if [ "$run_mode" = "root" ]; then
+        echo -e "${YELLOW}root 模式，跳过用户删除${NC}"
+        return
+    fi
+
     echo -e "${YELLOW}移除系统用户...${NC}"
     if id "$SERVICE_USER" &>/dev/null; then
         userdel -r "$SERVICE_USER" >/dev/null 2>&1 && \
@@ -107,8 +114,9 @@ verify_uninstall() {
         error=1
     fi
 
-    # 检查用户
-    if id "$SERVICE_USER" &>/dev/null; then
+    # 检查用户 (非root模式)
+    local run_mode=$(cat "$RUN_MODE_FILE" 2>/dev/null || echo "root")
+    if [ "$run_mode" != "root" ] && id "$SERVICE_USER" &>/dev/null; then
         echo -e "${RED}错误：系统用户仍然存在${NC}"
         error=1
     fi
