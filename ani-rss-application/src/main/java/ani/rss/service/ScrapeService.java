@@ -326,8 +326,9 @@ public class ScrapeService {
         HttpReq.thenClose(
                 HttpReq.get(tmdbImage + "/t/p/original" + tmdbPath),
                 res -> {
-                    try (InputStream inputStream = res.bodyStream()) {
-                        FileUtil.writeFromStream(inputStream, saveFile, true);
+                    try {
+                        FileUtil.writeFromStream(res.bodyStream(), saveFile, true);
+                    } catch (Exception ignored) {
                     }
                 });
 
