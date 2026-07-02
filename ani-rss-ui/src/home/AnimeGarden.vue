@@ -288,6 +288,8 @@ let batchAddition = async () => {
     }
     ElMessage.success("添加成功")
 
+    // 刷新 AnimeGarden 列表以更新"已订阅"标记
+    list()
     window.$reLoadList()
   } catch (e) {
     ElMessage.error(e)

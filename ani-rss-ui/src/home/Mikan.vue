@@ -352,6 +352,13 @@ let batchAddition = async () => {
     }
     ElMessage.success("添加成功")
 
+    // 刷新 Mikan 列表以更新"已订阅"标记
+    if (seasonSelect.value) {
+      let body = data.value.seasons.filter(item => item['seasonLabel'] === seasonSelect.value)
+      if (body.length) {
+        list(body[0])
+      }
+    }
     window.$reLoadList()
   } catch (e) {
     ElMessage.error(e)
