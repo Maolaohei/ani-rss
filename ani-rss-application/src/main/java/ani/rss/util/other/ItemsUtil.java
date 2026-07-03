@@ -272,6 +272,12 @@ public class ItemsUtil {
             items = expandMultiEpisode(ani, items);
         }
 
+        // v2: 按画质优先级 + 体积兜底排序，再按集数去重
+        if (RenameUtil.isNamingV2(ani)) {
+            items = sortByQualityAndSize(items);
+            return CollUtil.distinct(items, item -> item.getEpisode().toString(), true);
+        }
+
         return CollUtil.distinct(items, item -> item.getEpisode().toString(), true);
     }
 
@@ -544,6 +550,30 @@ public class ItemsUtil {
                 .setSubgroup(item.getSubgroup())
                 .setPubDate(item.getPubDate());
         return clone;
+    }
+
+    /**
+     * 按画质优先级排序，同画质按体积降序
+     * 优先级：2160p > 1080p > 720p > 480p > 其他
+     */
+    private static List<Item> sortByQualityAndSize(List<Item> items) {
+        return items.stream()
+                .sorted(Comparator
+                        .comparingInt((Item item) -> getQualityPriority(item.getTitle())).reversed()
+                        .thenComparing(Comparator.comparingLong((Item item) ->
+                                item.getLength() != null ? item.getLength() : 0L).reversed()))
+                .toList();
+    }
+
+    /**
+     * 画质优先级评分，越高越好
+     */
+    private static int getQualityPriority(String title) {
+        if (title.contains("2160p") || title.contains("4K") || title.contains("2160P")) return 40;
+        if (title.contains("1080p") || title.contains("1080P")) return 30;
+        if (title.contains("720p") || title.contains("720P")) return 20;
+        if (title.contains("480p") || title.contains("480P")) return 10;
+        return 0;
     }
 
     public static String getSubgroup(List<Item> items) {
