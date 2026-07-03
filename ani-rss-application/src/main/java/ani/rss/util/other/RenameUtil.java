@@ -86,20 +86,20 @@ public class RenameUtil {
      */
     public static List<Double> extractEpisodeRange(String title) {
         // 中文范围: 第1-6话
-        Matcher cnM = ReUtil.getMatcher(CN_RANGE_REG, title);
+        Matcher cnM = Pattern.compile(CN_RANGE_REG).matcher(title);
         if (cnM.find()) {
             return expandRange(cnM.group(1), cnM.group(2));
         }
 
         // Vol范围: Vol.01-Vol.06 → 去掉 Vol 前缀后匹配
         String volStripped = title.replaceAll("(?i)Vol\\.?\\s*", "");
-        Matcher volM = ReUtil.getMatcher(EP_RANGE_REG, volStripped);
+        Matcher volM = Pattern.compile(EP_RANGE_REG).matcher(volStripped);
         if (volM.find()) {
             return expandRange(volM.group(1), volM.group(2));
         }
 
         // 普通范围: 01-06, 01~06 (排除分数 1/2 和年份 2024)
-        Matcher rangeM = ReUtil.getMatcher(EP_RANGE_REG, title);
+        Matcher rangeM = Pattern.compile(EP_RANGE_REG).matcher(title);
         if (rangeM.find()) {
             String start = rangeM.group(1);
             String end = rangeM.group(2);
@@ -139,10 +139,10 @@ public class RenameUtil {
      * @return 集数，0 表示未识别
      */
     public static int extractPartEpisode(String title) {
-        Matcher m = ReUtil.getMatcher(PART_REG, title);
+        Matcher m = Pattern.compile(PART_REG).matcher(title);
         if (!m.find()) {
             // 检查分数格式 (1/2)
-            Matcher fm = ReUtil.getMatcher(FRACTION_REG, title);
+            Matcher fm = Pattern.compile(FRACTION_REG).matcher(title);
             if (fm.find()) {
                 return Integer.parseInt(fm.group(1));
             }
