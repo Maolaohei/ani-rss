@@ -107,6 +107,11 @@ public class RenameUtil {
             if (start.length() >= 4 || end.length() >= 4) {
                 return null;
             }
+            // 排除季度号: S04 - 12 不应被视为范围 4-12
+            int rangeStart = rangeM.start();
+            if (rangeStart > 0 && Character.toUpperCase(title.charAt(rangeStart - 1)) == 'S') {
+                return null;
+            }
             return expandRange(start, end);
         }
 
@@ -223,6 +228,13 @@ public class RenameUtil {
             // OVA 使用 S00 命名
             season = 0;
             title = renameDel(title);
+            // 防御：标题为空时从 RSS 标题中提取番剧名
+            if (StrUtil.isBlank(title)) {
+                Matcher bracketM = Pattern.compile("\\[(.+?)]").matcher(itemTitle);
+                if (bracketM.find() && bracketM.find()) {
+                    title = bracketM.group(1).trim();
+                }
+            }
         }
 
         Boolean customEpisode = ani.getCustomEpisode();
@@ -453,6 +465,10 @@ public class RenameUtil {
                 String fieldName = LambdaUtil.getFieldName(func1);
                 String s = StrFormatter.format("${{}}", fieldName);
                 String v = func1.callWithRuntimeException(object).toString();
+                // 路径安全: title/themoviedbName 中的 / 替换为全角，避免多层目录
+                if ("title".equals(fieldName) || "themoviedbName".equals(fieldName)) {
+                    v = v.replace("/", "／");
+                }
                 template = template.replace(s, v);
             } catch (Exception ignored) {
             }
