@@ -46,6 +46,11 @@ public class ItemsUtil {
                 .toList());
 
         if (!config.getStandbyRss()) {
+            // v2: 即使无备用RSS，也要按画质排序+去重
+            if (RenameUtil.isNamingV2(ani)) {
+                items = sortByQualityAndSize(items);
+                items = CollUtil.distinct(items, item -> item.getEpisode().toString(), true);
+            }
             items.sort(Comparator.comparingDouble(Item::getEpisode));
             return items;
         }
