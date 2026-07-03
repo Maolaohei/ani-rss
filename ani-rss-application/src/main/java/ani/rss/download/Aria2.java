@@ -8,6 +8,7 @@ import ani.rss.entity.Item;
 import ani.rss.entity.TorrentsInfo;
 import ani.rss.util.basic.HttpReq;
 import ani.rss.util.basic.RenameCacheUtil;
+import ani.rss.util.other.RenameUtil;
 import cn.hutool.core.codec.Base64;
 import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.io.FileUtil;
@@ -153,7 +154,8 @@ public class Aria2 implements BaseDownload {
         log.info("aria2 添加下载 => name: {} id: {}", name, id);
 
         Boolean ova = ani.getOva();
-        if (!ova) {
+        boolean v2 = RenameUtil.isNamingV2(ani);
+        if (!ova || v2) {
             RenameCacheUtil.put(id, name);
         }
 
@@ -228,9 +230,25 @@ public class Aria2 implements BaseDownload {
 
         Assert.notEmpty(files, "映射路径存在错误, 无法重命名");
 
+        // 统计视频文件数量，判断是否为多文件合集
+        long videoCount = files.stream()
+                .filter(f -> FileUtils.isVideoFormat(FileUtil.extName(f.getName())))
+                .count();
+        boolean isMultiFile = videoCount > 1;
+
         for (File src : files) {
             String name = src.getName();
-            String fileReName = getFileReName(name, reName);
+            String ext = FileUtil.extName(name);
+            boolean isSub = FileUtils.isSubtitleFormat(ext);
+
+            String fileReName;
+            if (isMultiFile) {
+                // 多文件合集：从原始文件名提取集数
+                fileReName = getFileReNameMulti(name, reName, isSub);
+            } else {
+                fileReName = getFileReName(name, reName);
+            }
+
             File newPath = new File(downloadDir + "/" + fileReName);
             if (FileUtil.equals(src, newPath)) {
                 continue;

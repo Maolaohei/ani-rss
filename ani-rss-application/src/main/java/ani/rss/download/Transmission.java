@@ -10,6 +10,7 @@ import ani.rss.entity.web.Header;
 import ani.rss.enums.TorrentsTags;
 import ani.rss.util.basic.HttpReq;
 import ani.rss.util.basic.RenameCacheUtil;
+import ani.rss.util.other.RenameUtil;
 import cn.hutool.core.codec.Base64;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.io.resource.ResourceUtil;
@@ -177,7 +178,8 @@ public class Transmission implements BaseDownload {
         log.info("tr 添加下载 => name: {} id: {}", name, id);
 
         Boolean ova = ani.getOva();
-        if (!ova) {
+        boolean v2 = RenameUtil.isNamingV2(ani);
+        if (!ova || v2) {
             RenameCacheUtil.put(id, name);
         }
 

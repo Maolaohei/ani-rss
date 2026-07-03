@@ -6,6 +6,7 @@ import lombok.experimental.Accessors;
 
 import java.io.Serializable;
 import java.util.Date;
+import java.util.List;
 
 /**
  * 下载项
@@ -79,4 +80,16 @@ public class Item implements Serializable {
      */
     @Schema(description = "发布时间")
     private Date pubDate;
+
+    /**
+     * 集数范围 (合集展开后的完整集数列表)
+     */
+    @Schema(description = "集数范围")
+    private List<Double> episodeRange;
+
+    /**
+     * 版本号 (v2, v3 等，用于洗版判断)
+     */
+    @Schema(description = "版本号")
+    private Integer version;
 }

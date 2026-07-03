@@ -337,4 +337,10 @@ public class Ani implements Serializable {
      */
     @Schema(description = "单个订阅自定义标签")
     private List<String> customTags;
+
+    /**
+     * 命名版本 1=旧逻辑 2=新逻辑(范围展开/OVA season0/宽松正则)
+     */
+    @Schema(description = "命名版本 1=旧逻辑 2=新逻辑")
+    private Integer namingVersion;
 }

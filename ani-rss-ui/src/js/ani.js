@@ -55,5 +55,6 @@ export let aniData = {
     "customTags": [],
     "customTagsEnable": false,
     "customPriorityKeywordsEnable": false,
-    "customPriorityKeywords": []
+    "customPriorityKeywords": [],
+    "namingVersion": 2
 }
