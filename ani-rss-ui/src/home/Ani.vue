@@ -213,7 +213,7 @@
                 <br>
                 <el-input v-model:model-value="props.ani['customRenameTemplate']"
                           :disabled="!props.ani['customRenameTemplateEnable']"
-                          placeholder="[${subgroup}] ${title} S${seasonFormat}.E${episodeFormat}"/>
+                          placeholder="[${subgroup}] ${title} S${seasonFormat}.E${episodeFormat} ${episodeTitle}"/>
                 <br>
                 <el-link
                     style="font-size: var(--el-font-size-extra-small)"

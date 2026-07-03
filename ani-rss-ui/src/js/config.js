@@ -69,7 +69,7 @@ export let configData = {
     "apiKey": "",
     "downloadNew": false,
     "innerIP": false,
-    "renameTemplate": "[${subgroup}] ${title} S${seasonFormat}.E${episodeFormat}",
+    "renameTemplate": "[${subgroup}] ${title} S${seasonFormat}.E${episodeFormat} ${episodeTitle}",
     "renameDelYear": false,
     "renameDelTmdbId": false,
     "maxFileNameLength": 0,
