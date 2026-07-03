@@ -375,6 +375,10 @@ public class qBittorrent implements BaseDownload {
 
         Ani ani = aniOpt.get();
 
+        // 检查是否为新版命名
+        Integer namingVersion = ani.getNamingVersion();
+        boolean isNamingV2 = namingVersion != null && namingVersion == 2;
+
         List<String> priorityKeywords = getPriorityKeywords(config, ani);
 
         List<FileEntity> files = files(torrentsInfo, true, config);
@@ -411,9 +415,25 @@ public class qBittorrent implements BaseDownload {
 
         List<String> newNames = new ArrayList<>();
 
+        // 统计视频文件数量，判断是否为多文件合集
+        long videoCount = files.stream()
+                .filter(f -> FileUtils.isVideoFormat(FileUtil.extName(f.getName())))
+                .count();
+        boolean isMultiFile = videoCount > 1;
+
         for (FileEntity fileEntity : files) {
             String name = fileEntity.getName();
-            String newPath = getFileReName(name, reName);
+            String ext = FileUtil.extName(name);
+            boolean isSub = FileUtils.isSubtitleFormat(ext);
+
+            String newPath;
+            if (isMultiFile && isNamingV2) {
+                // 多文件合集：从原始文件名提取集数
+                newPath = getFileReNameMulti(name, reName, isSub);
+            } else {
+                // 单文件：使用原逻辑
+                newPath = getFileReName(name, reName);
+            }
 
             if (
                     FileUtils.isSubtitleFormat(newPath) &&

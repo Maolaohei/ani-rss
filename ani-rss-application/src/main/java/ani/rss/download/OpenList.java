@@ -203,35 +203,90 @@ public class OpenList implements BaseDownload {
 
             List<OpenListFileInfo> openListFileInfos = findFiles(path);
 
-            // 取大小最大的一个视频文件
-            Optional<OpenListFileInfo> videoFileOpt = openListFileInfos.stream()
-                    .filter(openListFileInfo ->
-                            FileUtils.isVideoFormat(openListFileInfo.getName()))
-                    .findFirst();
-
-            if (videoFileOpt.isEmpty()) {
-                return false;
-            }
-            OpenListFileInfo videoFile = videoFileOpt.get();
+            // 分离视频和字幕文件
+            List<OpenListFileInfo> videoList = openListFileInfos.stream()
+                    .filter(f -> FileUtils.isVideoFormat(f.getName()))
+                    .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
+                    .toList();
             List<OpenListFileInfo> subtitleList = openListFileInfos.stream()
-                    .filter(openListFileInfo ->
-                            FileUtils.isSubtitleFormat(openListFileInfo.getName()))
+                    .filter(f -> FileUtils.isSubtitleFormat(f.getName()))
                     .toList();
 
-            Map<String, String> renameMap = new HashMap<>();
-            renameMap.put(videoFile.getName(), reName + "." + FileUtil.extName(videoFile.getName()));
-            for (OpenListFileInfo openListFileInfo : subtitleList) {
-                String name = openListFileInfo.getName();
-                String extName = FileUtil.extName(name);
-                String newName = reName;
-                String lang = FileUtil.extName(FileUtil.mainName(name));
-                if (StrUtil.isNotBlank(lang)) {
-                    newName = newName + "." + lang;
-                }
-                renameMap.put(name, newName + "." + extName);
+            if (videoList.isEmpty()) {
+                return false;
             }
 
             Boolean rename = config.getRename();
+            Map<String, String> renameMap = new HashMap<>();
+
+            if (videoList.size() == 1) {
+                // 单文件：原有逻辑
+                OpenListFileInfo videoFile = videoList.get(0);
+                renameMap.put(videoFile.getName(), reName + "." + FileUtil.extName(videoFile.getName()));
+                for (OpenListFileInfo sub : subtitleList) {
+                    String name = sub.getName();
+                    String ext = FileUtil.extName(name);
+                    String newName = reName;
+                    String lang = FileUtil.extName(FileUtil.mainName(name));
+                    if (StrUtil.isNotBlank(lang)) {
+                        newName = newName + "." + lang;
+                    }
+                    renameMap.put(name, newName + "." + ext);
+                }
+            } else {
+                // 多文件合集：逐视频提取集数，匹配关联字幕
+                for (OpenListFileInfo video : videoList) {
+                    String videoName = video.getName();
+                    String videoBase = FileUtil.mainName(videoName);
+                    String videoExt = FileUtil.extName(videoName);
+
+                    // 从文件名提取集数
+                    String ep = extractEpisodeFromFileName(videoName);
+                    String videoReName;
+                    if (ep != null && reName.contains(".E")) {
+                        videoReName = reName.replaceAll("\\.E\\d+(\\.5)?", ".E" + ep);
+                    } else if (ep != null && reName.matches(".*[Ss]\\d+.*E\\d+.*")) {
+                        videoReName = reName.replaceAll("E\\d+(\\.5)?", "E" + ep);
+                    } else {
+                        videoReName = reName;
+                    }
+                    renameMap.put(videoName, videoReName + "." + videoExt);
+
+                    // 匹配关联字幕：文件名前缀相同的字幕
+                    for (OpenListFileInfo sub : subtitleList) {
+                        String subName = sub.getName();
+                        String subBase = FileUtil.mainName(subName);
+                        String subExt = FileUtil.extName(subName);
+                        // 字幕基础名 = 视频基础名 去掉语言标签
+                        String subBaseClean = subBase;
+                        String lang = FileUtil.extName(subBase);
+                        if (StrUtil.isNotBlank(lang) && !FileUtils.isVideoFormat(lang)) {
+                            subBaseClean = FileUtil.mainName(subBase);
+                        }
+                        if (videoBase.equals(subBase) || videoBase.equals(subBaseClean)) {
+                            String subReName = videoReName;
+                            if (StrUtil.isNotBlank(lang) && !FileUtils.isVideoFormat(lang)) {
+                                subReName = subReName + "." + lang;
+                            }
+                            renameMap.put(subName, subReName + "." + subExt);
+                        }
+                    }
+                }
+                // 未匹配到视频的字幕，用默认 reName
+                for (OpenListFileInfo sub : subtitleList) {
+                    if (renameMap.containsKey(sub.getName())) continue;
+                    String name = sub.getName();
+                    String ext = FileUtil.extName(name);
+                    String newName = reName;
+                    String lang = FileUtil.extName(FileUtil.mainName(name));
+                    if (StrUtil.isNotBlank(lang)) {
+                        newName = newName + "." + lang;
+                    }
+                    renameMap.put(name, newName + "." + ext);
+                }
+            }
+
+            String firstVideoPath = videoList.get(0).getPath();
 
             if (rename) {
                 // 重命名
@@ -245,7 +300,7 @@ public class OpenList implements BaseDownload {
                                     "new_name", newName
                             );
                         }).toList();
-                fsBatchRename(renameObjects, videoFile.getPath());
+                fsBatchRename(renameObjects, firstVideoPath);
             }
 
             // 移动
@@ -253,7 +308,7 @@ public class OpenList implements BaseDownload {
                     .stream()
                     .map(m -> rename ? m.getValue() : m.getKey())
                     .toList();
-            fsMove(videoFile.getPath(), savePath, names);
+            fsMove(firstVideoPath, savePath, names);
 
             // 删除残留文件夹
             fsRemove(savePath, List.of(reName));

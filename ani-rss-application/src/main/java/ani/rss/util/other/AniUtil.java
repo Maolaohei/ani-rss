@@ -374,8 +374,8 @@ public class AniUtil {
             return;
         }
 
-        if (ova) {
-            // 剧场版不进行迁移
+        if (ova && !RenameUtil.isNamingV2(ani)) {
+            // 旧版剧场版不进行迁移，新版 OVA v2 支持迁移
             return;
         }
 
@@ -504,7 +504,8 @@ public class AniUtil {
                 .setCustomCompleted(false)
                 .setCustomCompletedPathTemplate("")
                 .setCustomTags(new ArrayList<>())
-                .setCustomTagsEnable(false);
+                .setCustomTagsEnable(false)
+                .setNamingVersion(2);
     }
 
 

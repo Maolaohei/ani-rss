@@ -129,6 +129,13 @@
             <el-form-item label="剧场版">
               <el-switch v-model:model-value="props.ani.ova"/>
             </el-form-item>
+            <el-form-item label="新版命名">
+              <el-switch v-model:model-value="props.ani['namingVersion']"
+                         :active-value="2" :inactive-value="1"/>
+              <el-text size="small" type="info" style="margin-left: 8px;">
+                范围展开/OVA集数/宽松正则
+              </el-text>
+            </el-form-item>
             <el-form-item label="启用">
               <el-switch v-model:model-value="props.ani.enable"/>
             </el-form-item>
@@ -206,7 +213,7 @@
                 <br>
                 <el-input v-model:model-value="props.ani['customRenameTemplate']"
                           :disabled="!props.ani['customRenameTemplateEnable']"
-                          placeholder="${title} S${seasonFormat}E${episodeFormat}"/>
+                          placeholder="[${subgroup}] ${title} S${seasonFormat}.E${episodeFormat}"/>
                 <br>
                 <el-link
                     style="font-size: var(--el-font-size-extra-small)"

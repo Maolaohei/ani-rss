@@ -126,6 +126,69 @@ public interface BaseDownload {
     }
 
     /**
+     * 多文件合集重命名：从原始文件名提取集数，替换到重命名模板中
+     *
+     * @param name       原始文件名
+     * @param reName     重命名模板 (含 SxxExx)
+     * @param isSubtitle 是否为字幕文件
+     * @return 最终命名
+     */
+    default String getFileReNameMulti(String name, String reName, boolean isSubtitle) {
+        String ext = FileUtil.extName(name);
+        if (StrUtil.isBlank(ext)) {
+            return name;
+        }
+
+        // 从原始文件名尝试提取集数
+        String originalEpisode = extractEpisodeFromFileName(name);
+
+        String newPath;
+        if (originalEpisode != null) {
+            // 支持 .E 和 E 两种模板格式
+            if (reName.contains(".E")) {
+                newPath = reName.replaceAll("\\.E\\d+(\\.5)?", ".E" + originalEpisode);
+            } else if (reName.contains("E") && reName.matches(".*[Ss]\\d+.*E\\d+.*")) {
+                newPath = reName.replaceAll("E\\d+(\\.5)?", "E" + originalEpisode);
+            } else {
+                newPath = reName;
+            }
+        } else {
+            newPath = reName;
+        }
+
+        if (isSubtitle) {
+            String s = FileUtil.extName(FileUtil.mainName(name));
+            if (StrUtil.isNotBlank(s)) {
+                newPath = newPath + "." + s;
+            }
+            newPath = newPath + "." + ext;
+        } else if (FileUtils.isVideoFormat(ext)) {
+            newPath = newPath + "." + ext;
+        } else {
+            return name;
+        }
+
+        return name.equals(newPath) ? name : newPath;
+    }
+
+    /**
+     * 从文件名中提取集数 (EP01, - 01, [01] 等格式)
+     */
+    default String extractEpisodeFromFileName(String name) {
+        String mainName = FileUtil.mainName(name);
+        // EP01, EP 01, e01
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?:[Ee][Pp]?)\\s*(\\d+(?:\\.5)?)").matcher(mainName);
+        if (m.find()) return m.group(1);
+        // - 01, -01
+        m = java.util.regex.Pattern.compile("-\\s*(\\d+(?:\\.5)?)").matcher(mainName);
+        if (m.find()) return m.group(1);
+        // [01], 【01】
+        m = java.util.regex.Pattern.compile("[\\[【](\\d+(?:\\.5)?)[\\]】]").matcher(mainName);
+        if (m.find()) return m.group(1);
+        return null;
+    }
+
+    /**
      * 获取新任务的tag
      *
      * @param ani

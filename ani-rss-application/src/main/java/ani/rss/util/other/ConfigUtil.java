@@ -181,7 +181,7 @@ public class ConfigUtil {
                 .setApiKey("")
                 .setDownloadNew(false)
                 .setInnerIP(false)
-                .setRenameTemplate("[${subgroup}] ${title} S${seasonFormat}E${episodeFormat}")
+                .setRenameTemplate("[${subgroup}] ${title} S${seasonFormat}.E${episodeFormat}")
                 .setRenameDelYear(false)
                 .setRenameDelTmdbId(false)
                 .setPriorityKeywordsEnable(false)

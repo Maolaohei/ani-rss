@@ -86,6 +86,12 @@ public class ItemsUtil {
         String xml = getRss(rssUrl);
 
         List<String> exclude = ani.getExclude();
+        // v2: 移除范围/合集排除规则，由展开逻辑处理
+        if (RenameUtil.isNamingV2(ani)) {
+            exclude = new ArrayList<>(exclude);
+            exclude.remove("\\d-\\d");
+            exclude.remove("合集");
+        }
         List<String> match = ani.getMatch();
 
         List<Item> items = new ArrayList<>();
@@ -260,6 +266,18 @@ public class ItemsUtil {
                     }
                     return false;
                 }).toList();
+
+        // v2: 展开范围/列表/分割类种子
+        if (RenameUtil.isNamingV2(ani)) {
+            items = expandMultiEpisode(ani, items);
+        }
+
+        // v2: 按画质优先级 + 体积兜底排序，再按集数去重
+        if (RenameUtil.isNamingV2(ani)) {
+            items = sortByQualityAndSize(items);
+            return CollUtil.distinct(items, item -> item.getEpisode().toString(), true);
+        }
+
         return CollUtil.distinct(items, item -> item.getEpisode().toString(), true);
     }
 
@@ -468,6 +486,94 @@ public class ItemsUtil {
                     CacheUtils.put(key, text, TimeUnit.DAYS.toMillis(1));
                     NotificationUtil.send(config, ani, text, NotificationStatusEnum.PROCRASTINATING);
                 });
+    }
+
+    /**
+     * 展开范围/列表/分割类种子为多个独立 Item
+     */
+    public static List<Item> expandMultiEpisode(Ani ani, List<Item> items) {
+        List<Item> expanded = new ArrayList<>();
+        int offset = ani.getOffset();
+
+        for (Item item : items) {
+            String title = item.getTitle();
+            List<Double> range = RenameUtil.extractEpisodeRange(title);
+
+            if (range != null && !range.isEmpty()) {
+                // 范围种子: 01-06 → [1,2,3,4,5,6]
+                for (Double ep : range) {
+                    Item clone = cloneItem(item);
+                    clone.setEpisode(ep + offset);
+                    clone.setEpisodeRange(range);
+                    expanded.add(clone);
+                }
+                continue;
+            }
+
+            List<Double> list = RenameUtil.extractEpisodeList(title);
+            if (list != null && !list.isEmpty()) {
+                // 列表种子: 01,02,03 → [1,2,3]
+                for (Double ep : list) {
+                    Item clone = cloneItem(item);
+                    clone.setEpisode(ep + offset);
+                    clone.setEpisodeRange(list);
+                    expanded.add(clone);
+                }
+                continue;
+            }
+
+            int partEp = RenameUtil.extractPartEpisode(title);
+            if (partEp > 0) {
+                // 分割种子: 上篇→1, 下篇→2
+                Item clone = cloneItem(item);
+                clone.setEpisode((double) partEp + offset);
+                expanded.add(clone);
+                continue;
+            }
+
+            // 普通种子，直接保留
+            expanded.add(item);
+        }
+        return expanded;
+    }
+
+    private static Item cloneItem(Item item) {
+        Item clone = new Item();
+        clone.setTitle(item.getTitle())
+                .setReName(item.getReName())
+                .setTorrent(item.getTorrent())
+                .setInfoHash(item.getInfoHash())
+                .setFormatSize(item.getFormatSize())
+                .setLength(item.getLength())
+                .setLocal(item.getLocal())
+                .setMaster(item.getMaster())
+                .setSubgroup(item.getSubgroup())
+                .setPubDate(item.getPubDate());
+        return clone;
+    }
+
+    /**
+     * 按画质优先级排序，同画质按体积降序
+     * 优先级：2160p > 1080p > 720p > 480p > 其他
+     */
+    private static List<Item> sortByQualityAndSize(List<Item> items) {
+        return items.stream()
+                .sorted(Comparator
+                        .comparingInt((Item item) -> getQualityPriority(item.getTitle())).reversed()
+                        .thenComparing(Comparator.comparingLong((Item item) ->
+                                item.getLength() != null ? item.getLength() : 0L).reversed()))
+                .toList();
+    }
+
+    /**
+     * 画质优先级评分，越高越好
+     */
+    private static int getQualityPriority(String title) {
+        if (title.contains("2160p") || title.contains("4K") || title.contains("2160P")) return 40;
+        if (title.contains("1080p") || title.contains("1080P")) return 30;
+        if (title.contains("720p") || title.contains("720P")) return 20;
+        if (title.contains("480p") || title.contains("480P")) return 10;
+        return 0;
     }
 
     public static String getSubgroup(List<Item> items) {

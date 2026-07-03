@@ -93,6 +93,10 @@ public class DownloadService {
         // 实时保存文件
         boolean sync = false;
 
+        // v2: episode 级去重，跟踪已下载集数
+        boolean v2 = RenameUtil.isNamingV2(ani);
+        Set<Double> downloadedEpisodes = v2 ? new HashSet<>() : null;
+
         for (Item item : items) {
             log.debug(JSONUtil.formatJsonStr(GsonStatic.toJson(item)));
             String reName = item.getReName();
@@ -107,11 +111,41 @@ public class DownloadService {
 
             // 已经下载过
             if (torrent.exists()) {
-                log.debug("种子记录已存在 {}", reName);
+                // v2: 检查版本号，高版本覆盖低版本（洗版）
+                if (v2 && item.getVersion() > 1) {
+                    log.info("检测到高版本 {} v{}, 准备洗版", reName, item.getVersion());
+                    // 不跳过，继续下载流程
+                } else {
+                    log.debug("种子记录已存在 {}", reName);
+                    if (master && !is5) {
+                        currentDownloadCount++;
+                    }
+                    if (v2 && downloadedEpisodes != null) {
+                        downloadedEpisodes.add(episode);
+                    }
+                    continue;
+                }
+            }
+
+            // v2: episode 级去重，同集数已被其他种子覆盖则跳过
+            if (v2 && downloadedEpisodes != null && downloadedEpisodes.contains(episode)) {
+                log.debug("集数已被覆盖 {} ep{}", reName, episode);
                 if (master && !is5) {
                     currentDownloadCount++;
                 }
                 continue;
+            }
+
+            // v2: 合集范围去重，范围内所有集数均已覆盖则跳过
+            if (v2 && item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty()) {
+                boolean allCovered = item.getEpisodeRange().stream().allMatch(downloadedEpisodes::contains);
+                if (allCovered) {
+                    log.debug("合集范围已全部覆盖 {} {}", reName, item.getEpisodeRange());
+                    if (master && !is5) {
+                        currentDownloadCount++;
+                    }
+                    continue;
+                }
             }
 
             if (notDownload.contains(episode)) {
@@ -243,6 +277,14 @@ public class DownloadService {
 
             if (master && !is5) {
                 currentDownloadCount++;
+            }
+            // v2: 记录已下载集数（合集记录所有范围内的集数）
+            if (v2 && downloadedEpisodes != null) {
+                if (item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty()) {
+                    downloadedEpisodes.addAll(item.getEpisodeRange());
+                } else {
+                    downloadedEpisodes.add(episode);
+                }
             }
             count++;
         }
@@ -701,7 +743,7 @@ public class DownloadService {
                     return true;
                 })
                 .anyMatch(file -> {
-                    if (Boolean.TRUE.equals(ova)) {
+                    if (Boolean.TRUE.equals(ova) && !RenameUtil.isNamingV2(ani)) {
                         return true;
                     }
 

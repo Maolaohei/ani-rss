@@ -17,23 +17,212 @@ import wushuo.tmdb.api.entity.Tmdb;
 
 import java.util.*;
 import java.util.function.Function;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Slf4j
 public class RenameUtil {
     public static final String REG_STR = "(.*|\\[.*])(( - |Vol |[Ee][Pp]?)\\d+(\\.5)?( ?\\(\\d+\\))?|【\\d+(\\.5)?】|\\[\\d+(\\.5)?( ?\\(\\d+\\))?( ?[vV]\\d)?( ?END)?( ?完)?( ?FIN)?]|第\\d+(\\.5)?[话話集]( - END)?|^\\[TOC].* \\d+|^六四位元字幕组.*★\\d+(\\.5)?★)";
 
+    // 宽松正则：覆盖老番不规范命名
+    public static final String REG_LOOSE =
+            "(Vol\\.?\\s*\\d+(?:\\.5)?)" +
+            "|([Ee][Pp]?\\s*\\d+(?:\\.5)?)" +
+            "|((?:^|\\s)(?:SP|OVA|OAD|NCOP|NCED)\\s*\\d+(?:\\.5)?)" +
+            "|(\\s[-~～]\\s*\\d+(?:\\.5)?)" +
+            "|(【\\d+(?:\\.5)?】|\\[\\d+(?:\\.5)?(?:\\s*v\\d)?])" +
+            "|(第\\d+(?:\\.5)?[话話集])" +
+            "|(BD[- ]?\\d+)" +
+            "|(#\\d+)" +
+            "|(_\\d+(?:\\.5)?)" +
+            "|(★\\d+(?:\\.5)?★)" +
+            "|(\\s\\d{2}(?:\\.5)?(?:\\s|\\]|\\[|$))";
+
+    // 集数范围: 01-06, 01~06, 01～06
+    public static final String EP_RANGE_REG = "(\\d+(?:\\.5)?)[\\s]*[-~～][\\s]*(\\d+(?:\\.5)?)";
+
+    // Vol范围: Vol.01-Vol.06
+    public static final String VOL_RANGE_REG = "(?:Vol\\.?\\s*)(\\d+(?:\\.5)?)[\\s]*[-~～][\\s]*(\\d+(?:\\.5)?)";
+
+    // 中文范围: 第1-6话, 第1～12集
+    public static final String CN_RANGE_REG = "第(\\d+)[~～-](\\d+)[话話集]";
+
+    // 分割部分: 上篇/下篇/Part 1/P1/上/下 等
+    public static final String PART_REG = "(上篇|下篇|前篇|後篇|前编|后编|前編|後編|第一部|第二部|第三部|Part\\s?[1-9](?![0-9])|P[1-9](?![0-9])|上(?=\\s|\\[|$)|下(?=\\s|\\[|$))";
+
+    // 分数格式: (1/2), (2/3)
+    public static final String FRACTION_REG = "\\((\\d+)/(\\d+)\\)";
+
+    // 年份排除: - 2024, - 10周年
+    public static final String YEAR_LIKE_REG = "\\s[-]\\s*\\d{4}(?:\\s|$|\\])";
+
+    // 版本号: v2, v3, V2 等（位于集数之后）
+    public static final String VERSION_REG = "[vV](\\d+)(?:[^\\d]|$)";
+
+    /**
+     * 提取版本号，默认 v1
+     */
+    public static int extractVersion(String title) {
+        Matcher m = Pattern.compile(VERSION_REG).matcher(title);
+        if (m.find()) {
+            try {
+                return Integer.parseInt(m.group(1));
+            } catch (NumberFormatException ignored) {}
+        }
+        return 1;
+    }
+
+    /**
+     * 判断是否使用新命名逻辑
+     */
+    public static boolean isNamingV2(Ani ani) {
+        Integer v = ani.getNamingVersion();
+        return v != null && v == 2;
+    }
+
+    /**
+     * 提取集数范围，返回展开后的集数列表
+     * @return [start, start+1, ..., end] 或 null（非范围）
+     */
+    public static List<Double> extractEpisodeRange(String title) {
+        // 中文范围: 第1-6话
+        Matcher cnM = ReUtil.getMatcher(CN_RANGE_REG, title);
+        if (cnM.find()) {
+            return expandRange(cnM.group(1), cnM.group(2));
+        }
+
+        // Vol范围: Vol.01-Vol.06 → 去掉 Vol 前缀后匹配
+        String volStripped = title.replaceAll("(?i)Vol\\.?\\s*", "");
+        Matcher volM = ReUtil.getMatcher(EP_RANGE_REG, volStripped);
+        if (volM.find()) {
+            return expandRange(volM.group(1), volM.group(2));
+        }
+
+        // 普通范围: 01-06, 01~06 (排除分数 1/2 和年份 2024)
+        Matcher rangeM = ReUtil.getMatcher(EP_RANGE_REG, title);
+        if (rangeM.find()) {
+            String start = rangeM.group(1);
+            String end = rangeM.group(2);
+            // 排除年份: 4位数不作为范围
+            if (start.length() >= 4 || end.length() >= 4) {
+                return null;
+            }
+            return expandRange(start, end);
+        }
+
+        return null;
+    }
+
+    /**
+     * 提取集数列表: 01,02,03 或 01&02
+     */
+    public static List<Double> extractEpisodeList(String title) {
+        List<Double> episodes = new ArrayList<>();
+        Matcher m = Pattern.compile("\\d+(?:\\.5)?").matcher(title);
+        int lastEnd = -1;
+        while (m.find()) {
+            int start = m.start();
+            if (lastEnd >= 0) {
+                String between = title.substring(lastEnd, start).trim();
+                if (!between.equals(",") && !between.equals("&") && !between.equals("，")) {
+                    break;
+                }
+            }
+            episodes.add(Double.parseDouble(m.group()));
+            lastEnd = m.end();
+        }
+        return episodes.size() > 1 ? episodes : null;
+    }
+
+    /**
+     * 提取分割部分对应的集数
+     * @return 集数，0 表示未识别
+     */
+    public static int extractPartEpisode(String title) {
+        Matcher m = ReUtil.getMatcher(PART_REG, title);
+        if (!m.find()) {
+            // 检查分数格式 (1/2)
+            Matcher fm = ReUtil.getMatcher(FRACTION_REG, title);
+            if (fm.find()) {
+                return Integer.parseInt(fm.group(1));
+            }
+            return 0;
+        }
+        return mapPartToEpisode(m.group(1));
+    }
+
+    /**
+     * 部分名 -> 集数映射
+     */
+    public static int mapPartToEpisode(String part) {
+        return switch (part) {
+            case "上篇", "前篇", "前编", "前編", "第一部", "Part 1", "P1", "Part1", "上" -> 1;
+            case "下篇", "後篇", "后编", "後編", "第二部", "Part 2", "P2", "Part2", "下" -> 2;
+            case "Part 3", "P3", "第三部", "Part3" -> 3;
+            default -> 0;
+        };
+    }
+
+    /**
+     * 展开范围: "01" -> "06" => [1,2,3,4,5,6]
+     */
+    private static List<Double> expandRange(String startStr, String endStr) {
+        double start = Double.parseDouble(startStr);
+        double end = Double.parseDouble(endStr);
+        if (start > end || end - start > 100) {
+            return null;
+        }
+        List<Double> list = new ArrayList<>();
+        if (start == (int) start && end == (int) end) {
+            for (int i = (int) start; i <= (int) end; i++) {
+                list.add((double) i);
+            }
+        } else {
+            for (double ep = start; ep <= end; ep += 0.5) {
+                list.add(ep);
+                if (ep == (int) ep && ep < end) {
+                    list.add(ep + 0.5);
+                }
+            }
+        }
+        return list;
+    }
+
     public static Boolean rename(Ani ani, Item item) {
         Config config = ConfigUtil.CONFIG;
+        boolean v2 = isNamingV2(ani);
 
         int offset = ani.getOffset();
         int season = ani.getSeason();
         String title = ani.getTitle();
         Boolean ova = ani.getOva();
 
-        if (ova) {
+        if (ova && !v2) {
+            // 旧逻辑：OVA 不解析集数
             title = renameDel(title);
             item.setReName(title);
             return true;
+        }
+
+        String itemTitle = item.getTitle();
+        itemTitle = itemTitle.replace("+NCOPED", "").trim();
+        itemTitle = itemTitle.replace("\n", " ").trim();
+        itemTitle = itemTitle.replace("\t", " ").trim();
+        itemTitle = itemTitle.replaceAll("\\[([A-Z]|\\d){8}]$", "").trim();
+
+        // OVA v2: 尝试解析集数，失败则保持 episode=1.0
+        if (ova && v2) {
+            String e = tryExtractEpisode(itemTitle, ani);
+            if (StrUtil.isNotBlank(e)) {
+                String episodeStr = ReUtil.get("\\d+(\\.5)?", e, 0);
+                if (StrUtil.isNotBlank(episodeStr)) {
+                    double episode = Double.parseDouble(episodeStr) + offset;
+                    item.setEpisode(episode);
+                }
+            }
+            // OVA 使用 S00 命名
+            season = 0;
+            title = renameDel(title);
         }
 
         Boolean customEpisode = ani.getCustomEpisode();
@@ -44,39 +233,44 @@ public class RenameUtil {
         String subgroup = item.getSubgroup();
         subgroup = StrUtil.blankToDefault(subgroup, "未知字幕组");
 
-        String itemTitle = item.getTitle();
-        itemTitle = itemTitle.replace("+NCOPED", "").trim();
-        itemTitle = itemTitle.replace("\n", " ").trim();
-        itemTitle = itemTitle.replace("\t", " ").trim();
-        // 去除结尾的 8 位 Hash
-        itemTitle = itemTitle.replaceAll("\\[([A-Z]|\\d){8}]$", "").trim();
-
         String e;
-        // 是否使用自定义剧规则
-        if (customEpisode) {
+        if (ova && v2) {
+            // OVA v2 已在上面解析过，这里跳过
+            e = null;
+        } else if (customEpisode) {
             e = ReUtil.get(customEpisodeStr, itemTitle, customEpisodeGroupIndex);
         } else {
             e = ReUtil.get(REG_STR, itemTitle, 2);
+            // 排除年份和周年等非集数上下文
+            if (StrUtil.isNotBlank(e)) {
+                e = filterFalsePositive(e, itemTitle);
+            }
+            // v2: REG_STR 失败时尝试宽松正则
+            if (v2 && StrUtil.isBlank(e)) {
+                e = tryExtractEpisode(itemTitle, ani);
+            }
         }
 
-        if (StrUtil.isBlank(e)) {
+        if (!ova && StrUtil.isBlank(e)) {
             return false;
         }
 
-        String episodeStr = ReUtil.get("\\d+(\\.5)?", e, 0);
-        if (StrUtil.isBlank(episodeStr)) {
-            return false;
+        if (!ova) {
+            String episodeStr = ReUtil.get("\\d+(\\.5)?", e, 0);
+            if (StrUtil.isBlank(episodeStr)) {
+                return false;
+            }
+
+            double episode = Double.parseDouble(episodeStr) + offset;
+            item.setEpisode(episode);
         }
 
-        double episode = Double.parseDouble(episodeStr) + offset;
-        item.setEpisode(episode);
-
+        double episode = item.getEpisode();
         String seasonFormat = String.format("%02d", season);
         String episodeFormat = String.format("%02d", (int) episode);
 
-        episodeStr = String.valueOf((int) episode);
+        String episodeStr = String.valueOf((int) episode);
 
-        // x.5
         boolean is5 = ItemsUtil.is5(episode);
 
         boolean skip5 = config.getSkip5();
@@ -117,6 +311,17 @@ public class RenameUtil {
             renameTemplate = renameTemplate.replace("${jpTitle}", jpTitle);
         }
 
+        // 年份占位符
+        if (renameTemplate.contains("${year}")) {
+            Date releaseDate = ani.getReleaseDate();
+            if (releaseDate != null) {
+                String year = String.valueOf(releaseDate.getYear() + 1900);
+                renameTemplate = renameTemplate.replace("${year}", year);
+            } else {
+                renameTemplate = renameTemplate.replace("${year}", "");
+            }
+        }
+
         List<Func1<Ani, Object>> list = List.of(
                 Ani::getThemoviedbName
         );
@@ -133,9 +338,87 @@ public class RenameUtil {
             reName = StrUtil.sub(reName, 0, maxFileNameLength);
         }
 
+        // 提取版本号用于洗版判断
+        int version = extractVersion(item.getTitle());
+        item.setVersion(version);
+
         item
                 .setReName(reName);
         return true;
+    }
+
+    /**
+     * 尝试从标题中提取集数（先 REG_STR，再 REG_LOOSE）
+     */
+    private static String tryExtractEpisode(String itemTitle, Ani ani) {
+        Boolean customEpisode = ani.getCustomEpisode();
+        String customEpisodeStr = ani.getCustomEpisodeStr();
+        Integer customEpisodeGroupIndex = ani.getCustomEpisodeGroupIndex();
+
+        if (customEpisode) {
+            return ReUtil.get(customEpisodeStr, itemTitle, customEpisodeGroupIndex);
+        }
+
+        String e = ReUtil.get(REG_STR, itemTitle, 2);
+        if (StrUtil.isNotBlank(e)) {
+            // 排除年份: - 2024, - 1999 等
+            String num = extractEpisodeNumber(e);
+            if (num != null && num.length() == 4) {
+                int val = Integer.parseInt(num);
+                if (val >= 1900 && val <= 2100) {
+                    e = null;
+                }
+            }
+            // 排除 周年/年/bit 等非集数上下文
+            if (e != null && StrUtil.isNotBlank(e)) {
+                String after = itemTitle.substring(itemTitle.indexOf(e) + e.length());
+                if (after.matches("^\\s*周.*") || after.matches("^\\s*年.*")
+                        || after.matches("^\\s*bit.*") || after.matches("^\\s*Bpp.*")
+                        || after.matches("^\\s*KB.*") || after.matches("^\\s*MB.*")) {
+                    e = null;
+                }
+            }
+        }
+
+        if (StrUtil.isNotBlank(e)) {
+            return e;
+        }
+
+        // 宽松正则 fallback
+        Matcher m = Pattern.compile(REG_LOOSE, Pattern.CASE_INSENSITIVE).matcher(itemTitle);
+        if (m.find()) {
+            return m.group();
+        }
+        return null;
+    }
+
+    private static String extractEpisodeNumber(String episodePart) {
+        if (episodePart == null) return null;
+        Matcher m = Pattern.compile("\\d+(?:\\.5)?").matcher(episodePart);
+        return m.find() ? m.group() : null;
+    }
+
+    /**
+     * 过滤误识别: 年份、周年等非集数上下文
+     */
+    private static String filterFalsePositive(String episodePart, String fullTitle) {
+        String num = extractEpisodeNumber(episodePart);
+        if (num == null) return episodePart;
+
+        // 排除4位数年份 (1900-2100)
+        if (num.length() == 4) {
+            int val = Integer.parseInt(num);
+            if (val >= 1900 && val <= 2100) return null;
+        }
+
+        // 排除 周年/年 等上下文
+        int idx = fullTitle.indexOf(episodePart);
+        if (idx >= 0) {
+            String after = fullTitle.substring(idx + episodePart.length());
+            if (after.matches("^\\s*周.*") || after.matches("^\\s*年.*")) return null;
+        }
+
+        return episodePart;
     }
 
     /**
