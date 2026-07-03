@@ -97,6 +97,9 @@ public class DownloadService {
         boolean v2 = RenameUtil.isNamingV2(ani);
         Set<Double> downloadedEpisodes = v2 ? new HashSet<>() : null;
 
+        // 本地 infoHash 去重，防止合集展开后重复推送（OpenList 的 getTorrentsInfos 返回空列表，无法依赖客户端去重）
+        Set<String> pushedHashes = new HashSet<>();
+
         for (Item item : items) {
             log.debug(JSONUtil.formatJsonStr(GsonStatic.toJson(item)));
             String reName = item.getReName();
@@ -235,6 +238,15 @@ public class DownloadService {
                             // hash 相同
                             torrentsInfo.getHash().equals(hash))) {
                 log.info("已有下载任务 hash:{} name:{}", hash, reName);
+                if (master && !is5) {
+                    currentDownloadCount++;
+                }
+                continue;
+            }
+
+            // 本地 infoHash 去重：合集展开后共享同一 magnet，防止 OpenList 等无法查询任务列表的客户端重复推送
+            if (!pushedHashes.add(hash)) {
+                log.debug("infoHash 已推送过，跳过 {} {}", hash, reName);
                 if (master && !is5) {
                     currentDownloadCount++;
                 }

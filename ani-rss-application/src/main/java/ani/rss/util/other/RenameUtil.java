@@ -95,7 +95,20 @@ public class RenameUtil {
         String volStripped = title.replaceAll("(?i)Vol\\.?\\s*", "");
         Matcher volM = Pattern.compile(EP_RANGE_REG).matcher(volStripped);
         if (volM.find()) {
-            return expandRange(volM.group(1), volM.group(2));
+            String vStart = volM.group(1);
+            String vEnd = volM.group(2);
+            if ((vStart.length() >= 4 && !vStart.contains(".")) || (vEnd.length() >= 4 && !vEnd.contains("."))) {
+                // 年份排除
+            } else {
+                int vRangeStart = volM.start();
+                int vScanPos = vRangeStart - 1;
+                while (vScanPos >= 0 && Character.isDigit(volStripped.charAt(vScanPos))) {
+                    vScanPos--;
+                }
+                if (vScanPos < 0 || Character.toUpperCase(volStripped.charAt(vScanPos)) != 'S') {
+                    return expandRange(vStart, vEnd);
+                }
+            }
         }
 
         // 普通范围: 01-06, 01~06 (排除分数 1/2 和年份 2024)
@@ -108,8 +121,13 @@ public class RenameUtil {
                 return null;
             }
             // 排除季度号: S04 - 12 不应被视为范围 4-12
+            // 向前扫描跳过数字位，检查是否存在 S 前缀 (如 S04、S4)
             int rangeStart = rangeM.start();
-            if (rangeStart > 0 && Character.toUpperCase(title.charAt(rangeStart - 1)) == 'S') {
+            int scanPos = rangeStart - 1;
+            while (scanPos >= 0 && Character.isDigit(title.charAt(scanPos))) {
+                scanPos--;
+            }
+            if (scanPos >= 0 && Character.toUpperCase(title.charAt(scanPos)) == 'S') {
                 return null;
             }
             return expandRange(start, end);

@@ -25,6 +25,7 @@ import org.w3c.dom.*;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 
 @Slf4j
@@ -46,10 +47,9 @@ public class ItemsUtil {
                 .toList());
 
         if (!config.getStandbyRss()) {
-            // v2: 即使无备用RSS，也要按画质排序+去重
+            // v2: 合集优先去重
             if (RenameUtil.isNamingV2(ani)) {
-                items = sortByQualityAndSize(items);
-                items = CollUtil.distinct(items, item -> item.getEpisode().toString(), true);
+                items = distinctWithCollectionPriority(items);
             }
             items.sort(Comparator.comparingDouble(Item::getEpisode));
             return items;
@@ -71,7 +71,7 @@ public class ItemsUtil {
         if (coexist) {
             items = CollUtil.distinct(items, Item::getReName, false);
         } else {
-            items = CollUtil.distinct(items, it -> it.getEpisode().toString(), false);
+            items = distinctWithCollectionPriority(items);
         }
         items.sort(Comparator.comparingDouble(Item::getEpisode));
         return items;
@@ -277,10 +277,9 @@ public class ItemsUtil {
             items = expandMultiEpisode(ani, items);
         }
 
-        // v2: 按画质优先级 + 体积兜底排序，再按集数去重
+        // v2: 合集优先去重
         if (RenameUtil.isNamingV2(ani)) {
-            items = sortByQualityAndSize(items);
-            return CollUtil.distinct(items, item -> item.getEpisode().toString(), true);
+            return distinctWithCollectionPriority(items);
         }
 
         return CollUtil.distinct(items, item -> item.getEpisode().toString(), true);
@@ -579,6 +578,52 @@ public class ItemsUtil {
         if (title.contains("720p") || title.contains("720P")) return 20;
         if (title.contains("480p") || title.contains("480P")) return 10;
         return 0;
+    }
+
+    /**
+     * 合集优先去重：同一集同时有合集展开源和单集源时，优先保留合集源（带 episodeRange 的条目），
+     * 再按画质+体积选最优。单集仅作为合集未覆盖时的补充。
+     */
+    public static List<Item> distinctWithCollectionPriority(List<Item> items) {
+        if (CollUtil.isEmpty(items)) {
+            return items;
+        }
+
+        // 1. 按集数分组
+        Map<Double, List<Item>> grouped = items.stream()
+                .filter(item -> item.getEpisode() != null)
+                .collect(Collectors.groupingBy(Item::getEpisode));
+
+        List<Item> result = new ArrayList<>();
+
+        // 2. 每集内部分为合集源和单集源，优先合集
+        for (Map.Entry<Double, List<Item>> entry : grouped.entrySet()) {
+            List<Item> episodeItems = entry.getValue();
+
+            List<Item> collections = new ArrayList<>();
+            List<Item> singles = new ArrayList<>();
+
+            for (Item item : episodeItems) {
+                if (item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty()) {
+                    collections.add(item);
+                } else {
+                    singles.add(item);
+                }
+            }
+
+            List<Item> candidates = !collections.isEmpty() ? collections : singles;
+            candidates = sortByQualityAndSize(candidates);
+            result.add(candidates.get(0));
+        }
+
+        // 3. 补充无集数的特殊条目（OVA/剧场版等）
+        for (Item item : items) {
+            if (item.getEpisode() == null) {
+                result.add(item);
+            }
+        }
+
+        return result;
     }
 
     public static String getSubgroup(List<Item> items) {
