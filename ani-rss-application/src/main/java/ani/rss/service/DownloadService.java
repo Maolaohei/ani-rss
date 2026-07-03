@@ -112,7 +112,7 @@ public class DownloadService {
             // 已经下载过
             if (torrent.exists()) {
                 // v2: 检查版本号，高版本覆盖低版本（洗版）
-                if (v2 && item.getVersion() > 1) {
+                if (v2 && item.getVersion() != null && item.getVersion() > 1) {
                     log.info("检测到高版本 {} v{}, 准备洗版", reName, item.getVersion());
                     // 不跳过，继续下载流程
                 } else {
