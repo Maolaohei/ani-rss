@@ -321,20 +321,33 @@ public class ItemsUtil {
      */
     public static String getRss(String url) {
         Config config = ConfigUtil.CONFIG;
+        int retry = config.getDownloadRetry();
 
-        String xml = HttpReq.thenClose(
-                HttpReq.get(url).timeout(config.getRssTimeout() * 1000),
-                res -> {
-                    HttpReq.assertStatus(res);
-                    HttpReq.assertXml(res);
-                    return res.body();
-                });
+        for (int i = 1; i <= retry; i++) {
+            try {
+                String xml = HttpReq.thenClose(
+                        HttpReq.get(url).timeout(config.getRssTimeout() * 1000),
+                        res -> {
+                            HttpReq.assertStatus(res);
+                            HttpReq.assertXml(res);
+                            return res.body();
+                        });
 
-        Assert.notBlank(xml, "xml is blank");
-        boolean isXml = StrUtil.startWith(xml, '<');
-        Assert.isTrue(isXml, "xml error");
+                Assert.notBlank(xml, "xml is blank");
+                boolean isXml = StrUtil.startWith(xml, '<');
+                Assert.isTrue(isXml, "xml error");
 
-        return xml;
+                return xml;
+            } catch (Exception e) {
+                if (i < retry) {
+                    log.warn("RSS获取失败 ({}), 将重试 ({}/{}): {}", url, i, retry, e.getMessage());
+                    ThreadUtil.sleep(2000);
+                } else {
+                    throw e;
+                }
+            }
+        }
+        throw new IllegalStateException("RSS获取失败: " + url);
     }
 
     public static synchronized List<Integer> omitList(Ani ani, List<Item> items) {
