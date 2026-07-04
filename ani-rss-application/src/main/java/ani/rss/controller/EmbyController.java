@@ -113,7 +113,7 @@ public class EmbyController extends BaseController {
 
         EXECUTOR.execute(() -> {
             log.info("{} 标记为 [{}]", fileName, List.of("未看过", "想看", "看过").get(type));
-            List<Ani> anis = AniUtil.ANI_LIST;
+            List<Ani> anis = AniUtil.getAniList();
 
             // 优先匹配路径相同的
             String subjectId = anis.stream()

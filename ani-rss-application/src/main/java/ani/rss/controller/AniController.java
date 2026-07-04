@@ -62,7 +62,7 @@ public class AniController extends BaseController {
                 .setUrl(ani.getUrl().trim());
         AniUtil.verify(ani);
 
-        Optional<Ani> first = AniUtil.ANI_LIST.stream()
+        Optional<Ani> first = AniUtil.getAniList().stream()
                 .filter(it -> it.getId().equals(ani.getId()))
                 .findFirst();
 
@@ -70,7 +70,7 @@ public class AniController extends BaseController {
             throw new IllegalArgumentException("此订阅已存在");
         }
 
-        first = AniUtil.ANI_LIST.stream()
+        first = AniUtil.getAniList().stream()
                 .filter(it -> it.getTitle().equals(ani.getTitle()) && it.getSeason().equals(ani.getSeason()))
                 .findFirst();
 
@@ -81,14 +81,14 @@ public class AniController extends BaseController {
             Config config = ConfigUtil.CONFIG;
             Boolean replace = config.getReplace();
             if (replace) {
-                AniUtil.ANI_LIST.remove(first.get());
+                AniUtil.getAniList().remove(first.get());
                 log.info("自动替换 {} 第{}季", title, season);
             } else {
                 throw new IllegalArgumentException("订阅标题重复");
             }
         }
 
-        AniUtil.ANI_LIST.add(ani);
+        AniUtil.getAniList().add(ani);
         AniUtil.sync();
         Boolean enable = ani.getEnable();
         if (enable) {
@@ -121,7 +121,7 @@ public class AniController extends BaseController {
         ani.setTitle(ani.getTitle().trim())
                 .setUrl(ani.getUrl().trim());
         AniUtil.verify(ani);
-        Optional<Ani> first = AniUtil.ANI_LIST.stream()
+        Optional<Ani> first = AniUtil.getAniList().stream()
                 .filter(it -> !it.getId().equals(ani.getId()))
                 .filter(it -> it.getTitle().equals(ani.getTitle()) && it.getSeason().equals(ani.getSeason()))
                 .findFirst();
@@ -129,7 +129,7 @@ public class AniController extends BaseController {
             return Result.error("订阅标题重复");
         }
 
-        first = AniUtil.ANI_LIST.stream()
+        first = AniUtil.getAniList().stream()
                 .filter(it -> it.getId().equals(ani.getId()))
                 .findFirst();
         if (first.isEmpty()) {
@@ -206,14 +206,14 @@ public class AniController extends BaseController {
     @PostMapping("/deleteAni")
     public Result<Void> deleteAni(@RequestBody List<String> ids, @RequestParam("deleteFiles") Boolean deleteFiles) {
         Assert.notEmpty(ids, "未选择订阅");
-        List<Ani> anis = AniUtil.ANI_LIST.stream()
+        List<Ani> anis = AniUtil.getAniList().stream()
                 .filter(it -> ids.contains(it.getId()))
                 .toList();
         if (anis.isEmpty()) {
             return Result.error("删除失败");
         }
         for (Ani ani : anis) {
-            AniUtil.ANI_LIST.remove(ani);
+            AniUtil.getAniList().remove(ani);
         }
 
         AniUtil.sync();
@@ -288,7 +288,7 @@ public class AniController extends BaseController {
         listAni.setWeekList(weekAniList);
 
         // 按拼音排序
-        List<Ani> aniList = AniUtil.ANI_LIST;
+        List<Ani> aniList = AniUtil.getAniList();
 
         List<String> releaseDateList = aniList.stream()
                 .map(Ani::getReleaseDate)
@@ -350,7 +350,7 @@ public class AniController extends BaseController {
         ThreadUtil.execute(() -> {
             log.info("开始手动更新总集数");
             int count = 0;
-            for (Ani ani : AniUtil.ANI_LIST) {
+            for (Ani ani : AniUtil.getAniList()) {
                 String id = ani.getId();
                 if (!ids.contains(id)) {
                     continue;
@@ -379,7 +379,7 @@ public class AniController extends BaseController {
     public Result<Void> batchEnable(@RequestParam("value") Boolean value, @RequestBody List<String> ids) {
         Assert.notEmpty(ids, "未选择订阅");
 
-        for (Ani ani : AniUtil.ANI_LIST) {
+        for (Ani ani : AniUtil.getAniList()) {
             String id = ani.getId();
             if (!ids.contains(id)) {
                 continue;
@@ -404,7 +404,7 @@ public class AniController extends BaseController {
     @Operation(summary = "刷新订阅")
     @PostMapping("/refreshAni")
     public Result<Void> refreshAni(@RequestBody IdDTO dto) {
-        Optional<Ani> first = AniUtil.ANI_LIST.stream()
+        Optional<Ani> first = AniUtil.getAniList().stream()
                 .filter(it -> it.getId().equals(dto.getId()))
                 .findFirst();
         if (first.isEmpty()) {
@@ -485,7 +485,7 @@ public class AniController extends BaseController {
         String downloadPath = downloadService.getDownloadPath(ani);
 
         boolean change = false;
-        Optional<Ani> first = AniUtil.ANI_LIST.stream()
+        Optional<Ani> first = AniUtil.getAniList().stream()
                 .filter(it -> it.getId().equals(ani.getId()))
                 .findFirst();
         if (first.isPresent()) {
@@ -519,7 +519,7 @@ public class AniController extends BaseController {
 
             String title = ani.getTitle();
             int season = ani.getSeason();
-            Optional<Ani> first = AniUtil.ANI_LIST.stream()
+            Optional<Ani> first = AniUtil.getAniList().stream()
                     .filter(it -> it.getTitle().equals(title) && it.getSeason() == season)
                     .findFirst();
 
@@ -528,7 +528,7 @@ public class AniController extends BaseController {
                 String cover = AniUtil.saveCover(image);
                 ani.setCover(cover)
                         .setId(UUID.fastUUID().toString());
-                AniUtil.ANI_LIST.add(ani);
+                AniUtil.getAniList().add(ani);
                 continue;
             }
 

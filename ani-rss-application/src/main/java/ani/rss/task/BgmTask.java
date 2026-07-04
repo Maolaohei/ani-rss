@@ -35,7 +35,7 @@ public class BgmTask implements BaseTask {
             log.error(e.getMessage(), e);
         }
 
-        List<Ani> aniList = AniUtil.ANI_LIST;
+        List<Ani> aniList = AniUtil.getAniList();
         for (Ani ani : aniList) {
             if (!loop.get()) {
                 return;

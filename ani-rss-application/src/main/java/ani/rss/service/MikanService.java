@@ -69,7 +69,7 @@ public class MikanService {
         Map<String, MikanBgm> mikanBgmMap = mikanBgmAtomicReference.get();
         Mikan mikan = mikanAtomicReference.get();
 
-        List<String> bgmIdList = AniUtil.ANI_LIST
+        List<String> bgmIdList = AniUtil.getAniList()
                 .stream()
                 .map(Ani::getBgmUrl)
                 .filter(StrUtil::isNotBlank)
@@ -107,7 +107,7 @@ public class MikanService {
     }
 
     public Mikan search(String text, Mikan.Season season) {
-        Set<String> bangumiIdSet = AniUtil.ANI_LIST.stream()
+        Set<String> bangumiIdSet = AniUtil.getAniList().stream()
                 .map(AniUtil::getBangumiId)
                 .filter(StrUtil::isNotBlank)
                 .collect(Collectors.toSet());

@@ -38,8 +38,15 @@ import java.util.concurrent.CopyOnWriteArrayList;
 @Slf4j
 public class AniUtil {
 
-    public static final List<Ani> ANI_LIST = new CopyOnWriteArrayList<>();
+    private static volatile List<Ani> ANI_LIST = new CopyOnWriteArrayList<>();
     public static final String FILE_NAME = "ani.v2.json";
+
+    /**
+     * 获取订阅列表（线程安全读取）
+     */
+    public static List<Ani> getAniList() {
+        return ANI_LIST;
+    }
 
     /**
      * 获取订阅配置文件
@@ -52,7 +59,7 @@ public class AniUtil {
     }
 
     /**
-     * 加载订阅
+     * 加载订阅（原子替换，避免并发读到空列表）
      */
     public static void load() {
         File configFile = getAniFile();
@@ -68,7 +75,8 @@ public class AniUtil {
                 .setIgnoreNullValue(true)
                 .setOverride(false);
 
-        ANI_LIST.clear();
+        // 在局部变量中构建新列表，完成后原子替换引用
+        List<Ani> newList = new CopyOnWriteArrayList<>();
         for (Ani ani : anis) {
             Date releaseDate = ani.getReleaseDate();
             if (Objects.isNull(releaseDate)) {
@@ -91,8 +99,10 @@ public class AniUtil {
 
             Ani newAni = AniUtil.createAni();
             BeanUtil.copyProperties(newAni, ani, copyOptions);
-            ANI_LIST.add(ani);
+            newList.add(ani);
         }
+        // 原子替换：读线程永远不会看到中间状态
+        ANI_LIST = newList;
         log.debug("加载订阅 共{}项", ANI_LIST.size());
     }
 

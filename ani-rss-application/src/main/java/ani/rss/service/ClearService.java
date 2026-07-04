@@ -69,7 +69,7 @@ public class ClearService {
         FileUtil.mkdir(filesDir);
         FileUtil.mkdir(imgDir);
 
-        Set<String> covers = AniUtil.ANI_LIST
+        Set<String> covers = AniUtil.getAniList()
                 .stream()
                 .map(Ani::getCover)
                 .map(s -> FileUtils.getAbsolutePath(Path.of(configDirStr, "files", s).toFile()))

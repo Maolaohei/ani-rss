@@ -51,7 +51,7 @@ public class AniMcpTools {
     )
     public List<Ani> listSubscriptions(@McpToolParam ListSubscriptionDTO dto) {
         Boolean enabled = dto.getEnabled();
-        return AniUtil.ANI_LIST.stream()
+        return AniUtil.getAniList().stream()
                 .filter(ani -> Objects.isNull(enabled) || enabled.equals(ani.getEnable()))
                 .toList();
     }

@@ -33,12 +33,12 @@ public class RssTask implements BaseTask {
             if (!TorrentUtil.login()) {
                 return;
             }
-            for (Ani ani : AniUtil.ANI_LIST) {
+            for (Ani ani : AniUtil.getAniList()) {
                 if (!loop.get()) {
                     return;
                 }
 
-                if (!AniUtil.ANI_LIST.contains(ani)) {
+                if (!AniUtil.getAniList().contains(ani)) {
                     continue;
                 }
 

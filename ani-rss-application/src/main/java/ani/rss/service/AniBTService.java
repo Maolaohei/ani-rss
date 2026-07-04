@@ -24,7 +24,7 @@ public class AniBTService {
     private static final String HOST = "https://anibt.net";
 
     public AniBT list(String season, String bgmUrl) {
-        List<String> bgmIdList = AniUtil.ANI_LIST
+        List<String> bgmIdList = AniUtil.getAniList()
                 .stream()
                 .map(Ani::getBgmUrl)
                 .filter(StrUtil::isNotBlank)

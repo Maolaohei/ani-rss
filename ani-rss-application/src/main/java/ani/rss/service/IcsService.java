@@ -43,7 +43,7 @@ public class IcsService {
                 .add(new XProperty("X-WR-TIMEZONE", CALENDAR_ZONE.getId()))
                 .add(new XProperty("X-WR-CALDESC", "ani-rss 动漫订阅日历"));
 
-        List<VEvent> list = AniUtil.ANI_LIST.stream()
+        List<VEvent> list = AniUtil.getAniList().stream()
                 .filter(Ani::getEnable)
                 .map(this::generateEvent)
                 .toList();

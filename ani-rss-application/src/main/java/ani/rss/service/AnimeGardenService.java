@@ -56,7 +56,7 @@ public class AnimeGardenService {
         JsonObject bgmScore = cacheService.getBgmScore();
         JsonObject bgmCover = cacheService.getBgmCover();
 
-        List<String> bgmIdList = AniUtil.ANI_LIST
+        List<String> bgmIdList = AniUtil.getAniList()
                 .stream()
                 .map(Ani::getBgmUrl)
                 .filter(StrUtil::isNotBlank)

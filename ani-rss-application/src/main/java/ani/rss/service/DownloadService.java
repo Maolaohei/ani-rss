@@ -279,7 +279,7 @@ public class DownloadService {
 
             deleteStandbyRss(ani, item);
 
-            if (!AniUtil.ANI_LIST.contains(ani)) {
+            if (!AniUtil.getAniList().contains(ani)) {
                 return;
             }
 
@@ -794,7 +794,7 @@ public class DownloadService {
      */
     public synchronized Optional<Ani> findAniByDownloadPath(TorrentsInfo torrentsInfo) {
         String downloadDir = torrentsInfo.getDownloadDir();
-        return AniUtil.ANI_LIST
+        return AniUtil.getAniList()
                 .stream()
                 .filter(ani -> {
                     String path = getDownloadPath(ani);

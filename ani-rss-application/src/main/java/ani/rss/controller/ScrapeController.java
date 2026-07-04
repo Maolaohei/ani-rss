@@ -43,7 +43,7 @@ public class ScrapeController extends BaseController {
     public Result<Void> scrape(@RequestParam("force") Boolean force, @RequestBody List<String> ids) {
         Assert.notEmpty(ids, "未选择订阅");
 
-        List<Ani> anis = AniUtil.ANI_LIST
+        List<Ani> anis = AniUtil.getAniList()
                 .stream()
                 .filter(ani -> ids.contains(ani.getId()))
                 .toList();

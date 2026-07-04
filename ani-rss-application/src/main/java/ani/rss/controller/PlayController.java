@@ -88,7 +88,7 @@ public class PlayController extends BaseController {
     @PostMapping("/playList")
     public Result<List<PlayItem>> playList(@RequestBody Ani ani) {
         String url = ani.getUrl();
-        Optional<Ani> first = AniUtil.ANI_LIST
+        Optional<Ani> first = AniUtil.getAniList()
                 .stream()
                 .filter(it -> url.equals(it.getUrl()))
                 .findFirst();
