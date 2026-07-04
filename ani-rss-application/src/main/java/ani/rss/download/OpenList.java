@@ -312,8 +312,14 @@ public class OpenList implements BaseDownload {
                     .toList();
             fsMove(firstVideoPath, savePath, names);
 
-            // 删除残留文件夹（合集无子文件夹，跳过）
-            if (!isCollection) {
+            // 清理：删除下载产生的空子目录
+            if (isCollection) {
+                // 合集：删除 savePath 下除视频/字幕外的空子目录
+                fsList(savePath, true).stream()
+                        .filter(OpenListFileInfo::getIsDir)
+                        .filter(dir -> !renameMap.containsValue(dir.getName()))
+                        .forEach(dir -> fsRemove(savePath, List.of(dir.getName())));
+            } else {
                 fsRemove(savePath, List.of(reName));
             }
 
