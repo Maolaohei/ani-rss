@@ -41,10 +41,12 @@ public class ItemsUtil {
         Config config = ConfigUtil.CONFIG;
         String url = ani.getUrl();
         String subgroup = StrUtil.blankToDefault(ani.getSubgroup(), "未知字幕组");
+        log.info("[DEBUG] getItems(Ani) url={} subgroup={} standbyRss={}", url, subgroup, config.getStandbyRss());
         List<Item> items = new ArrayList<>(ItemsUtil.getItems(ani, url, subgroup)
                 .stream()
                 .peek(item -> item.setMaster(true))
                 .toList());
+        log.info("[DEBUG] 主RSS获取到 {} 条items", items.size());
 
         if (!config.getStandbyRss()) {
             // v2: 合集优先去重
@@ -56,7 +58,9 @@ public class ItemsUtil {
         }
 
         List<StandbyRss> standbyRssList = ani.getStandbyRssList();
+        log.info("[DEBUG] standbyRssList.size={} standbyRss urls:", standbyRssList.size());
         for (StandbyRss rss : standbyRssList) {
+            log.info("[DEBUG]   standby: label={} url={}", rss.getLabel(), rss.getUrl());
             ThreadUtil.sleep(1000);
             subgroup = StrUtil.blankToDefault(rss.getLabel(), "未知字幕组");
             Ani clone = ObjUtil.clone(ani);
@@ -66,6 +70,7 @@ public class ItemsUtil {
                     .peek(item -> item.setMaster(false))
                     .toList());
         }
+        log.info("[DEBUG] 备用RSS处理完后总items数量: {}", items.size());
         // 多字幕组共存模式
         Boolean coexist = config.getCoexist();
         if (coexist) {
@@ -261,16 +266,27 @@ public class ItemsUtil {
             items.add(addNewItem);
         }
 
+        log.info("[DEBUG] rename前 items数量: {}", items.size());
+        for (Item debugItem : items) {
+            log.info("[DEBUG] 待rename: {}", debugItem.getTitle());
+        }
+
         items = items.stream()
                 .filter(item -> {
                     try {
-                        return RenameUtil.rename(ani, item);
+                        boolean result = RenameUtil.rename(ani, item);
+                        if (!result) {
+                            log.info("[DEBUG] rename返回false: {}", item.getTitle());
+                        }
+                        return result;
                     } catch (Exception e) {
                         log.error("解析rss视频集次出现问题");
                         log.error(e.getMessage(), e);
                     }
                     return false;
                 }).toList();
+
+        log.info("[DEBUG] rename后 items数量: {}", items.size());
 
         // v2: 展开范围/列表/分割类种子
         if (RenameUtil.isNamingV2(ani)) {
