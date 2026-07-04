@@ -44,6 +44,8 @@ import java.util.function.ToLongFunction;
 @RestController
 public class AniController extends BaseController {
     public static final AtomicBoolean DOWNLOAD = new AtomicBoolean(false);
+    // 订阅增删操作的锁，防止 TOCTOU 竞态
+    private static final Object SUBSCRIPTION_LOCK = new Object();
 
     @Resource
     private AniService aniService;
@@ -62,33 +64,35 @@ public class AniController extends BaseController {
                 .setUrl(ani.getUrl().trim());
         AniUtil.verify(ani);
 
-        Optional<Ani> first = AniUtil.getAniList().stream()
-                .filter(it -> it.getId().equals(ani.getId()))
-                .findFirst();
+        synchronized (SUBSCRIPTION_LOCK) {
+            Optional<Ani> first = AniUtil.getAniList().stream()
+                    .filter(it -> it.getId().equals(ani.getId()))
+                    .findFirst();
 
-        if (first.isPresent()) {
-            throw new IllegalArgumentException("此订阅已存在");
-        }
-
-        first = AniUtil.getAniList().stream()
-                .filter(it -> it.getTitle().equals(ani.getTitle()) && it.getSeason().equals(ani.getSeason()))
-                .findFirst();
-
-        String title = ani.getTitle();
-        Integer season = ani.getSeason();
-
-        if (first.isPresent()) {
-            Config config = ConfigUtil.CONFIG;
-            Boolean replace = config.getReplace();
-            if (replace) {
-                AniUtil.getAniList().remove(first.get());
-                log.info("自动替换 {} 第{}季", title, season);
-            } else {
-                throw new IllegalArgumentException("订阅标题重复");
+            if (first.isPresent()) {
+                throw new IllegalArgumentException("此订阅已存在");
             }
-        }
 
-        AniUtil.getAniList().add(ani);
+            first = AniUtil.getAniList().stream()
+                    .filter(it -> it.getTitle().equals(ani.getTitle()) && it.getSeason().equals(ani.getSeason()))
+                    .findFirst();
+
+            String title = ani.getTitle();
+            Integer season = ani.getSeason();
+
+            if (first.isPresent()) {
+                Config config = ConfigUtil.CONFIG;
+                Boolean replace = config.getReplace();
+                if (replace) {
+                    AniUtil.getAniList().remove(first.get());
+                    log.info("自动替换 {} 第{}季", title, season);
+                } else {
+                    throw new IllegalArgumentException("订阅标题重复");
+                }
+            }
+
+            AniUtil.getAniList().add(ani);
+        }
         AniUtil.sync();
         Boolean enable = ani.getEnable();
         if (enable) {
@@ -206,14 +210,17 @@ public class AniController extends BaseController {
     @PostMapping("/deleteAni")
     public Result<Void> deleteAni(@RequestBody List<String> ids, @RequestParam("deleteFiles") Boolean deleteFiles) {
         Assert.notEmpty(ids, "未选择订阅");
-        List<Ani> anis = AniUtil.getAniList().stream()
-                .filter(it -> ids.contains(it.getId()))
-                .toList();
-        if (anis.isEmpty()) {
-            return Result.error("删除失败");
-        }
-        for (Ani ani : anis) {
-            AniUtil.getAniList().remove(ani);
+        List<Ani> anis;
+        synchronized (SUBSCRIPTION_LOCK) {
+            anis = AniUtil.getAniList().stream()
+                    .filter(it -> ids.contains(it.getId()))
+                    .toList();
+            if (anis.isEmpty()) {
+                return Result.error("删除失败");
+            }
+            for (Ani ani : anis) {
+                AniUtil.getAniList().remove(ani);
+            }
         }
 
         AniUtil.sync();
