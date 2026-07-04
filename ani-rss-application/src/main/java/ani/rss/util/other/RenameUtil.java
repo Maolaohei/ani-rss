@@ -248,15 +248,12 @@ public class RenameUtil {
             }
             // OVA 使用 S00 命名
             season = 0;
-            log.info("[DEBUG-Rename-OVA] title原始={} title清洗后={}", ani.getTitle(), renameDel(title));
             title = renameDel(title);
             // 防御：标题为空时从 RSS 标题中提取番剧名（支持中英文括号）
             if (StrUtil.isBlank(title)) {
-                log.info("[DEBUG-Rename-OVA] title为空，尝试从RSS标题提取");
                 Matcher bracketM = Pattern.compile("(?:\\[|【)(.+?)(?:\\]|】)").matcher(itemTitle);
                 if (bracketM.find() && bracketM.find()) {
                     title = bracketM.group(1).trim();
-                    log.info("[DEBUG-Rename-OVA] 括号提取title={}", title);
                 }
             }
         }
@@ -376,7 +373,8 @@ public class RenameUtil {
         if (renameTemplate.contains("${themoviedbName}")) {
             renameTemplate = renameTemplate.replace("${themoviedbName}", title);
         }
-        if (StrUtil.isNotBlank(title) && renameTemplate.trim().startsWith("S")) {
+        // 仅当标题完全为空（只剩 SxxExx）时才补回标题
+        if (StrUtil.isNotBlank(title) && renameTemplate.trim().matches("S\\d+E\\d+.*")) {
             renameTemplate = title + " " + renameTemplate.trim();
         }
 
@@ -396,7 +394,6 @@ public class RenameUtil {
 
         item
                 .setReName(reName);
-        log.info("[DEBUG-Rename-OVA] 最终reName={} title={} template={}", reName, title, getRenameTemplate(ani));
         return true;
     }
 
