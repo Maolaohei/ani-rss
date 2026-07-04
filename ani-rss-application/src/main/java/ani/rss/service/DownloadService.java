@@ -93,11 +93,11 @@ public class DownloadService {
         // 实时保存文件
         boolean sync = false;
 
-        // v2: episode 级去重，跟踪已下载集数
+        // v2: episode 级去重，跟踪已下载集数（含合集范围内所有集数）
         boolean v2 = RenameUtil.isNamingV2(ani);
         Set<Double> downloadedEpisodes = v2 ? new HashSet<>() : null;
 
-        // 本地 infoHash 去重，防止合集展开后重复推送（OpenList 的 getTorrentsInfos 返回空列表，无法依赖客户端去重）
+        // 本地 infoHash 去重：合集展开后的 clone 仍会进入循环，但同 infoHash 的第二个及后续 clone 会被此 Set 过滤跳过
         Set<String> pushedHashes = new HashSet<>();
 
         for (Item item : items) {
@@ -244,7 +244,7 @@ public class DownloadService {
                 continue;
             }
 
-            // 本地 infoHash 去重：合集展开后共享同一 magnet，防止 OpenList 等无法查询任务列表的客户端重复推送
+            // infoHash 去重：合集展开后多个 clone 共享同一 infoHash，第一个通过后后续 clone 被跳过
             if (!pushedHashes.add(hash)) {
                 log.debug("infoHash 已推送过，跳过 {} {}", hash, reName);
                 if (master && !is5) {
