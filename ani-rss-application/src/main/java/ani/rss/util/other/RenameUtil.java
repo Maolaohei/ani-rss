@@ -48,7 +48,7 @@ public class RenameUtil {
     public static final String CN_RANGE_REG = "第(\\d+)[~～-](\\d+)[话話集]";
 
     // 分割部分: 上篇/下篇/Part 1/P1/上/下 等
-    public static final String PART_REG = "(上篇|下篇|前篇|後篇|前编|后编|前編|後編|第一部|第二部|第三部|Part\\s?[1-9](?![0-9])|P[1-9](?![0-9])|上(?=\\s|\\[|$)|下(?=\\s|\\[|$))";
+    public static final String PART_REG = "(上篇|下篇|前篇|後篇|前编|后编|前編|後編|第一部|第二部|第三部|Part\\s?[1-9](?![0-9])|P[1-9](?![0-9]))";
 
     // 分数格式: (1/2), (2/3)
     public static final String FRACTION_REG = "\\((\\d+)/(\\d+)\\)";
