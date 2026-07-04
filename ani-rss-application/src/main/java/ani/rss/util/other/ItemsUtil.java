@@ -552,7 +552,6 @@ public class ItemsUtil {
                 continue;
             }
 
-            List<Double> list = RenameUtil.extractEpisodeList(title);
             if (list != null && !list.isEmpty()) {
                 // 列表种子: 01,02,03 → [1,2,3]
                 for (Double ep : list) {
@@ -564,7 +563,6 @@ public class ItemsUtil {
                 continue;
             }
 
-            int partEp = RenameUtil.extractPartEpisode(title);
             if (partEp > 0) {
                 // 分割种子: 上篇→1, 下篇→2
                 Item clone = cloneItem(item);
