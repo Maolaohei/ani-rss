@@ -550,11 +550,14 @@ public class ItemsUtil {
             if (range != null && !range.isEmpty()) {
                 // 范围种子: 01-06 → [1,2,3,4,5,6]
                 log.info("[DEBUG-Expand] RANGE path! range={}", range);
+                // 偏移后的完整范围（含 offset）
+                List<Double> shiftedRange = range.stream()
+                        .map(ep -> ep + offset).collect(Collectors.toList());
                 for (Double ep : range) {
                     Item clone = cloneItem(item);
                     double newEp = ep + offset;
                     clone.setEpisode(newEp);
-                    clone.setEpisodeRange(range);
+                    clone.setEpisodeRange(shiftedRange);
                     // 同步更新 reName 中的集数（S00E01 → S00E02 等），只匹配 SxxExx 结构
                     String rn = clone.getReName();
                     if (rn != null) {
@@ -568,11 +571,13 @@ public class ItemsUtil {
 
             if (list != null && !list.isEmpty()) {
                 // 列表种子: 01,02,03 → [1,2,3]
+                List<Double> shiftedList = list.stream()
+                        .map(ep -> ep + offset).collect(Collectors.toList());
                 for (Double ep : list) {
                     Item clone = cloneItem(item);
                     double newEp = ep + offset;
                     clone.setEpisode(newEp);
-                    clone.setEpisodeRange(list);
+                    clone.setEpisodeRange(shiftedList);
                     String rn = clone.getReName();
                     if (rn != null) {
                         clone.setReName(rn.replaceAll("(S\\d{2})E\\d+", "$1" + String.format("E%02d", (int) newEp)));
