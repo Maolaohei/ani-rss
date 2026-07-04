@@ -291,11 +291,20 @@ public class ItemsUtil {
         // v2: 展开范围/列表/分割类种子
         if (RenameUtil.isNamingV2(ani)) {
             items = expandMultiEpisode(ani, items);
+            log.info("[DEBUG] expandMultiEpisode后 items数量: {}", items.size());
+            for (Item di : items) {
+                log.info("[DEBUG]   expand: ep={} title={}", di.getEpisode(), di.getTitle().substring(0, Math.min(60, di.getTitle().length())));
+            }
         }
 
         // v2: 合集优先去重
         if (RenameUtil.isNamingV2(ani)) {
-            return distinctWithCollectionPriority(items);
+            items = distinctWithCollectionPriority(items);
+            log.info("[DEBUG] distinct后 items数量: {}", items.size());
+            for (Item di : items) {
+                log.info("[DEBUG]   distinct: ep={} title={}", di.getEpisode(), di.getTitle().substring(0, Math.min(60, di.getTitle().length())));
+            }
+            return items;
         }
 
         return CollUtil.distinct(items, item -> item.getEpisode().toString(), true);
