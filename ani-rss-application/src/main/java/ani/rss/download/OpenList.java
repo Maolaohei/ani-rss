@@ -33,6 +33,7 @@ import org.springframework.stereotype.Service;
 import java.io.File;
 import java.nio.file.Path;
 import java.util.*;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 @Slf4j
@@ -274,6 +275,26 @@ public class OpenList implements BaseDownload {
                     .map(m -> rename ? m.getValue() : m.getKey())
                     .toList();
             fsMove(firstVideoPath, savePath, names);
+
+            // 缺集校验：对比标题声明范围与实际下载文件
+            if (isCollection && item.getEpisodeRange() != null) {
+                List<Double> expected = item.getEpisodeRange();
+                List<OpenListFileInfo> actualVideos = findFiles(savePath).stream()
+                        .filter(f -> FileUtils.isVideoFormat(f.getName()))
+                        .toList();
+                Set<Double> downloadedEps = actualVideos.stream()
+                        .map(f -> extractEpisodeFromFileName(f.getName()))
+                        .filter(Objects::nonNull)
+                        .map(ep -> Double.parseDouble(ep.replace(".5", "")))
+                        .collect(Collectors.toSet());
+                List<Double> missing = expected.stream()
+                        .filter(ep -> !downloadedEps.contains(ep))
+                        .toList();
+                if (!missing.isEmpty()) {
+                    log.warn("合集缺集: {} 预期 {} 集, 实际 {} 集, 缺失 {}",
+                            reName, expected.size(), downloadedEps.size(), missing);
+                }
+            }
 
             // ③ 重新扫描源目录，确认视频/字幕已全部移走再删
             if (isCollection) {
