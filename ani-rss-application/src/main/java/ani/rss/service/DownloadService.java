@@ -465,6 +465,7 @@ public class DownloadService {
         for (int i = 1; i <= downloadRetry; i++) {
             try {
                 if (TorrentUtil.DOWNLOAD.download(ani, item, savePath, torrentFile)) {
+                    TorrentUtil.refreshTorrentsCache();
                     return;
                 }
             } catch (Exception e) {

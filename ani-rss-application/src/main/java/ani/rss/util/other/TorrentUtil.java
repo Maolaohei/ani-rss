@@ -25,6 +25,8 @@ import org.eclipse.bittorrent.TorrentFile;
 import java.io.File;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 管理下载器的调用与种子存取
@@ -33,14 +35,30 @@ import java.util.Objects;
 public class TorrentUtil {
     public static BaseDownload DOWNLOAD;
 
+    // 种子列表缓存：避免短时间内重复请求下载器
+    private static volatile List<TorrentsInfo> cachedTorrents;
+    private static volatile long cacheExpireTime = 0;
+    private static final long CACHE_TTL_MS = TimeUnit.SECONDS.toMillis(5);
+
     /**
-     * 获取任务列表
-     *
-     * @return
+     * 获取任务列表（带缓存，5秒内重复调用直接返回缓存）
      */
     public static synchronized List<TorrentsInfo> getTorrentsInfos() {
-        ThreadUtil.sleep(1000);
-        return DOWNLOAD.getTorrentsInfos();
+        long now = System.currentTimeMillis();
+        if (cachedTorrents != null && now < cacheExpireTime) {
+            return cachedTorrents;
+        }
+        cachedTorrents = DOWNLOAD.getTorrentsInfos();
+        cacheExpireTime = now + CACHE_TTL_MS;
+        return cachedTorrents;
+    }
+
+    /**
+     * 强制刷新种子列表缓存
+     */
+    public static synchronized void refreshTorrentsCache() {
+        cachedTorrents = null;
+        cacheExpireTime = 0;
     }
 
     /**
@@ -155,7 +173,6 @@ public class TorrentUtil {
      * @return
      */
     public static synchronized Boolean login() {
-        ThreadUtil.sleep(1000);
         Config config = ConfigUtil.CONFIG;
         String downloadPath = config.getDownloadPathTemplate();
         if (StrUtil.isBlank(downloadPath)) {
@@ -234,6 +251,7 @@ public class TorrentUtil {
             log.error("删除任务失败 {}", name);
             return false;
         }
+        refreshTorrentsCache();
         log.info("删除任务成功 {}", name);
         if (!deleteFiles) {
             return true;
@@ -271,10 +289,11 @@ public class TorrentUtil {
             return;
         }
 
-        ThreadUtil.sleep(1000);
+        ThreadUtil.sleep(500);
         Boolean renamed = DOWNLOAD.rename(torrentsInfo);
         if (renamed) {
             addTags(torrentsInfo, TorrentsTags.RENAME.getValue());
+            refreshTorrentsCache();
         }
     }
 
