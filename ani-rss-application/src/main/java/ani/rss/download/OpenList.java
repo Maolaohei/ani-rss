@@ -90,15 +90,9 @@ public class OpenList implements BaseDownload {
 
         String magnet = TorrentUtil.getMagnet(torrentFile);
         String reName = item.getReName();
-        // 合集种子用番剧名（去掉集数后缀）作为文件夹名，避免子目录套子目录
-        String folderName = reName;
-        if (item.getEpisodeRange() != null && item.getEpisodeRange().size() > 1) {
-            folderName = reName.replaceAll("\\s*[Ss]\\d+[Ee]\\d+.*$", "").trim();
-            if (StrUtil.isBlank(folderName)) {
-                folderName = ani.getTitle();
-            }
-        }
-        String path = savePath + "/" + folderName;
+        // 合集种子直接下载到季目录，不建子文件夹
+        Boolean isCollection = item.getEpisodeRange() != null && item.getEpisodeRange().size() > 1;
+        String path = isCollection ? savePath : savePath + "/" + reName;
         Boolean standbyRss = config.getStandbyRss();
         Boolean delete = config.getDelete();
         Boolean coexist = config.getCoexist();
@@ -318,8 +312,10 @@ public class OpenList implements BaseDownload {
                     .toList();
             fsMove(firstVideoPath, savePath, names);
 
-            // 删除残留文件夹
-            fsRemove(savePath, List.of(folderName));
+            // 删除残留文件夹（合集无子文件夹，跳过）
+            if (!isCollection) {
+                fsRemove(savePath, List.of(reName));
+            }
 
             NotificationUtil.send(config, ani,
                     StrFormatter.format("{} 下载完成", item.getReName()),
