@@ -9,7 +9,6 @@ import cn.hutool.system.SystemUtil;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.File;
-import java.nio.file.Path;
 
 @Slf4j
 public class WindowsStart implements BaseStart {
@@ -74,10 +73,9 @@ public class WindowsStart implements BaseStart {
     private static File getWindowsShortcut() {
         String appData = SystemUtil.get("APPDATA");
         if (StrUtil.isBlank(appData)) {
-            appData = new File(FileUtil.getUserHomePath(), "/AppData/Roaming").toString();
+            appData = FileUtil.getUserHomePath() + "/AppData/Roaming";
         }
-        return Path.of(appData, "/Microsoft/Windows/Start Menu/Programs/Startup/", SHORTCUT_NAME)
-                .toFile();
+        return new File(appData + "/Microsoft/Windows/Start Menu/Programs/Startup/" + SHORTCUT_NAME);
     }
 
     private static String escapeVbs(String value) {

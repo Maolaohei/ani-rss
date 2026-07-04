@@ -10,13 +10,11 @@ import ani.rss.entity.GroupRegex;
 import ani.rss.util.basic.HttpReq;
 import ani.rss.util.other.AniUtil;
 import ani.rss.util.other.BgmUtil;
-import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.util.StrUtil;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import org.springframework.stereotype.Service;
 
-import java.util.Comparator;
 import java.util.List;
 
 @Service
@@ -50,27 +48,20 @@ public class AniBTService {
 
         List<AniBT.ByWeekday> byWeekday = aniBT.getByWeekday();
 
-        for (AniBT.ByWeekday weekday : byWeekday) {
-            List<AniBT.Anime> animeList = weekday.getAnimes();
-            animeList = animeList.stream()
-                    .filter(anime -> anime.getRssReleaseCount() > 0)
-                    .sorted(Comparator.comparingDouble(AniBT.Anime::getRating).reversed())
-                    .peek(anime -> {
-                        boolean exists = bgmIdList.contains(anime.getBgmId());
-                        anime.setExists(exists);
-                    })
-                    .toList();
-            weekday.setAnimes(animeList);
-        }
-
         WeekComparator weekComparator = new WeekComparator();
-        byWeekday = byWeekday.stream()
-                .filter(weekday -> CollUtil.isNotEmpty(weekday.getAnimes()))
-                .sorted((a, b) ->
-                        weekComparator.compare(a.getWeekdayLabel(), b.getWeekdayLabel())
-                )
-                .toList();
+
+        byWeekday = byWeekday.stream().sorted((a, b) ->
+                weekComparator.compare(a.getWeekdayLabel(), b.getWeekdayLabel())
+        ).toList();
         aniBT.setByWeekday(byWeekday);
+
+        for (AniBT.ByWeekday weekday : byWeekday) {
+            List<AniBT.Anime> animes = weekday.getAnimes();
+            for (AniBT.Anime anime : animes) {
+                boolean exists = bgmIdList.contains(anime.getBgmId());
+                anime.setExists(exists);
+            }
+        }
 
         return aniBT;
     }

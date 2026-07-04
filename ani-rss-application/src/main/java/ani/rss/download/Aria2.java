@@ -243,6 +243,7 @@ public class Aria2 implements BaseDownload {
 
             String fileReName;
             if (isMultiFile) {
+                // 多文件合集：从原始文件名提取集数
                 fileReName = getFileReNameMulti(name, reName, isSub);
             } else {
                 fileReName = getFileReName(name, reName);

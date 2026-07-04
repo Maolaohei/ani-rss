@@ -15,7 +15,6 @@ import cn.hutool.json.JSONUtil;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.File;
-import java.nio.file.Path;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
@@ -153,7 +152,7 @@ public class WebHookNotification implements BaseNotification {
                     File file = new File(filename);
                     File configDir = ConfigUtil.getConfigDir();
                     if (!file.exists()) {
-                        file = Path.of(configDir.toString(), "files", filename).toFile();
+                        file = new File(configDir + "/files/" + filename);
                     }
                     if (!file.exists()) {
                         return null;

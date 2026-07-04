@@ -19,7 +19,7 @@ public class MikanInfo implements Serializable {
      * 番剧 id
      */
     @Schema(description = "番剧 id")
-    private String bgmId;
+    private String bangumiId;
 
     /**
      * 封面

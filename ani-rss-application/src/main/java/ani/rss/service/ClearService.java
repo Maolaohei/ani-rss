@@ -11,7 +11,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.io.File;
-import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
@@ -63,19 +62,17 @@ public class ClearService {
     public Long clearCover() {
         File configDir = ConfigUtil.getConfigDir();
         String configDirStr = FileUtils.getAbsolutePath(configDir);
-        File filesDir = new File(configDirStr, "files");
-        File imgDir = new File(configDirStr, "img");
 
-        FileUtil.mkdir(filesDir);
-        FileUtil.mkdir(imgDir);
+        FileUtil.mkdir(configDirStr + "/files");
+        FileUtil.mkdir(configDirStr + "/img");
 
         Set<String> covers = AniUtil.ANI_LIST
                 .stream()
                 .map(Ani::getCover)
-                .map(s -> FileUtils.getAbsolutePath(Path.of(configDirStr, "files", s).toFile()))
+                .map(s -> FileUtils.getAbsolutePath(new File(configDirStr + "/files/" + s)))
                 .collect(Collectors.toSet());
 
-        Set<File> files = FileUtil.loopFiles(filesDir)
+        Set<File> files = FileUtil.loopFiles(configDirStr + "/files")
                 .stream()
                 .filter(file -> {
                     String fileName = FileUtils.getAbsolutePath(file);
@@ -84,7 +81,7 @@ public class ClearService {
         long filesSize = files.stream()
                 .mapToLong(File::length)
                 .sum();
-        long imgSize = FileUtil.size(imgDir);
+        long imgSize = FileUtil.size(new File(configDirStr + "/img"));
 
         for (File file : files) {
             FileUtil.del(file);

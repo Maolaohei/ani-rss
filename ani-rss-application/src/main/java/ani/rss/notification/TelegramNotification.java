@@ -17,7 +17,6 @@ import com.google.gson.JsonObject;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.File;
-import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -141,7 +140,7 @@ public class TelegramNotification implements BaseNotification {
         }
 
         File configDir = ConfigUtil.getConfigDir();
-        File photo = Path.of(configDir.toString(), "files", cover).toFile();
+        File photo = new File(configDir + "/files/" + cover);
 
         if (!photo.exists()) {
             notificationConfig.setTelegramImage(false);
