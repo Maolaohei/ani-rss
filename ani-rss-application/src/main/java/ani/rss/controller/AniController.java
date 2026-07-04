@@ -113,7 +113,7 @@ public class AniController extends BaseController {
                 }
             });
         }
-        log.info("添加订阅 {} {} {}", title, ani.getUrl(), ani.getId());
+        log.info("添加订阅 {} {} {}", ani.getTitle(), ani.getUrl(), ani.getId());
 
         return Result.success("添加订阅成功");
     }
