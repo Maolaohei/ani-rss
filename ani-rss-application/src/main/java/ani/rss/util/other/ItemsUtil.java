@@ -545,8 +545,14 @@ public class ItemsUtil {
                 log.info("[DEBUG-Expand] RANGE path! range={}", range);
                 for (Double ep : range) {
                     Item clone = cloneItem(item);
-                    clone.setEpisode(ep + offset);
+                    double newEp = ep + offset;
+                    clone.setEpisode(newEp);
                     clone.setEpisodeRange(range);
+                    // 同步更新 reName 中的集数（S00E01 → S00E02 等）
+                    String rn = clone.getReName();
+                    if (rn != null) {
+                        clone.setReName(rn.replaceAll("E\\d+", String.format("E%02d", (int) newEp)));
+                    }
                     expanded.add(clone);
                 }
                 continue;
@@ -556,8 +562,13 @@ public class ItemsUtil {
                 // 列表种子: 01,02,03 → [1,2,3]
                 for (Double ep : list) {
                     Item clone = cloneItem(item);
-                    clone.setEpisode(ep + offset);
+                    double newEp = ep + offset;
+                    clone.setEpisode(newEp);
                     clone.setEpisodeRange(list);
+                    String rn = clone.getReName();
+                    if (rn != null) {
+                        clone.setReName(rn.replaceAll("E\\d+", String.format("E%02d", (int) newEp)));
+                    }
                     expanded.add(clone);
                 }
                 continue;
