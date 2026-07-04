@@ -302,7 +302,6 @@ public class OpenList implements BaseDownload {
                         .filter(f -> FileUtils.isVideoFormat(f.getName()) || FileUtils.isSubtitleFormat(f.getName()))
                         .toList();
                 if (remaining.isEmpty()) {
-                    // 源目录已空，安全删除子目录
                     fsList(path, true).stream()
                             .filter(OpenListFileInfo::getIsDir)
                             .forEach(dir -> fsRemove(path, List.of(dir.getName())));
@@ -310,14 +309,15 @@ public class OpenList implements BaseDownload {
                     log.warn("源目录仍有 {} 个视频/字幕未移走，跳过删除", remaining.size());
                 }
             } else {
-                // 单集：重新扫描确认为空再删
-                List<OpenListFileInfo> remaining = findFiles(savePath + "/" + reName).stream()
+                // 单集：校验后递归删除整个临时文件夹
+                String tempDir = savePath + "/" + reName;
+                List<OpenListFileInfo> remaining = findFiles(tempDir).stream()
                         .filter(f -> FileUtils.isVideoFormat(f.getName()) || FileUtils.isSubtitleFormat(f.getName()))
                         .toList();
                 if (remaining.isEmpty()) {
                     fsRemove(savePath, List.of(reName));
                 } else {
-                    log.warn("目录 {}/{} 仍有文件未移走，跳过删除", savePath, reName);
+                    log.warn("目录 {} 仍有 {} 个视频/字幕未移走，跳过删除", tempDir, remaining.size());
                 }
             }
 
