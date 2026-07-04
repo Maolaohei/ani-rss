@@ -35,47 +35,47 @@
           <el-table-column type="selection" width="55" fixed/>
           <el-table-column label="是否下载" min-width="100">
             <template #default="it">
-              <el-tag v-if="props.ani['notDownload'].includes(showItems[it.$index]['episode'])" type="info">否</el-tag>
+              <el-tag v-if="props.ani['notDownload'].includes(it.row['episode'])" type="info">否</el-tag>
               <el-tag v-else>是</el-tag>
             </template>
           </el-table-column>
           <el-table-column label="本地存在" min-width="100">
             <template #default="it">
-              <el-tag v-if="!showItems[it.$index].local" type="info">否</el-tag>
+              <el-tag v-if="!it.row.local" type="info">否</el-tag>
               <el-tag v-else>是</el-tag>
             </template>
           </el-table-column>
           <el-table-column label="主RSS" min-width="80">
             <template #default="it">
-              <el-tag v-if="!showItems[it.$index]['master']" type="info">否</el-tag>
+              <el-tag v-if="!it.row['master']" type="info">否</el-tag>
               <el-tag v-else>是</el-tag>
             </template>
           </el-table-column>
           <el-table-column label="字幕组" min-width="100">
             <template #default="it">
               <el-text size="small" truncated>
-                {{ showItems[it.$index].subgroup }}
+                {{ it.row.subgroup }}
               </el-text>
             </template>
           </el-table-column>
           <el-table-column label="来源" width="80">
             <template #default="it">
-              <el-tag v-if="showItems[it.$index]['children']" type="warning" size="small">合集</el-tag>
-              <el-tag v-else-if="showItems[it.$index]['episodeRange']" size="small">子集</el-tag>
+              <el-tag v-if="it.row['children']" type="warning" size="small">合集</el-tag>
+              <el-tag v-else-if="it.row['episodeRange']" size="small">子集</el-tag>
               <el-tag v-else type="info" size="small">单集</el-tag>
             </template>
           </el-table-column>
           <el-table-column label="标题" min-width="400">
             <template #default="it">
               <el-text size="small">
-                <template v-if="showItems[it.$index]['children']">
-                  {{ showItems[it.$index].title }} (共 {{ showItems[it.$index]['children'].length }} 集)
+                <template v-if="it.row['children']">
+                  {{ it.row.title }} (共 {{ it.row['children'].length }} 集)
                 </template>
-                <template v-else-if="showItems[it.$index]['episodeRange']">
-                  子集 {{ String(showItems[it.$index]['episode']).padStart(2, '0') }}
+                <template v-else-if="it.row['episodeRange']">
+                  子集 {{ String(it.row['episode']).padStart(2, '0') }}
                 </template>
                 <template v-else>
-                  {{ showItems[it.$index].title }}
+                  {{ it.row.title }}
                 </template>
               </el-text>
             </template>
@@ -83,28 +83,28 @@
           <el-table-column label="重命名" min-width="280">
             <template #default="it">
               <el-text size="small">
-                {{ showItems[it.$index]['reName'] }}
+                {{ it.row['reName'] }}
               </el-text>
             </template>
           </el-table-column>
           <el-table-column label="发布时间" min-width="120">
             <template #default="it">
               <el-text size="small">
-                {{ showItems[it.$index]['pubDate'] }}
+                {{ it.row['pubDate'] }}
               </el-text>
             </template>
           </el-table-column>
           <el-table-column label="InfoHash" min-width="200">
             <template #default="it">
               <el-text size="small">
-                {{ showItems[it.$index]['infoHash'] }}
+                {{ it.row['infoHash'] }}
               </el-text>
             </template>
           </el-table-column>
           <el-table-column prop="formatSize" label="大小" width="120"/>
           <el-table-column label="种子" width="90">
             <template #default="it">
-              <el-button size="small" bg text @click="copy(showItems[it.$index]['torrent'])">复制</el-button>
+              <el-button size="small" bg text @click="copy(it.row['torrent'])">复制</el-button>
             </template>
           </el-table-column>
         </el-table>
