@@ -96,12 +96,6 @@ public class ItemsUtil {
         String xml = getRss(rssUrl);
 
         List<String> exclude = ani.getExclude();
-        // v2: 移除范围/合集排除规则，由展开逻辑处理
-        if (RenameUtil.isNamingV2(ani)) {
-            exclude = new ArrayList<>(exclude);
-            exclude.remove("\\d-\\d");
-            exclude.remove("合集");
-        }
         List<String> match = ani.getMatch();
 
         List<Item> items = new ArrayList<>();
