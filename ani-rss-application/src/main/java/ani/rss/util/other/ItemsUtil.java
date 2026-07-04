@@ -673,6 +673,53 @@ public class ItemsUtil {
         return result;
     }
 
+    /**
+     * 预览专用：将合集 items 聚合成树结构，合集作为父节点，子集挂在 children 下
+     */
+    public static List<Item> groupCollectionForPreview(List<Item> items) {
+        if (CollUtil.isEmpty(items)) {
+            return items;
+        }
+
+        // 按 infoHash 分组（同一合集展开的 clone 共享 infoHash）
+        Map<String, List<Item>> grouped = items.stream()
+                .filter(item -> item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty())
+                .collect(Collectors.groupingBy(Item::getInfoHash));
+
+        // 已被聚合的 infoHash 集合
+        Set<String> groupedHashes = new HashSet<>(grouped.keySet());
+
+        List<Item> result = new ArrayList<>();
+        for (Item item : items) {
+            if (groupedHashes.contains(item.getInfoHash())) {
+                // 只添加一次父节点
+                groupedHashes.remove(item.getInfoHash());
+                List<Item> children = grouped.get(item.getInfoHash());
+
+                // 父节点：用第一个 clone 的信息，标题保留原始合集标题
+                Item parent = new Item();
+                parent.setTitle(item.getTitle());
+                parent.setReName(item.getReName());
+                parent.setTorrent(item.getTorrent());
+                parent.setInfoHash(item.getInfoHash());
+                parent.setFormatSize(item.getFormatSize());
+                parent.setLength(item.getLength());
+                parent.setLocal(item.getLocal());
+                parent.setMaster(item.getMaster());
+                parent.setSubgroup(item.getSubgroup());
+                parent.setPubDate(item.getPubDate());
+                parent.setEpisodeRange(item.getEpisodeRange());
+                parent.setChildren(children);
+
+                result.add(parent);
+            } else if (item.getEpisodeRange() == null || item.getEpisodeRange().isEmpty()) {
+                // 单集直接保留
+                result.add(item);
+            }
+        }
+        return result;
+    }
+
     public static String getSubgroup(List<Item> items) {
         String reg = "^\\[(.+?)]";
         for (Item item : items) {

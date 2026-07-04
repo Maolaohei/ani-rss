@@ -92,4 +92,11 @@ public class Item implements Serializable {
      */
     @Schema(description = "版本号")
     private Integer version;
+
+    /**
+     * 子集列表 (预览时合集折叠用)
+     */
+    @Schema(description = "子集列表")
+    @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+    private List<Item> children;
 }

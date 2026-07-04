@@ -27,6 +27,8 @@
       <div class="items-table-container">
         <el-table :data="showItems" height="500"
                   size="small"
+                  row-key="infoHash"
+                  :tree-props="{children: 'children', hasChildren: 'hasChildren'}"
                   @selection-change="handleSelectionChange"
                   scrollbar-always-on
                   stripe>
@@ -56,10 +58,25 @@
               </el-text>
             </template>
           </el-table-column>
+          <el-table-column label="来源" width="80">
+            <template #default="it">
+              <el-tag v-if="showItems[it.$index]['children']" type="warning" size="small">合集</el-tag>
+              <el-tag v-else-if="showItems[it.$index]['episodeRange']" size="small">子集</el-tag>
+              <el-tag v-else type="info" size="small">单集</el-tag>
+            </template>
+          </el-table-column>
           <el-table-column label="标题" min-width="400">
             <template #default="it">
               <el-text size="small">
-                {{ showItems[it.$index].title }}
+                <template v-if="showItems[it.$index]['children']">
+                  {{ showItems[it.$index].title }} (共 {{ showItems[it.$index]['children'].length }} 集)
+                </template>
+                <template v-else-if="showItems[it.$index]['episodeRange']">
+                  子集 {{ String(showItems[it.$index]['episode']).padStart(2, '0') }}
+                </template>
+                <template v-else>
+                  {{ showItems[it.$index].title }}
+                </template>
               </el-text>
             </template>
           </el-table-column>

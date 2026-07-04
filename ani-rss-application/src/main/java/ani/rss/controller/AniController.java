@@ -467,6 +467,9 @@ public class AniController extends BaseController {
 
         List<Integer> omitList = ItemsUtil.omitList(ani, items);
 
+        // 预览专用：合集折叠聚合
+        items = ItemsUtil.groupCollectionForPreview(items);
+
         Map<String, Object> map = Map.of(
                 "downloadPath", downloadPath,
                 "items", items,
