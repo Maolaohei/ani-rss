@@ -56,6 +56,9 @@ public class RenameUtil {
     // 年份排除: - 2024, - 10周年
     public static final String YEAR_LIKE_REG = "\\s[-]\\s*\\d{4}(?:\\s|$|\\])";
 
+    // 合集标题: 01-12 ... 合集, 01～24 ... 精校合集 等
+    public static final Pattern COLLECTION_TITLE_REG = Pattern.compile("\\d+\\s*[-~～]\\s*\\d+.*合集");
+
     // 版本号: v2, v3, V2 等（位于集数之后）
     public static final String VERSION_REG = "[vV](\\d+)(?:[^\\d]|$)";
 
@@ -282,7 +285,12 @@ public class RenameUtil {
         }
 
         if (!ova && StrUtil.isBlank(e)) {
-            return false;
+            // v2: 合集种子不依赖单集 episode 提取，交给 expandMultiEpisode 展开
+            if (v2 && COLLECTION_TITLE_REG.matcher(itemTitle).find()) {
+                e = "1";
+            } else {
+                return false;
+            }
         }
 
         if (!ova) {
