@@ -89,11 +89,11 @@ public class OpenList implements BaseDownload {
         savePath = ReUtil.replaceAll(savePath, "^[A-z]:", "");
 
         String magnet = TorrentUtil.getMagnet(torrentFile);
-        // 用 InfoHash 替代完整 magnet 进行任务匹配
         String infoHash = ReUtil.get(StringEnum.MAGNET_REG, magnet, 1);
         String reName = item.getReName();
-        Boolean isCollection = item.getEpisodeRange() != null && item.getEpisodeRange().size() > 1;
-        String path = isCollection ? savePath : savePath + "/" + reName;
+        // 下载位置：与 savePath 不同则为临时目录，移动后需清理
+        String path = savePath + "/" + reName;
+        String tempDownloadDir = path.equals(savePath) ? null : path;
         Boolean standbyRss = config.getStandbyRss();
         Boolean delete = config.getDelete();
         Boolean coexist = config.getCoexist();
@@ -277,7 +277,7 @@ public class OpenList implements BaseDownload {
             fsMove(firstVideoPath, savePath, names);
 
             // 缺集校验：对比标题声明范围与实际下载文件
-            if (isCollection && item.getEpisodeRange() != null) {
+            if (item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty()) {
                 List<Double> expected = item.getEpisodeRange();
                 List<OpenListFileInfo> actualVideos = findFiles(savePath).stream()
                         .filter(f -> FileUtils.isVideoFormat(f.getName()))
@@ -296,29 +296,10 @@ public class OpenList implements BaseDownload {
                 }
             }
 
-            // ③ 重新扫描源目录，确认视频/字幕已全部移走再删
-            if (isCollection) {
-                List<OpenListFileInfo> remaining = findFiles(path).stream()
-                        .filter(f -> FileUtils.isVideoFormat(f.getName()) || FileUtils.isSubtitleFormat(f.getName()))
-                        .toList();
-                if (remaining.isEmpty()) {
-                    fsList(path, true).stream()
-                            .filter(OpenListFileInfo::getIsDir)
-                            .forEach(dir -> fsRemove(path, List.of(dir.getName())));
-                } else {
-                    log.warn("源目录仍有 {} 个视频/字幕未移走，跳过删除", remaining.size());
-                }
-            } else {
-                // 单集：校验后递归删除整个临时文件夹
-                String tempDir = savePath + "/" + reName;
-                List<OpenListFileInfo> remaining = findFiles(tempDir).stream()
-                        .filter(f -> FileUtils.isVideoFormat(f.getName()) || FileUtils.isSubtitleFormat(f.getName()))
-                        .toList();
-                if (remaining.isEmpty()) {
-                    fsRemove(savePath, List.of(reName));
-                } else {
-                    log.warn("目录 {} 仍有 {} 个视频/字幕未移走，跳过删除", tempDir, remaining.size());
-                }
+            // 清理临时下载目录
+            if (tempDownloadDir != null) {
+                fsRemove(savePath, List.of(reName));
+                log.info("已删除临时目录 {}/{}", savePath, reName);
             }
 
             NotificationUtil.send(config, ani,
