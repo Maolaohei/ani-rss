@@ -553,6 +553,7 @@ public class ItemsUtil {
                     if (rn != null) {
                         clone.setReName(rn.replaceAll("(S\\d{2})E\\d+", "$1" + String.format("E%02d", (int) newEp)));
                     }
+                    clone.setFormatSize("合集");
                     expanded.add(clone);
                 }
                 continue;
@@ -569,6 +570,7 @@ public class ItemsUtil {
                     if (rn != null) {
                         clone.setReName(rn.replaceAll("(S\\d{2})E\\d+", "$1" + String.format("E%02d", (int) newEp)));
                     }
+                    clone.setFormatSize("合集");
                     expanded.add(clone);
                 }
                 continue;
