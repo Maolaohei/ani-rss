@@ -149,9 +149,20 @@ public class OpenList implements BaseDownload {
             }
 
             // ⑤ 等待完成（区分重试策略）
-            // tid 为空说明任务已存在且文件已就绪，直接跳到文件处理
             if (tid == null) {
-                log.info("任务已存在且文件已就绪，跳过等待 {}", reName);
+                // 10008 但找不到 taskId：轮询文件是否出现，超时则放弃
+                Integer alistDownloadTimeout = config.getAlistDownloadTimeout();
+                DateTime deadline = DateUtil.offsetMinute(DateTime.now(), alistDownloadTimeout);
+                while (DateTime.now().getTime() < deadline.getTime()) {
+                    boolean hasVideo = findFiles(path).stream()
+                            .anyMatch(f -> FileUtils.isVideoFormat(f.getName()));
+                    if (hasVideo) {
+                        log.info("10008 任务文件已就绪 {}", reName);
+                        break;
+                    }
+                    ThreadUtil.sleep(3000);
+                }
+                // 超时后仍无文件，由后续 videoList.isEmpty() 判定失败
             } else {
             DateTime startTime = DateTime.now();
             long retry = 0;
