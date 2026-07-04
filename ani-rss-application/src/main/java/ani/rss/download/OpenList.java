@@ -85,24 +85,26 @@ public class OpenList implements BaseDownload {
 
     @Override
     public synchronized Boolean download(Ani ani, Item item, String savePath, File torrentFile) {
-        // windows 真该死啊
         savePath = ReUtil.replaceAll(savePath, "^[A-z]:", "");
 
         String magnet = TorrentUtil.getMagnet(torrentFile);
+        // 用 InfoHash 替代完整 magnet 进行任务匹配
+        String infoHash = ReUtil.get(StringEnum.MAGNET_REG, magnet, 1);
         String reName = item.getReName();
-        // 合集种子直接下载到季目录，不建子文件夹
         Boolean isCollection = item.getEpisodeRange() != null && item.getEpisodeRange().size() > 1;
         String path = isCollection ? savePath : savePath + "/" + reName;
         Boolean standbyRss = config.getStandbyRss();
         Boolean delete = config.getDelete();
         Boolean coexist = config.getCoexist();
+
+        String tid = null;
         try {
             mkdir(path);
 
-            // 删除残留任务
-            deleteResidualTasks(magnet);
+            // ④ 用 InfoHash 清理残留任务
+            deleteResidualTasks(infoHash);
 
-            // 洗版，删除备 用RSS 所下载的视频
+            // 洗版
             if (standbyRss && delete && !coexist) {
                 String s = ReUtil.get(StringEnum.SEASON_REG, reName, 0);
                 String finalSavePath = savePath;
@@ -115,97 +117,63 @@ public class OpenList implements BaseDownload {
                             log.info("已开启备用RSS, 自动删除 {}/{}", finalSavePath, name);
                         });
             }
-            String tid;
-            try {
-                tid = fsAddOfflineDownload(magnet, path);
-                log.info("添加离线下载成功 {}", reName);
-            } catch (Exception e) {
-                log.error("添加离线下载失败 {}", reName);
-                throw new IllegalStateException("添加离线下载失败 " + reName);
-            }
 
-            // 记录开始时间
+            // 提交离线
+            tid = fsAddOfflineDownload(magnet, path);
+            log.info("添加离线下载成功 {}", reName);
+
+            // ⑤ 等待完成（区分重试策略）
             DateTime startTime = DateTime.now();
-
-            // 重试次数
             long retry = 0;
             while (true) {
                 Integer alistDownloadTimeout = config.getAlistDownloadTimeout();
                 Long alistDownloadRetryNumber = config.getAlistDownloadRetryNumber();
 
-                DateTime endTime = DateUtil.offsetMinute(startTime, alistDownloadTimeout);
-                DateTime currentTime = DateTime.now();
-                if (currentTime.getTime() >= endTime.getTime()) {
-                    // 超过下载超时限制
+                if (DateTime.now().getTime() >= DateUtil.offsetMinute(startTime, alistDownloadTimeout).getTime()) {
                     log.error("{} {} 分钟还未下载完成, 停止检测下载", reName, alistDownloadTimeout);
                     return false;
                 }
 
-                // https://github.com/AlistGo/alist/blob/main/pkg/task/task.go
                 Optional<OpenListTaskInfo> taskInfoOpt = taskInfo(tid);
-
                 if (taskInfoOpt.isEmpty()) {
                     continue;
                 }
 
                 OpenListTaskInfo taskInfo = taskInfoOpt.get();
                 OpenListTaskInfo.State state = taskInfo.getState();
-                String error = taskInfo.getError();
+                OpenListTaskInfo.RetryPolicy policy = state.getRetryPolicy();
 
-                // errored 重试
-                if (
-                        List.of(
-                                OpenListTaskInfo.State.Error,
-                                OpenListTaskInfo.State.Failing,
-                                OpenListTaskInfo.State.Failed
-                        ).contains(state)
-                ) {
-                    // 已到达最大重试次数 5 次, -1 不限制
-                    if (alistDownloadRetryNumber > -1) {
-                        if (retry >= alistDownloadRetryNumber) {
-                            // bug fix: 新资源下载完成后，OpenList 状态可能未及时刷新
-                            // 此处通过检查文件是否存在来兜底，存在则直接继续后续逻辑
-                            Optional<OpenListFileInfo> first = findFiles(path).stream()
-                                    .filter(openListFileInfo -> FileUtils.isVideoFormat(openListFileInfo.getName()))
-                                    .findFirst();
-                            if (first.isPresent()) {
-                                log.info("资源已下载完毕，OpenList 可能处于卡死状态，此处跳过");
-                                break;
-                            }
-                            log.error("离线下载失败 {}", error);
+                switch (policy) {
+                    case SUCCESS:
+                        break;
+
+                    case NO_RETRY:
+                        log.error("离线任务不可重试 {} state={} error={}", reName, state, taskInfo.getError());
+                        return false;
+
+                    case RETRY:
+                        // 兜底：文件已存在但状态未刷新
+                        Optional<OpenListFileInfo> first = findFiles(path).stream()
+                                .filter(f -> FileUtils.isVideoFormat(f.getName()))
+                                .findFirst();
+                        if (first.isPresent()) {
+                            log.info("资源已下载完毕，OpenList 可能处于卡死状态，此处跳过");
+                            break;
+                        }
+                        if (alistDownloadRetryNumber > -1 && retry >= alistDownloadRetryNumber) {
+                            log.error("离线下载失败 {} (已重试{}次)", taskInfo.getError(), retry);
                             return false;
                         }
                         retry++;
-                        log.info("离线任务正在进行重试 {}, 当前重试次数 {}, 最大重试次数 {}", tid, retry, alistDownloadRetryNumber);
-                    }
-                    taskRetry(tid);
-                    continue;
+                        log.info("离线任务重试 {}/{} state={}", retry, alistDownloadRetryNumber, state);
+                        taskRetry(tid);
+                        continue; // 继续轮询
                 }
-
-                if (
-                        List.of(
-                                OpenListTaskInfo.State.Canceling,
-                                OpenListTaskInfo.State.Canceled
-                        ).contains(state)
-                ) {
-                    log.error("离线任务已被取消 {}", reName);
-                    return false;
-                }
-
-                // 成功
-                if (state == OpenListTaskInfo.State.Succeeded) {
-                    break;
-                }
+                break; // SUCCESS 或兜底跳出
             }
 
-            if (delete) {
-                log.info("离线下载完成, 自动删除已完成任务");
-                taskDelete(tid);
-            }
-
+            // ① finally 前先扫描文件
             List<OpenListFileInfo> openListFileInfos = findFiles(path);
-
-            // 分离视频和字幕文件
             List<OpenListFileInfo> videoList = openListFileInfos.stream()
                     .filter(f -> FileUtils.isVideoFormat(f.getName()))
                     .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
@@ -222,7 +190,6 @@ public class OpenList implements BaseDownload {
             Map<String, String> renameMap = new HashMap<>();
 
             if (videoList.size() == 1) {
-                // 单文件：原有逻辑
                 OpenListFileInfo videoFile = videoList.get(0);
                 renameMap.put(videoFile.getName(), reName + "." + FileUtil.extName(videoFile.getName()));
                 for (OpenListFileInfo sub : subtitleList) {
@@ -236,13 +203,10 @@ public class OpenList implements BaseDownload {
                     renameMap.put(name, newName + "." + ext);
                 }
             } else {
-                // 多文件合集：逐视频提取集数，匹配关联字幕
                 for (OpenListFileInfo video : videoList) {
                     String videoName = video.getName();
                     String videoBase = FileUtil.mainName(videoName);
                     String videoExt = FileUtil.extName(videoName);
-
-                    // 从文件名提取集数
                     String ep = extractEpisodeFromFileName(videoName);
                     String videoReName;
                     if (ep != null && reName.contains(".E")) {
@@ -254,12 +218,10 @@ public class OpenList implements BaseDownload {
                     }
                     renameMap.put(videoName, videoReName + "." + videoExt);
 
-                    // 匹配关联字幕：文件名前缀相同的字幕
                     for (OpenListFileInfo sub : subtitleList) {
                         String subName = sub.getName();
                         String subBase = FileUtil.mainName(subName);
                         String subExt = FileUtil.extName(subName);
-                        // 字幕基础名 = 视频基础名 去掉语言标签
                         String subBaseClean = subBase;
                         String lang = FileUtil.extName(subBase);
                         if (StrUtil.isNotBlank(lang) && !FileUtils.isVideoFormat(lang)) {
@@ -274,7 +236,6 @@ public class OpenList implements BaseDownload {
                         }
                     }
                 }
-                // 未匹配到视频的字幕，用默认 reName
                 for (OpenListFileInfo sub : subtitleList) {
                     if (renameMap.containsKey(sub.getName())) continue;
                     String name = sub.getName();
@@ -288,50 +249,74 @@ public class OpenList implements BaseDownload {
                 }
             }
 
+            // ② renameMap 目标名冲突检测
+            Set<String> targetNames = new HashSet<>();
+            for (Map.Entry<String, String> entry : renameMap.entrySet()) {
+                if (!targetNames.add(entry.getValue())) {
+                    log.error("重命名目标冲突: {} -> {} (已存在)", entry.getKey(), entry.getValue());
+                    throw new IllegalStateException("重命名目标文件名冲突: " + entry.getValue());
+                }
+            }
+
             String firstVideoPath = videoList.get(0).getPath();
 
             if (rename) {
-                // 重命名
                 List<Map<String, String>> renameObjects = renameMap.entrySet().stream()
                         .map(map -> {
-                            String srcName = map.getKey();
-                            String newName = map.getValue();
-                            log.info("重命名 {} ==> {}", srcName, newName);
-                            return Map.of(
-                                    "src_name", srcName,
-                                    "new_name", newName
-                            );
+                            log.info("重命名 {} ==> {}", map.getKey(), map.getValue());
+                            return Map.of("src_name", map.getKey(), "new_name", map.getValue());
                         }).toList();
                 fsBatchRename(renameObjects, firstVideoPath);
             }
 
             // 移动
-            List<String> names = renameMap.entrySet()
-                    .stream()
+            List<String> names = renameMap.entrySet().stream()
                     .map(m -> rename ? m.getValue() : m.getKey())
                     .toList();
             fsMove(firstVideoPath, savePath, names);
 
-            // 清理：删除下载产生的空子目录
+            // ③ 重新扫描源目录，确认视频/字幕已全部移走再删
             if (isCollection) {
-                // 合集：删除 savePath 下除视频/字幕外的空子目录
-                fsList(savePath, true).stream()
-                        .filter(OpenListFileInfo::getIsDir)
-                        .filter(dir -> !renameMap.containsValue(dir.getName()))
-                        .forEach(dir -> fsRemove(savePath, List.of(dir.getName())));
+                List<OpenListFileInfo> remaining = findFiles(path).stream()
+                        .filter(f -> FileUtils.isVideoFormat(f.getName()) || FileUtils.isSubtitleFormat(f.getName()))
+                        .toList();
+                if (remaining.isEmpty()) {
+                    // 源目录已空，安全删除子目录
+                    fsList(path, true).stream()
+                            .filter(OpenListFileInfo::getIsDir)
+                            .forEach(dir -> fsRemove(path, List.of(dir.getName())));
+                } else {
+                    log.warn("源目录仍有 {} 个视频/字幕未移走，跳过删除", remaining.size());
+                }
             } else {
-                fsRemove(savePath, List.of(reName));
+                // 单集：重新扫描确认为空再删
+                List<OpenListFileInfo> remaining = findFiles(savePath + "/" + reName).stream()
+                        .filter(f -> FileUtils.isVideoFormat(f.getName()) || FileUtils.isSubtitleFormat(f.getName()))
+                        .toList();
+                if (remaining.isEmpty()) {
+                    fsRemove(savePath, List.of(reName));
+                } else {
+                    log.warn("目录 {}/{} 仍有文件未移走，跳过删除", savePath, reName);
+                }
             }
 
             NotificationUtil.send(config, ani,
                     StrFormatter.format("{} 下载完成", item.getReName()),
-                    NotificationStatusEnum.DOWNLOAD_END
-            );
+                    NotificationStatusEnum.DOWNLOAD_END);
             return true;
         } catch (Exception e) {
             log.error(e.getMessage(), e);
+            return false;
+        } finally {
+            // ① 无论如何都清理离线任务
+            if (tid != null && delete) {
+                try {
+                    taskDelete(tid);
+                } catch (Exception e) {
+                    log.warn("删除离线任务失败 {}: {}", tid, e.getMessage());
+                }
+            }
         }
-        return false;
     }
 
     @Override
@@ -539,7 +524,7 @@ public class OpenList implements BaseDownload {
      *
      * @param magnet 磁力
      */
-    public void deleteResidualTasks(String magnet) {
+    public void deleteResidualTasks(String infoHash) {
         List<OpenListTaskInfo> taskDoneList = taskDoneList();
         List<OpenListTaskInfo> taskUnDoneList = taskUnDoneList();
 
@@ -550,7 +535,7 @@ public class OpenList implements BaseDownload {
         for (OpenListTaskInfo task : tasks) {
             String id = task.getId();
             String name = task.getName();
-            if (name.contains(magnet)) {
+            if (name.toLowerCase().contains(infoHash.toLowerCase())) {
                 log.info("删除残留任务: {} {}", id, name);
                 taskDelete(id);
             }

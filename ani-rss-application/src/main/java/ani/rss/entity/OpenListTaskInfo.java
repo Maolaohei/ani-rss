@@ -62,6 +62,24 @@ public class OpenListTaskInfo implements Serializable {
 
         @Getter
         private final int code;
+
+        /**
+         * 判断任务状态的重试策略
+         */
+        public RetryPolicy getRetryPolicy() {
+            return switch (this) {
+                case Succeeded -> RetryPolicy.SUCCESS;
+                case Pending, Running, Waiting_for_Retry, Preparing_to_Retry -> RetryPolicy.RETRY;
+                case Canceling, Canceled -> RetryPolicy.NO_RETRY;
+                case Error, Failing, Failed -> RetryPolicy.RETRY; // 可重试，由外部控制重试次数
+            };
+        }
+    }
+
+    public enum RetryPolicy {
+        SUCCESS,   // 下载完成
+        RETRY,     // 可重试（等待或重试）
+        NO_RETRY   // 不可重试（取消/违规等）
     }
 
 }
