@@ -56,8 +56,8 @@ public class RenameUtil {
     // 年份排除: - 2024, - 10周年
     public static final String YEAR_LIKE_REG = "\\s[-]\\s*\\d{4}(?:\\s|$|\\])";
 
-    // 合集标题: 01-12 ... 合集, 01～24 ... 精校合集 等
-    public static final Pattern COLLECTION_TITLE_REG = Pattern.compile("\\d+\\s*[-~～]\\s*\\d+.*合集");
+    // 合集标题: [01-12 合集], [01-02], 01～24 精校合集 等
+    public static final Pattern COLLECTION_TITLE_REG = Pattern.compile("\\d+\\s*[-~～]\\s*\\d+");
 
     // 版本号: v2, v3, V2 等（位于集数之后）
     public static final String VERSION_REG = "[vV](\\d+)(?:[^\\d]|$)";
@@ -248,12 +248,15 @@ public class RenameUtil {
             }
             // OVA 使用 S00 命名
             season = 0;
+            log.info("[DEBUG-Rename-OVA] title原始={} title清洗后={}", ani.getTitle(), renameDel(title));
             title = renameDel(title);
             // 防御：标题为空时从 RSS 标题中提取番剧名（支持中英文括号）
             if (StrUtil.isBlank(title)) {
+                log.info("[DEBUG-Rename-OVA] title为空，尝试从RSS标题提取");
                 Matcher bracketM = Pattern.compile("(?:\\[|【)(.+?)(?:\\]|】)").matcher(itemTitle);
                 if (bracketM.find() && bracketM.find()) {
                     title = bracketM.group(1).trim();
+                    log.info("[DEBUG-Rename-OVA] 括号提取title={}", title);
                 }
             }
         }
@@ -385,6 +388,7 @@ public class RenameUtil {
 
         item
                 .setReName(reName);
+        log.info("[DEBUG-Rename-OVA] 最终reName={} title={} template={}", reName, title, getRenameTemplate(ani));
         return true;
     }
 
