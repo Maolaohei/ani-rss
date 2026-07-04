@@ -372,6 +372,14 @@ public class RenameUtil {
 
         renameTemplate = replaceField(renameTemplate, ani, list);
 
+        // 兜底：TMDB 刮削失败时 ${themoviedbName} 为空或未替换，用订阅标题顶替
+        if (renameTemplate.contains("${themoviedbName}")) {
+            renameTemplate = renameTemplate.replace("${themoviedbName}", title);
+        }
+        if (StrUtil.isNotBlank(title) && renameTemplate.trim().startsWith("S")) {
+            renameTemplate = title + " " + renameTemplate.trim();
+        }
+
         renameTemplate = renameDel(renameTemplate);
 
         String reName = getName(renameTemplate);
