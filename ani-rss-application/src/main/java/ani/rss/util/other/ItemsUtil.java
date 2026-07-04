@@ -548,10 +548,10 @@ public class ItemsUtil {
                     double newEp = ep + offset;
                     clone.setEpisode(newEp);
                     clone.setEpisodeRange(range);
-                    // 同步更新 reName 中的集数（S00E01 → S00E02 等）
+                    // 同步更新 reName 中的集数（S00E01 → S00E02 等），只匹配 SxxExx 结构
                     String rn = clone.getReName();
                     if (rn != null) {
-                        clone.setReName(rn.replaceAll("E\\d+", String.format("E%02d", (int) newEp)));
+                        clone.setReName(rn.replaceAll("(S\\d{2})E\\d+", "$1" + String.format("E%02d", (int) newEp)));
                     }
                     expanded.add(clone);
                 }
@@ -567,7 +567,7 @@ public class ItemsUtil {
                     clone.setEpisodeRange(list);
                     String rn = clone.getReName();
                     if (rn != null) {
-                        clone.setReName(rn.replaceAll("E\\d+", String.format("E%02d", (int) newEp)));
+                        clone.setReName(rn.replaceAll("(S\\d{2})E\\d+", "$1" + String.format("E%02d", (int) newEp)));
                     }
                     expanded.add(clone);
                 }
