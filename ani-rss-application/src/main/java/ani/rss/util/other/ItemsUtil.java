@@ -529,10 +529,20 @@ public class ItemsUtil {
 
         for (Item item : items) {
             String title = item.getTitle();
+            double beforeEp = item.getEpisode();
             List<Double> range = RenameUtil.extractEpisodeRange(title);
+            List<Double> list = RenameUtil.extractEpisodeList(title);
+            int partEp = RenameUtil.extractPartEpisode(title);
+            log.info("[DEBUG-Expand] beforeEp={} range={} list={} partEp={} title={}",
+                    beforeEp,
+                    range == null ? "null" : range.size(),
+                    list == null ? "null" : list.size(),
+                    partEp,
+                    title.substring(0, Math.min(60, title.length())));
 
             if (range != null && !range.isEmpty()) {
                 // 范围种子: 01-06 → [1,2,3,4,5,6]
+                log.info("[DEBUG-Expand] RANGE path! range={}", range);
                 for (Double ep : range) {
                     Item clone = cloneItem(item);
                     clone.setEpisode(ep + offset);
