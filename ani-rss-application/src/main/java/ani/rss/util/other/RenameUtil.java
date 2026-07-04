@@ -249,9 +249,9 @@ public class RenameUtil {
             // OVA 使用 S00 命名
             season = 0;
             title = renameDel(title);
-            // 防御：标题为空时从 RSS 标题中提取番剧名
+            // 防御：标题为空时从 RSS 标题中提取番剧名（支持中英文括号）
             if (StrUtil.isBlank(title)) {
-                Matcher bracketM = Pattern.compile("\\[(.+?)]").matcher(itemTitle);
+                Matcher bracketM = Pattern.compile("(?:\\[|【)(.+?)(?:\\]|】)").matcher(itemTitle);
                 if (bracketM.find() && bracketM.find()) {
                     title = bracketM.group(1).trim();
                 }
