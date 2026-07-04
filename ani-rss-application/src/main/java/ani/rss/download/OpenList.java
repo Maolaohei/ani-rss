@@ -42,6 +42,9 @@ import java.util.stream.Stream;
 public class OpenList implements BaseDownload {
     private Config config;
 
+    // 提交中去重：防止同一 infoHash 被重复提交到 OpenList
+    private static final Set<String> inFlightTasks = ConcurrentHashMap.newKeySet();
+
     @Override
     public Boolean login(Boolean test, Config config) {
         this.config = config;
@@ -100,6 +103,12 @@ public class OpenList implements BaseDownload {
 
         String tid = null;
         try {
+            // 提交中去重：防止同一 infoHash 被重复提交
+            if (!inFlightTasks.add(infoHash)) {
+                log.info("infoHash 正在提交中，跳过 {}", reName);
+                return true;
+            }
+
             mkdir(path);
 
             // ④ 用 InfoHash 清理残留任务
@@ -121,9 +130,29 @@ public class OpenList implements BaseDownload {
 
             // 提交离线
             tid = fsAddOfflineDownload(magnet, path);
-            log.info("添加离线下载成功 {}", reName);
+
+            // 10008: 任务已存在，检查文件是否已下载完成
+            if (tid == null) {
+                Optional<OpenListFileInfo> existing = findFiles(path).stream()
+                        .filter(f -> FileUtils.isVideoFormat(f.getName()))
+                        .findFirst();
+                if (existing.isPresent()) {
+                    log.info("离线任务已存在且文件已下载，跳过 {}", reName);
+                    // 跳到后续的文件处理流程
+                } else {
+                    log.warn("离线任务已存在但文件未就绪，等待完成 {}", reName);
+                    // 继续等待（但 tid 为空，需要从任务列表查找）
+                    tid = findExistingTaskId(infoHash);
+                }
+            } else {
+                log.info("添加离线下载成功 {}", reName);
+            }
 
             // ⑤ 等待完成（区分重试策略）
+            // tid 为空说明任务已存在且文件已就绪，直接跳到文件处理
+            if (tid == null) {
+                log.info("任务已存在且文件已就绪，跳过等待 {}", reName);
+            } else {
             DateTime startTime = DateTime.now();
             long retry = 0;
             while (true) {
@@ -172,6 +201,7 @@ public class OpenList implements BaseDownload {
                 }
                 break; // SUCCESS 或兜底跳出
             }
+            } // end if (tid != null)
 
             // ① finally 前先扫描文件
             List<OpenListFileInfo> openListFileInfos = findFiles(path);
@@ -310,6 +340,8 @@ public class OpenList implements BaseDownload {
             log.error(e.getMessage(), e);
             return false;
         } finally {
+            // 清理提交中标记
+            inFlightTasks.remove(infoHash);
             // ① 无论如何都清理离线任务
             if (tid != null && delete) {
                 try {
@@ -447,7 +479,13 @@ public class OpenList implements BaseDownload {
                     HttpReq.assertStatus(res);
                     JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
                     log.debug(jsonObject.toString());
-                    Assert.isTrue(jsonObject.get("code").getAsInt() == 200);
+                    int code = jsonObject.get("code").getAsInt();
+                    // 10008: 任务已存在，视为成功（幂等）
+                    if (code == 10008) {
+                        log.info("离线任务已存在，跳过重复提交 {}", path);
+                        return null;
+                    }
+                    Assert.isTrue(code == 200);
                     return jsonObject.getAsJsonObject("data")
                             .getAsJsonArray("tasks")
                             .get(0).getAsJsonObject()
@@ -519,6 +557,21 @@ public class OpenList implements BaseDownload {
             log.error(e.getMessage(), e);
         }
         return Optional.empty();
+    }
+
+    /**
+     * 根据 infoHash 查找已存在的离线任务 ID
+     */
+    private String findExistingTaskId(String infoHash) {
+        List<OpenListTaskInfo> tasks = new ArrayList<>();
+        tasks.addAll(taskDoneList());
+        tasks.addAll(taskUnDoneList());
+        for (OpenListTaskInfo task : tasks) {
+            if (task.getName() != null && task.getName().toLowerCase().contains(infoHash.toLowerCase())) {
+                return task.getId();
+            }
+        }
+        return null;
     }
 
     /**
