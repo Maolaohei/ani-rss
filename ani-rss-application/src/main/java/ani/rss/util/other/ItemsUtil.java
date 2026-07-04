@@ -563,8 +563,8 @@ public class ItemsUtil {
                 continue;
             }
 
-            if (partEp > 0) {
-                // 分割种子: 上篇→1, 下篇→2
+            if (partEp > 0 && item.getEpisode() <= 0) {
+                // 分割种子: 上篇→1, 下篇→2（仅在未解析出集数时使用part补充）
                 Item clone = cloneItem(item);
                 clone.setEpisode((double) partEp + offset);
                 expanded.add(clone);
