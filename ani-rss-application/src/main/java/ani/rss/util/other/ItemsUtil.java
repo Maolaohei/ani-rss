@@ -287,6 +287,9 @@ public class ItemsUtil {
                 }).toList();
 
         log.info("[DEBUG] rename后 items数量: {}", items.size());
+        for (Item di : items) {
+            log.info("[DEBUG]   rename后: ep={} title={}", di.getEpisode(), di.getTitle().substring(0, Math.min(70, di.getTitle().length())));
+        }
 
         // v2: 展开范围/列表/分割类种子
         if (RenameUtil.isNamingV2(ani)) {
