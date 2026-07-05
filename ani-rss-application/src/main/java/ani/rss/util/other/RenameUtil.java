@@ -301,9 +301,6 @@ public class RenameUtil {
 
             double episode = Double.parseDouble(episodeStr) + offset;
             item.setEpisode(episode);
-            String shortTitle = item.getTitle().substring(0, Math.min(70, item.getTitle().length()));
-            log.info("[DEBUG-Rename] customEpisode={} e=[{}] episodeStr=[{}] episode={} title={}",
-                    customEpisode, e, episodeStr, episode, shortTitle);
         }
 
         double episode = item.getEpisode();

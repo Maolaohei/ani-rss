@@ -9,6 +9,7 @@ import ani.rss.enums.NotificationStatusEnum;
 import ani.rss.enums.StringEnum;
 import ani.rss.util.basic.HttpReq;
 import ani.rss.util.other.NotificationUtil;
+import ani.rss.util.other.RenameUtil;
 import ani.rss.util.other.TorrentUtil;
 import cn.hutool.core.collection.ListUtil;
 import cn.hutool.core.date.DateTime;
@@ -95,6 +96,23 @@ public class OpenList implements BaseDownload {
         String magnet = TorrentUtil.getMagnet(torrentFile);
         String infoHash = ReUtil.get(StringEnum.MAGNET_REG, magnet, 1);
         String reName = item.getReName();
+
+        // 合集：使用原始标题作为临时目录名，避免用单集名导致目录混乱
+        boolean isCollection = item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty();
+        if (isCollection) {
+            String collectionName = item.getTitle();
+            // 清理标题中的路径分隔符，取第一层文件夹名
+            collectionName = collectionName.replace("\\", "/");
+            if (collectionName.contains("/")) {
+                collectionName = collectionName.substring(0, collectionName.indexOf("/"));
+            }
+            collectionName = RenameUtil.getName(collectionName);
+            if (StrUtil.isNotBlank(collectionName)) {
+                reName = collectionName;
+            }
+            log.info("合集下载，使用原始标题作为临时目录: {}", reName);
+        }
+
         // 下载位置：与 savePath 不同则为临时目录，移动后需清理
         String path = savePath + "/" + reName;
         String tempDownloadDir = path.equals(savePath) ? null : path;
@@ -279,16 +297,20 @@ public class OpenList implements BaseDownload {
                         }
                     }
                 }
+                // 处理未匹配的字幕文件 - 确保它们也被移动
                 for (OpenListFileInfo sub : subtitleList) {
                     if (renameMap.containsKey(sub.getName())) continue;
                     String name = sub.getName();
                     String ext = FileUtil.extName(name);
-                    String newName = reName;
+                    // 使用视频文件名作为基础名，而不是统一的 reName
+                    String videoBase = videoList.isEmpty() ? reName : FileUtil.mainName(videoList.get(0).getName());
+                    String newName = videoBase;
                     String lang = FileUtil.extName(FileUtil.mainName(name));
                     if (StrUtil.isNotBlank(lang)) {
                         newName = newName + "." + lang;
                     }
                     renameMap.put(name, newName + "." + ext);
+                    log.info("未匹配字幕文件: {} -> {}", name, newName + "." + ext);
                 }
             }
 
@@ -301,22 +323,65 @@ public class OpenList implements BaseDownload {
                 }
             }
 
-            String firstVideoPath = videoList.get(0).getPath();
-
-            if (rename) {
-                List<Map<String, String>> renameObjects = renameMap.entrySet().stream()
-                        .map(map -> {
-                            log.info("重命名 {} ==> {}", map.getKey(), map.getValue());
-                            return Map.of("src_name", map.getKey(), "new_name", map.getValue());
-                        }).toList();
-                fsBatchRename(renameObjects, firstVideoPath);
+            // 按原始路径分组，处理文件可能分布在多个子目录的情况
+            Map<String, List<String>> pathToNames = new HashMap<>();
+            for (Map.Entry<String, String> entry : renameMap.entrySet()) {
+                String srcName = entry.getKey();
+                String newName = rename ? entry.getValue() : srcName;
+                // 找到原始文件所在目录
+                Optional<OpenListFileInfo> fileInfo = openListFileInfos.stream()
+                        .filter(f -> f.getName().equals(srcName))
+                        .findFirst();
+                String dirPath = fileInfo.map(OpenListFileInfo::getPath).orElse(videoList.get(0).getPath());
+                pathToNames.computeIfAbsent(dirPath, k -> new ArrayList<>()).add(newName);
             }
 
-            // 移动
-            List<String> names = renameMap.entrySet().stream()
-                    .map(m -> rename ? m.getValue() : m.getKey())
+            // 重命名
+            if (rename) {
+                for (Map.Entry<String, List<String>> entry : pathToNames.entrySet()) {
+                    String dirPath = entry.getKey();
+                    List<Map<String, String>> renameObjects = new ArrayList<>();
+                    for (String srcName : renameMap.keySet()) {
+                        Optional<OpenListFileInfo> fi = openListFileInfos.stream()
+                                .filter(f -> f.getName().equals(srcName)).findFirst();
+                        if (fi.isPresent() && fi.get().getPath().equals(dirPath)) {
+                            String newName = renameMap.get(srcName);
+                            log.info("重命名 {} ==> {}", srcName, newName);
+                            renameObjects.add(Map.of("src_name", srcName, "new_name", newName));
+                        }
+                    }
+                    if (!renameObjects.isEmpty()) {
+                        fsBatchRename(renameObjects, dirPath);
+                    }
+                }
+            }
+
+            // 移动：从每个子目录分别移动
+            Set<String> allMovedNames = new HashSet<>();
+            for (Map.Entry<String, List<String>> entry : pathToNames.entrySet()) {
+                String dirPath = entry.getKey();
+                List<String> names = entry.getValue();
+                fsMove(dirPath, savePath, names);
+                allMovedNames.addAll(names);
+            }
+
+            // 验证文件是否全部移动成功
+            List<OpenListFileInfo> movedFiles = findFiles(savePath).stream()
+                    .filter(f -> allMovedNames.contains(f.getName()))
                     .toList();
-            fsMove(firstVideoPath, savePath, names);
+            List<String> missingNames = allMovedNames.stream()
+                    .filter(name -> movedFiles.stream().noneMatch(f -> f.getName().equals(name)))
+                    .toList();
+
+            if (!missingNames.isEmpty()) {
+                log.warn("部分文件移动失败，保留临时目录: {}", missingNames);
+            } else {
+                // 清理临时下载目录（仅在验证通过后）
+                if (tempDownloadDir != null) {
+                    fsRemove(savePath, List.of(reName));
+                    log.info("已删除临时目录 {}/{}", savePath, reName);
+                }
+            }
 
             // 缺集校验：对比标题声明范围与实际下载文件
             if (item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty()) {
@@ -336,12 +401,6 @@ public class OpenList implements BaseDownload {
                     log.warn("合集缺集: {} 预期 {} 集, 实际 {} 集, 缺失 {}",
                             reName, expected.size(), downloadedEps.size(), missing);
                 }
-            }
-
-            // 清理临时下载目录
-            if (tempDownloadDir != null) {
-                fsRemove(savePath, List.of(reName));
-                log.info("已删除临时目录 {}/{}", savePath, reName);
             }
 
             NotificationUtil.send(config, ani,

@@ -41,12 +41,10 @@ public class ItemsUtil {
         Config config = ConfigUtil.CONFIG;
         String url = ani.getUrl();
         String subgroup = StrUtil.blankToDefault(ani.getSubgroup(), "未知字幕组");
-        log.info("[DEBUG] getItems(Ani) url={} subgroup={} standbyRss={}", url, subgroup, config.getStandbyRss());
         List<Item> items = new ArrayList<>(ItemsUtil.getItems(ani, url, subgroup)
                 .stream()
                 .peek(item -> item.setMaster(true))
                 .toList());
-        log.info("[DEBUG] 主RSS获取到 {} 条items", items.size());
 
         if (!config.getStandbyRss()) {
             // v2: 合集优先去重
@@ -58,9 +56,7 @@ public class ItemsUtil {
         }
 
         List<StandbyRss> standbyRssList = ani.getStandbyRssList();
-        log.info("[DEBUG] standbyRssList.size={} standbyRss urls:", standbyRssList.size());
         for (StandbyRss rss : standbyRssList) {
-            log.info("[DEBUG]   standby: label={} url={}", rss.getLabel(), rss.getUrl());
             ThreadUtil.sleep(1000);
             subgroup = StrUtil.blankToDefault(rss.getLabel(), "未知字幕组");
             Ani clone = ObjUtil.clone(ani);
@@ -70,7 +66,6 @@ public class ItemsUtil {
                     .peek(item -> item.setMaster(false))
                     .toList());
         }
-        log.info("[DEBUG] 备用RSS处理完后总items数量: {}", items.size());
         // 多字幕组共存模式
         Boolean coexist = config.getCoexist();
         if (coexist) {
@@ -266,18 +261,10 @@ public class ItemsUtil {
             items.add(addNewItem);
         }
 
-        log.info("[DEBUG] rename前 items数量: {}", items.size());
-        for (Item debugItem : items) {
-            log.info("[DEBUG] 待rename: {}", debugItem.getTitle());
-        }
-
         items = items.stream()
                 .filter(item -> {
                     try {
                         boolean result = RenameUtil.rename(ani, item);
-                        if (!result) {
-                            log.info("[DEBUG] rename返回false: {}", item.getTitle());
-                        }
                         return result;
                     } catch (Exception e) {
                         log.error("解析rss视频集次出现问题");
@@ -286,27 +273,14 @@ public class ItemsUtil {
                     return false;
                 }).toList();
 
-        log.info("[DEBUG] rename后 items数量: {}", items.size());
-        for (Item di : items) {
-            log.info("[DEBUG]   rename后: ep={} title={}", di.getEpisode(), di.getTitle().substring(0, Math.min(70, di.getTitle().length())));
-        }
-
         // v2: 展开范围/列表/分割类种子
         if (RenameUtil.isNamingV2(ani)) {
             items = expandMultiEpisode(ani, items);
-            log.info("[DEBUG] expandMultiEpisode后 items数量: {}", items.size());
-            for (Item di : items) {
-                log.info("[DEBUG]   expand: ep={} title={}", di.getEpisode(), di.getTitle().substring(0, Math.min(60, di.getTitle().length())));
-            }
         }
 
         // v2: 合集优先去重
         if (RenameUtil.isNamingV2(ani)) {
             items = distinctWithCollectionPriority(items);
-            log.info("[DEBUG] distinct后 items数量: {}", items.size());
-            for (Item di : items) {
-                log.info("[DEBUG]   distinct: ep={} title={}", di.getEpisode(), di.getTitle().substring(0, Math.min(60, di.getTitle().length())));
-            }
             return items;
         }
 
@@ -546,16 +520,9 @@ public class ItemsUtil {
             List<Double> range = RenameUtil.extractEpisodeRange(title);
             List<Double> list = RenameUtil.extractEpisodeList(title);
             int partEp = RenameUtil.extractPartEpisode(title);
-            log.info("[DEBUG-Expand] beforeEp={} range={} list={} partEp={} title={}",
-                    beforeEp,
-                    range == null ? "null" : range.size(),
-                    list == null ? "null" : list.size(),
-                    partEp,
-                    title.substring(0, Math.min(60, title.length())));
 
             if (range != null && !range.isEmpty()) {
                 // 范围种子: 01-06 → [1,2,3,4,5,6]
-                log.info("[DEBUG-Expand] RANGE path! range={}", range);
                 // 偏移后的完整范围（含 offset）
                 List<Double> shiftedRange = range.stream()
                         .map(ep -> ep + offset).collect(Collectors.toList());

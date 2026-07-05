@@ -206,9 +206,16 @@ public class CollectionController extends BaseController {
                     name = CharsetUtil.convert(name, "ISO-8859-1", CharsetUtil.UTF_8);
                     name = ReUtil.replaceAll(name, "[\\\\/]$", "");
                     name = name.replace("\\", "/");
+                    return name;
+                })
+                .filter(name -> name.contains("."))
+                .toList()
+                .stream()
+                .map(name -> {
+                    int idx = index.getAndIncrement();
                     Item item = new Item();
                     return item.setTitle(name)
-                            .setLength(lengths[index.getAndIncrement()]);
+                            .setLength(lengths[idx]);
                 })
                 .filter(item -> {
                     String name = item.getTitle();
