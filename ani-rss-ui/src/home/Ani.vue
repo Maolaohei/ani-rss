@@ -455,7 +455,7 @@ let mikanShow = () => {
     let searchParams = url.searchParams;
     let mikanId = searchParams.get("bangumiId");
     if (mikanId) {
-      query = `MikanId: ${mikanId}`
+      query = `id: ${mikanId}`
     }
   }
 
