@@ -13,6 +13,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -23,6 +24,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @Slf4j
 @Component
 public class BgmTask implements BaseTask {
+
+    /**
+     * BGM API 请求间隔，降低限流风险
+     */
+    private static final long REQUEST_INTERVAL_MS = 300L;
 
     @Resource
     private AniService aniService;
@@ -35,6 +41,7 @@ public class BgmTask implements BaseTask {
             log.error(e.getMessage(), e);
         }
 
+        boolean changed = false;
         List<Ani> aniList = AniUtil.getAniList();
         for (Ani ani : aniList) {
             if (!loop.get()) {
@@ -49,26 +56,39 @@ public class BgmTask implements BaseTask {
                 bgmInfo = BgmUtil.getBgmInfo(ani);
             } catch (Exception e) {
                 log.error(e.getMessage(), e);
+                ThreadUtil.sleep(REQUEST_INTERVAL_MS);
                 continue;
             }
 
             double score = Optional.ofNullable(bgmInfo.getRating())
                     .map(BgmInfo.Rating::getScore)
                     .orElse(0.0);
-            ani.setScore(score);
+            Double oldScore = ani.getScore();
+            if (!Objects.equals(oldScore, score)) {
+                ani.setScore(score);
+                changed = true;
+            }
 
             Config config = ConfigUtil.CONFIG;
             Boolean updateTotalEpisodeNumber = config.getUpdateTotalEpisodeNumber();
             Boolean forceUpdateTotalEpisodeNumber = config.getForceUpdateTotalEpisodeNumber();
 
-            if (!updateTotalEpisodeNumber) {
-                // 未开启更新总集数
-                continue;
+            if (Boolean.TRUE.equals(updateTotalEpisodeNumber)) {
+                Boolean updated = aniService.updateTotalEpisodeNumber(ani, bgmInfo, forceUpdateTotalEpisodeNumber);
+                if (Boolean.TRUE.equals(updated)) {
+                    changed = true;
+                }
             }
 
-            aniService.updateTotalEpisodeNumber(ani, bgmInfo, forceUpdateTotalEpisodeNumber);
+            // 请求限流：避免订阅多时打爆 BGM API
+            ThreadUtil.sleep(REQUEST_INTERVAL_MS);
         }
-        AniUtil.sync();
+
+        if (changed) {
+            AniUtil.sync();
+        } else {
+            log.debug("BGM 评分/总集数无变化，跳过同步");
+        }
 
         ThreadUtil.sleep(12, TimeUnit.HOURS);
     }

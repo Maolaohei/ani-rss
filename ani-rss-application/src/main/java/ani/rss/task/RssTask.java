@@ -12,7 +12,10 @@ import cn.hutool.extra.spring.SpringUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import java.util.concurrent.TimeUnit;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -25,42 +28,91 @@ public class RssTask implements BaseTask {
     public static final AtomicBoolean download = new AtomicBoolean(false);
     private static final AtomicLong downloadStartTime = new AtomicLong(0);
     private static final long MAX_DOWNLOAD_DURATION_MS = TimeUnit.MINUTES.toMillis(30);
+    /**
+     * 订阅间并行度：同一订阅由 DownloadService 按 id 串行，这里限制整体并发
+     */
+    private static final int ANI_PARALLELISM = 3;
 
     public static void download(AtomicBoolean loop) {
         DownloadService downloadService = SpringUtil.getBean(DownloadService.class);
 
+        ExecutorService pool = null;
         try {
             if (!TorrentUtil.login()) {
                 return;
             }
+
+            List<Ani> enabled = new ArrayList<>();
             for (Ani ani : AniUtil.getAniList()) {
                 if (!loop.get()) {
                     return;
                 }
-
-                if (!AniUtil.getAniList().contains(ani)) {
+                String aniId = ani.getId();
+                boolean stillExists = AniUtil.getAniList().stream()
+                        .anyMatch(it -> Objects.equals(it.getId(), aniId));
+                if (!stillExists) {
                     continue;
                 }
-
-                String title = ani.getTitle();
                 if (!Boolean.TRUE.equals(ani.getEnable())) {
-                    log.debug("{} 未启用", title);
+                    log.debug("{} 未启用", ani.getTitle());
                     continue;
+                }
+                enabled.add(ani);
+            }
+
+            if (enabled.isEmpty()) {
+                return;
+            }
+
+            int poolSize = Math.min(ANI_PARALLELISM, enabled.size());
+            pool = Executors.newFixedThreadPool(poolSize);
+            List<Future<?>> futures = new ArrayList<>(enabled.size());
+
+            for (Ani ani : enabled) {
+                if (!loop.get()) {
+                    break;
+                }
+                futures.add(pool.submit(() -> {
+                    if (!loop.get()) {
+                        return;
+                    }
+                    // 提交时再确认一次订阅仍存在
+                    String aniId = ani.getId();
+                    boolean stillExists = AniUtil.getAniList().stream()
+                            .anyMatch(it -> Objects.equals(it.getId(), aniId));
+                    if (!stillExists) {
+                        return;
+                    }
+                    String title = ani.getTitle();
+                    try {
+                        downloadService.downloadAni(ani);
+                    } catch (Exception e) {
+                        String message = ExceptionUtils.getMessage(e);
+                        log.error("{} {}", title, message);
+                        log.error(message, e);
+                    }
+                }));
+                // 轻度错峰，避免同时打满 RSS/下载器
+                ThreadUtil.sleep(50);
+            }
+
+            for (Future<?> future : futures) {
+                if (!loop.get()) {
+                    break;
                 }
                 try {
-                    downloadService.downloadAni(ani);
+                    future.get();
                 } catch (Exception e) {
-                    String message = ExceptionUtils.getMessage(e);
-                    log.error("{} {}", title, message);
-                    log.error(message, e);
+                    log.error(ExceptionUtils.getMessage(e), e);
                 }
-                // 避免短时间频繁请求导致流控
-                ThreadUtil.sleep(500);
             }
         } catch (Exception e) {
             String message = ExceptionUtils.getMessage(e);
             log.error(message, e);
         } finally {
+            if (pool != null) {
+                pool.shutdownNow();
+            }
             download.set(false);
             downloadStartTime.set(0);
         }

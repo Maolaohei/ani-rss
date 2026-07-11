@@ -47,6 +47,25 @@ public class OpenList implements BaseDownload {
     // 提交中去重：防止同一 infoHash 被重复提交到 OpenList
     private static final Set<String> inFlightTasks = ConcurrentHashMap.newKeySet();
 
+    // API 最小间隔限流（替代每次固定 sleep 2s）
+    private static final long API_MIN_INTERVAL_MS = 300L;
+    private static final Object API_RATE_LOCK = new Object();
+    private static volatile long lastApiCallAt = 0L;
+
+    // findFiles 短缓存，轮询期间减少递归 list
+    private static final long FIND_FILES_TTL_MS = 3000L;
+    private static final Map<String, CachedFileList> findFilesCache = new ConcurrentHashMap<>();
+
+    private static final class CachedFileList {
+        final long expireAt;
+        final List<OpenListFileInfo> files;
+
+        CachedFileList(List<OpenListFileInfo> files, long ttlMs) {
+            this.files = files;
+            this.expireAt = System.currentTimeMillis() + ttlMs;
+        }
+    }
+
     @Override
     public Boolean login(Boolean test, Config config) {
         this.config = config;
@@ -167,71 +186,76 @@ public class OpenList implements BaseDownload {
                 log.info("添加离线下载成功 {}", reName);
             }
 
-            // ⑤ 等待完成（区分重试策略）
-            if (tid == null) {
-                // 10008 但找不到 taskId：轮询文件是否出现，超时则放弃
-                Integer alistDownloadTimeout = config.getAlistDownloadTimeout();
-                DateTime deadline = DateUtil.offsetMinute(DateTime.now(), alistDownloadTimeout);
-                while (DateTime.now().getTime() < deadline.getTime()) {
-                    boolean hasVideo = findFiles(path).stream()
-                            .anyMatch(f -> FileUtils.isVideoFormat(f.getName()));
-                    if (hasVideo) {
-                        log.info("10008 任务文件已就绪 {}", reName);
-                        break;
-                    }
-                    ThreadUtil.sleep(3000);
-                }
-                // 超时后仍无文件，由后续 videoList.isEmpty() 判定失败
-            } else {
+            // ⑤ 等待完成：有 tid 时以 taskInfo 为主；findFiles 仅在兜底/最终扫描使用
+            Integer alistDownloadTimeout = config.getAlistDownloadTimeout();
+            Long alistDownloadRetryNumber = config.getAlistDownloadRetryNumber();
             DateTime startTime = DateTime.now();
             long retry = 0;
-            while (true) {
-                Integer alistDownloadTimeout = config.getAlistDownloadTimeout();
-                Long alistDownloadRetryNumber = config.getAlistDownloadRetryNumber();
+            long filePollMiss = 0;
 
-                if (DateTime.now().getTime() >= DateUtil.offsetMinute(startTime, alistDownloadTimeout).getTime()) {
-                    log.error("{} {} 分钟还未下载完成, 停止检测下载", reName, alistDownloadTimeout);
-                    return false;
-                }
+            while (DateTime.now().getTime() < DateUtil.offsetMinute(startTime, alistDownloadTimeout).getTime()) {
+                if (tid != null) {
+                    Optional<OpenListTaskInfo> taskInfoOpt = taskInfo(tid);
+                    if (taskInfoOpt.isEmpty()) {
+                        // 避免 taskInfo 空响应时 tight loop
+                        ThreadUtil.sleep(1000);
+                        continue;
+                    }
 
-                Optional<OpenListTaskInfo> taskInfoOpt = taskInfo(tid);
-                if (taskInfoOpt.isEmpty()) {
+                    OpenListTaskInfo taskInfo = taskInfoOpt.get();
+                    OpenListTaskInfo.State state = taskInfo.getState();
+                    OpenListTaskInfo.RetryPolicy policy = state.getRetryPolicy();
+
+                    if (policy == OpenListTaskInfo.RetryPolicy.SUCCESS) {
+                        break;
+                    }
+                    if (policy == OpenListTaskInfo.RetryPolicy.NO_RETRY) {
+                        log.error("离线任务不可重试 {} state={} error={}", reName, state, taskInfo.getError());
+                        return false;
+                    }
+
+                    // Pending/Running：只等待，不触发重试、不扫目录
+                    if (state == OpenListTaskInfo.State.Pending
+                            || state == OpenListTaskInfo.State.Running
+                            || state == OpenListTaskInfo.State.Waiting_for_Retry
+                            || state == OpenListTaskInfo.State.Preparing_to_Retry) {
+                        ThreadUtil.sleep(2000);
+                        continue;
+                    }
+
+                    // Error/Failed 等：先兜底看文件，再按次数 taskRetry
+                    if (hasVideoFile(path)) {
+                        log.info("资源已下载完毕，OpenList 可能处于卡死状态，此处跳过");
+                        break;
+                    }
+                    if (alistDownloadRetryNumber > -1 && retry >= alistDownloadRetryNumber) {
+                        log.error("离线下载失败 {} (已重试{}次)", taskInfo.getError(), retry);
+                        return false;
+                    }
+                    retry++;
+                    log.info("离线任务重试 {}/{} state={}", retry, alistDownloadRetryNumber, state);
+                    taskRetry(tid);
+                    ThreadUtil.sleep(2000);
                     continue;
                 }
 
-                OpenListTaskInfo taskInfo = taskInfoOpt.get();
-                OpenListTaskInfo.State state = taskInfo.getState();
-                OpenListTaskInfo.RetryPolicy policy = state.getRetryPolicy();
-
-                switch (policy) {
-                    case SUCCESS:
-                        break;
-
-                    case NO_RETRY:
-                        log.error("离线任务不可重试 {} state={} error={}", reName, state, taskInfo.getError());
-                        return false;
-
-                    case RETRY:
-                        // 兜底：文件已存在但状态未刷新
-                        Optional<OpenListFileInfo> first = findFiles(path).stream()
-                                .filter(f -> FileUtils.isVideoFormat(f.getName()))
-                                .findFirst();
-                        if (first.isPresent()) {
-                            log.info("资源已下载完毕，OpenList 可能处于卡死状态，此处跳过");
-                            break;
-                        }
-                        if (alistDownloadRetryNumber > -1 && retry >= alistDownloadRetryNumber) {
-                            log.error("离线下载失败 {} (已重试{}次)", taskInfo.getError(), retry);
-                            return false;
-                        }
-                        retry++;
-                        log.info("离线任务重试 {}/{} state={}", retry, alistDownloadRetryNumber, state);
-                        taskRetry(tid);
-                        continue; // 继续轮询
+                // 无 tid（10008）：低频轮询文件是否出现
+                if (hasVideoFile(path)) {
+                    log.info("10008 任务文件已就绪 {}", reName);
+                    break;
                 }
-                break; // SUCCESS 或兜底跳出
+                filePollMiss++;
+                // 3s 起跳，最多 8s，减少无意义 findFiles
+                ThreadUtil.sleep(Math.min(3000L + filePollMiss * 500L, 8000L));
             }
-            } // end if (tid != null)
+
+            if (DateTime.now().getTime() >= DateUtil.offsetMinute(startTime, alistDownloadTimeout).getTime()) {
+                // 有 tid 超时直接失败；无 tid 交由后续 videoList 判定
+                if (tid != null) {
+                    log.error("{} {} 分钟还未下载完成, 停止检测下载", reName, alistDownloadTimeout);
+                    return false;
+                }
+            }
 
             // ① finally 前先扫描文件
             List<OpenListFileInfo> openListFileInfos = findFiles(path);
@@ -455,6 +479,7 @@ public class OpenList implements BaseDownload {
      * @param path 路径
      */
     public void mkdir(String path) {
+        invalidateFindFilesCache();
         postApi("fs/mkdir")
                 .body(GsonStatic.toJson(Map.of(
                         "path", path
@@ -495,6 +520,7 @@ public class OpenList implements BaseDownload {
      * @param names  文件名
      */
     public void fsMove(String srcDir, String dstDir, List<String> names) {
+        invalidateFindFilesCache();
         postApi("fs/move")
                 .body(GsonStatic.toJson(Map.of(
                         "src_dir", srcDir,
@@ -510,6 +536,7 @@ public class OpenList implements BaseDownload {
      * @param names 文件名
      */
     public void fsRemove(String dir, List<String> names) {
+        invalidateFindFilesCache();
         postApi("fs/remove")
                 .body(GsonStatic.toJson(Map.of(
                         "dir", dir,
@@ -524,6 +551,7 @@ public class OpenList implements BaseDownload {
      * @param srcDir  目录
      */
     public void fsBatchRename(List<Map<String, String>> mapList, String srcDir) {
+        invalidateFindFilesCache();
         postApi("fs/batch_rename")
                 .body(GsonStatic.toJson(Map.of(
                         "src_dir", srcDir,
@@ -539,6 +567,7 @@ public class OpenList implements BaseDownload {
      * @return tid
      */
     public String fsAddOfflineDownload(String magnet, String path) {
+        invalidateFindFilesCache();
         return postApi("fs/add_offline_download")
                 .body(GsonStatic.toJson(Map.of(
                         "path", path,
@@ -724,7 +753,18 @@ public class OpenList implements BaseDownload {
      * @param path 目录
      * @return 文件列表
      */
+    /**
+     * 快速判断目录下是否已有视频（走 findFiles 缓存）
+     */
+    private boolean hasVideoFile(String path) {
+        return findFiles(path).stream().anyMatch(f -> FileUtils.isVideoFormat(f.getName()));
+    }
     public synchronized List<OpenListFileInfo> findFiles(String path) {
+        CachedFileList cached = findFilesCache.get(path);
+        if (cached != null && cached.expireAt > System.currentTimeMillis()) {
+            return cached.files;
+        }
+
         List<OpenListFileInfo> openListFileInfos = fsList(path, true);
         List<OpenListFileInfo> list = openListFileInfos.stream()
                 .flatMap(openListFileInfo -> {
@@ -734,10 +774,33 @@ public class OpenList implements BaseDownload {
                     return Stream.of(openListFileInfo);
                 }).toList();
 
-        return ListUtil.sort(new ArrayList<>(list), Comparator.comparing(fileInfo -> {
+        List<OpenListFileInfo> sorted = ListUtil.sort(new ArrayList<>(list), Comparator.comparing(fileInfo -> {
             Long size = fileInfo.getSize();
             return Long.MAX_VALUE - ObjectUtil.defaultIfNull(size, 0L);
         }));
+        findFilesCache.put(path, new CachedFileList(sorted, FIND_FILES_TTL_MS));
+        return sorted;
+    }
+
+    /**
+     * API 最小间隔限流，避免固定 sleep 2s 拖慢轮询
+     */
+    private static void throttleApi() {
+        synchronized (API_RATE_LOCK) {
+            long now = System.currentTimeMillis();
+            long wait = API_MIN_INTERVAL_MS - (now - lastApiCallAt);
+            if (wait > 0) {
+                ThreadUtil.sleep(wait);
+            }
+            lastApiCallAt = System.currentTimeMillis();
+        }
+    }
+
+    /**
+     * 目录变更后清理 findFiles 缓存
+     */
+    private static void invalidateFindFilesCache() {
+        findFilesCache.clear();
     }
 
     /**
@@ -747,7 +810,7 @@ public class OpenList implements BaseDownload {
      * @return
      */
     public synchronized HttpRequest getApi(String action) {
-        ThreadUtil.sleep(2000);
+        throttleApi();
         String host = config.getDownloadToolHost();
         String password = config.getDownloadToolPassword();
         return HttpReq.get(host + "/api/" + action)
@@ -761,7 +824,7 @@ public class OpenList implements BaseDownload {
      * @return
      */
     public synchronized HttpRequest postApi(String action) {
-        ThreadUtil.sleep(2000);
+        throttleApi();
         String host = config.getDownloadToolHost();
         String password = config.getDownloadToolPassword();
         return HttpReq.post(host + "/api/" + action)

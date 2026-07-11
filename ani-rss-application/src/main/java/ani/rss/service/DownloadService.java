@@ -21,13 +21,13 @@ import cn.hutool.core.util.ReUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONUtil;
 import jakarta.annotation.Resource;
-import lombok.Synchronized;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import wushuo.tmdb.api.entity.Tmdb;
 
 import java.io.File;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
@@ -36,18 +36,40 @@ import java.util.stream.Collectors;
 @Slf4j
 @Service
 public class DownloadService {
-    private static final Object LOCK = new Object();
+    /**
+     * 按订阅 id 细粒度锁：同一订阅串行，不同订阅可并行
+     */
+    private static final ConcurrentHashMap<String, Object> ANI_LOCKS = new ConcurrentHashMap<>();
+    /** 下载器推送串行，避免多订阅同时打下载器 API */
+    private static final Object DOWNLOAD_TOOL_LOCK = new Object();
 
     @Resource
     private ScrapeService scrapeService;
 
+    private static Object lockForAni(Ani ani) {
+        String id = Optional.ofNullable(ani)
+                .map(Ani::getId)
+                .filter(StrUtil::isNotBlank)
+                .orElse("unknown");
+        return ANI_LOCKS.computeIfAbsent(id, k -> new Object());
+    }
+
     /**
-     * 下载动漫
+     * 下载动漫（按 ani.id 加锁）
      *
      * @param ani
      */
-    @Synchronized("LOCK")
     public void downloadAni(Ani ani) {
+        Object lock = lockForAni(ani);
+        synchronized (lock) {
+            downloadAniLocked(ani);
+        }
+    }
+
+    /**
+     * 下载动漫（调用方需已持有对应 ani 锁）
+     */
+    private void downloadAniLocked(Ani ani) {
         Config config = ConfigUtil.CONFIG;
         Boolean delete = config.getDelete();
         Boolean autoDisabled = config.getAutoDisabled();
@@ -99,6 +121,9 @@ public class DownloadService {
 
         // 本地 infoHash 去重：合集展开后的 clone 仍会进入循环，但同 infoHash 的第二个及后续 clone 会被此 Set 过滤跳过
         Set<String> pushedHashes = new HashSet<>();
+
+        // 每个订阅只扫一次本地下载目录
+        Set<String> localEpisodeIndex = buildLocalEpisodeIndex(ani, savePath);
 
         for (Item item : items) {
             log.debug(JSONUtil.formatJsonStr(GsonStatic.toJson(item)));
@@ -254,7 +279,7 @@ public class DownloadService {
             }
 
             // 未开启rename不进行检测
-            if (itemDownloaded(ani, item, true)) {
+            if (itemDownloaded(ani, item, true, localEpisodeIndex)) {
                 log.info("本地文件已存在 {}", reName);
                 if (master && !is5) {
                     currentDownloadCount++;
@@ -435,7 +460,7 @@ public class DownloadService {
      * @param savePath
      * @param torrentFile
      */
-    public synchronized void download(Ani ani, Item item, String savePath, File torrentFile) {
+    public void download(Ani ani, Item item, String savePath, File torrentFile) {
         ani = ObjectUtil.clone(ani);
 
         String name = item.getReName();
@@ -450,21 +475,26 @@ public class DownloadService {
             log.error("种子下载出现问题 {} {}", name, FileUtils.getAbsolutePath(torrentFile));
             return;
         }
-        ThreadUtil.sleep(1000);
+        // 不再固定 sleep；仅在推送失败重试时退避
         savePath = FileUtils.getAbsolutePath(savePath);
 
-        String text = StrFormatter.format("{} 已更新", name);
+        String notifyText = StrFormatter.format("{} 已更新", name);
         if (!master) {
-            text = StrFormatter.format("(备用RSS) {}", text);
+            notifyText = StrFormatter.format("(备用RSS) {}", notifyText);
         }
-        NotificationUtil.send(ConfigUtil.CONFIG, ani, text, NotificationStatusEnum.DOWNLOAD_START);
+        NotificationUtil.send(ConfigUtil.CONFIG, ani, notifyText, NotificationStatusEnum.DOWNLOAD_START);
 
         Config config = ConfigUtil.CONFIG;
 
         Integer downloadRetry = config.getDownloadRetry();
         for (int i = 1; i <= downloadRetry; i++) {
             try {
-                if (TorrentUtil.DOWNLOAD.download(ani, item, savePath, torrentFile)) {
+                boolean ok;
+                // 下载器推送串行；订阅解析/判重可并行
+                synchronized (DOWNLOAD_TOOL_LOCK) {
+                    ok = TorrentUtil.DOWNLOAD.download(ani, item, savePath, torrentFile);
+                }
+                if (ok) {
                     TorrentUtil.refreshTorrentsCache();
                     return;
                 }
@@ -473,6 +503,8 @@ public class DownloadService {
                 log.error(message, e);
             }
             log.error("{} 下载失败将进行重试, 当前重试次数为{}次", name, i);
+            // 失败退避：1s、2s、3s...
+            ThreadUtil.sleep(Math.min(1000L * i, 3000L));
         }
 
         // 删除下载失败的种子, 下次轮询仍会重试
@@ -693,6 +725,48 @@ public class DownloadService {
 
 
     /**
+     * 构建本地下载目录中的集数索引，避免每个 item 重复 listFiles
+     */
+    private Set<String> buildLocalEpisodeIndex(Ani ani, String downloadPath) {
+        Set<String> index = new HashSet<>();
+        boolean ovaLegacy = Boolean.TRUE.equals(ani.getOva()) && !RenameUtil.isNamingV2(ani);
+        List<File> files = FileUtils.listFileList(downloadPath);
+        for (File file : files) {
+            if (file.isFile()) {
+                String extName = FileUtil.extName(file);
+                if (StrUtil.isBlank(extName) || !FileUtils.isVideoFormat(extName)) {
+                    continue;
+                }
+            }
+            if (ovaLegacy) {
+                index.add("*");
+                break;
+            }
+            String mainName = FileUtil.mainName(file);
+            if (StrUtil.isBlank(mainName)) {
+                continue;
+            }
+            mainName = mainName.trim().toUpperCase();
+            if (!ReUtil.contains(StringEnum.SEASON_REG, mainName)) {
+                continue;
+            }
+            String seasonStr = ReUtil.get(StringEnum.SEASON_REG, mainName, 1);
+            String episodeStr = ReUtil.get(StringEnum.SEASON_REG, mainName, 2);
+            if (StrUtil.isBlank(seasonStr) || StrUtil.isBlank(episodeStr)) {
+                continue;
+            }
+            try {
+                int s = Integer.parseInt(seasonStr);
+                double e = Double.parseDouble(episodeStr);
+                // 统一规范化，匹配时 O(1) 查找
+                index.add(s + ":" + e);
+            } catch (Exception ignored) {
+            }
+        }
+        return index;
+    }
+
+    /**
      * 判断是否已经下载过
      *
      * @param ani
@@ -701,6 +775,19 @@ public class DownloadService {
      * @return
      */
     public Boolean itemDownloaded(Ani ani, Item item, Boolean downloadList) {
+        return itemDownloaded(ani, item, downloadList, null);
+    }
+
+    /**
+     * 判断是否已经下载过
+     *
+     * @param ani
+     * @param item
+     * @param downloadList
+     * @param localEpisodeIndex 预构建的本地集数索引，null 时按需构建
+     * @return
+     */
+    public Boolean itemDownloaded(Ani ani, Item item, Boolean downloadList, Set<String> localEpisodeIndex) {
         Config config = ConfigUtil.CONFIG;
         Boolean rename = config.getRename();
         if (!rename) {
@@ -742,43 +829,22 @@ public class DownloadService {
             }
         }
 
-        List<File> files = FileUtils.listFileList(downloadPath);
+        if (localEpisodeIndex == null) {
+            localEpisodeIndex = buildLocalEpisodeIndex(ani, downloadPath);
+        }
 
-        if (files.stream()
-                .filter(file -> {
-                    if (file.isFile()) {
-                        String extName = FileUtil.extName(file);
-                        if (StrUtil.isBlank(extName)) {
-                            return false;
-                        }
-                        return FileUtils.isVideoFormat(extName);
-                    }
-                    return true;
-                })
-                .anyMatch(file -> {
-                    if (Boolean.TRUE.equals(ova) && !RenameUtil.isNamingV2(ani)) {
-                        return true;
-                    }
+        boolean ovaLegacy = Boolean.TRUE.equals(ova) && !RenameUtil.isNamingV2(ani);
+        boolean exists;
+        if (ovaLegacy) {
+            exists = localEpisodeIndex.contains("*");
+        } else if (episode == null) {
+            exists = false;
+        } else {
+            exists = localEpisodeIndex.contains(season + ":" + episode);
+        }
 
-                    String mainName = FileUtil.mainName(file);
-                    if (StrUtil.isBlank(mainName)) {
-                        return false;
-                    }
-                    mainName = mainName.trim().toUpperCase();
-                    if (!ReUtil.contains(StringEnum.SEASON_REG, mainName)) {
-                        return false;
-                    }
-
-                    String seasonStr = ReUtil.get(StringEnum.SEASON_REG, mainName, 1);
-
-                    String episodeStr = ReUtil.get(StringEnum.SEASON_REG, mainName, 2);
-
-                    if (StrUtil.isBlank(seasonStr) || StrUtil.isBlank(episodeStr)) {
-                        return false;
-                    }
-                    return season == Integer.parseInt(seasonStr) && episode == Double.parseDouble(episodeStr);
-                })) {
-            // 保存 torrent 下次只校验 torrent 是否存在 ， 可以将config设置到固态硬盘，防止一直唤醒机械硬盘
+        if (exists) {
+            // 保存 torrent 下次只校验 torrent 是否存在，可以把config设置到固态硬盘，防止一直硬盘机机械硬盘
             TorrentUtil.saveTorrent(ani, item);
             log.info("本地已存在 {}", reName);
             return true;

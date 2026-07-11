@@ -23,7 +23,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.w3c.dom.*;
 
 import java.util.*;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -56,15 +56,34 @@ public class ItemsUtil {
         }
 
         List<StandbyRss> standbyRssList = ani.getStandbyRssList();
-        for (StandbyRss rss : standbyRssList) {
-            ThreadUtil.sleep(1000);
-            subgroup = StrUtil.blankToDefault(rss.getLabel(), "未知字幕组");
-            Ani clone = ObjUtil.clone(ani);
-            clone.setOffset(rss.getOffset());
-            items.addAll(ItemsUtil.getItems(clone, rss.getUrl(), subgroup)
-                    .stream()
-                    .peek(item -> item.setMaster(false))
-                    .toList());
+        if (CollUtil.isNotEmpty(standbyRssList)) {
+            // 备用 RSS：最多 3 路并发，去掉固定 1s sleep
+            int poolSize = Math.min(3, standbyRssList.size());
+            ExecutorService pool = Executors.newFixedThreadPool(poolSize);
+            try {
+                List<Future<List<Item>>> futures = new ArrayList<>();
+                for (StandbyRss rss : standbyRssList) {
+                    futures.add(pool.submit(() -> {
+                        String standbySubgroup = StrUtil.blankToDefault(rss.getLabel(), "未知字幕组");
+                        Ani clone = ObjUtil.clone(ani);
+                        clone.setOffset(rss.getOffset());
+                        return ItemsUtil.getItems(clone, rss.getUrl(), standbySubgroup)
+                                .stream()
+                                .peek(item -> item.setMaster(false))
+                                .toList();
+                    }));
+                }
+                for (Future<List<Item>> future : futures) {
+                    try {
+                        items.addAll(future.get());
+                    } catch (Exception e) {
+                        log.error("备用RSS获取失败: {}", e.getMessage());
+                        log.error(e.getMessage(), e);
+                    }
+                }
+            } finally {
+                pool.shutdownNow();
+            }
         }
         // 多字幕组共存模式
         Boolean coexist = config.getCoexist();
@@ -288,12 +307,18 @@ public class ItemsUtil {
     }
 
     /**
-     * 获取rss内容
+     * 获取rss内容（成功结果短缓存，避免预览/轮询/添加重复拉取）
      *
      * @param url RSS链接
      * @return XML
      */
     public static String getRss(String url) {
+        String cacheKey = "rss:" + url;
+        String cached = CacheUtils.get(cacheKey);
+        if (StrUtil.isNotBlank(cached)) {
+            return cached;
+        }
+
         Config config = ConfigUtil.CONFIG;
         int retry = config.getDownloadRetry();
 
@@ -311,6 +336,8 @@ public class ItemsUtil {
                 boolean isXml = StrUtil.startWith(xml, '<');
                 Assert.isTrue(isXml, "xml error");
 
+                // 成功才缓存 45 秒；失败不缓存
+                CacheUtils.put(cacheKey, xml, TimeUnit.SECONDS.toMillis(45));
                 return xml;
             } catch (Exception e) {
                 if (i < retry) {
@@ -421,23 +448,46 @@ public class ItemsUtil {
                     .toList();
         }
 
-        // 过滤掉x.5集
-        items = items
-                .stream()
-                .filter(it -> it.getEpisode() == it.getEpisode().intValue())
-                .toList();
+        // 过滤 x.5 集；按 episode 去重（合集展开后可能有重复）
+        items = items.stream()
+                .filter(it -> it.getEpisode() != null && it.getEpisode() == it.getEpisode().intValue())
+                .collect(Collectors.collectingAndThen(
+                        Collectors.toMap(Item::getEpisode, it -> it, (a, b) -> a, LinkedHashMap::new),
+                        map -> new ArrayList<>(map.values())
+                ));
 
         if (items.isEmpty()) {
             return 0;
         }
 
+        // 合集优先：按 episodeRange 覆盖集数统计，避免 size 重复
+        Set<Integer> covered = new HashSet<>();
+        boolean hasCollection = false;
+        for (Item item : items) {
+            if (item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty()) {
+                hasCollection = true;
+                for (Double ep : item.getEpisodeRange()) {
+                    if (ep != null && ep == ep.intValue()) {
+                        covered.add(ep.intValue());
+                    }
+                }
+            } else if (item.getEpisode() != null) {
+                covered.add(item.getEpisode().intValue());
+            }
+        }
+
         Boolean downloadNew = ani.getDownloadNew();
-        if (downloadNew) {
-            return items
-                    .stream()
+        if (Boolean.TRUE.equals(downloadNew)) {
+            if (hasCollection && !covered.isEmpty()) {
+                return covered.stream().mapToInt(Integer::intValue).max().orElse(0);
+            }
+            return items.stream()
                     .mapToInt(item -> item.getEpisode().intValue())
                     .max()
                     .orElse(0);
+        }
+        if (hasCollection && !covered.isEmpty()) {
+            return covered.size();
         }
         return items.size();
     }
@@ -586,7 +636,8 @@ public class ItemsUtil {
                 .setLocal(item.getLocal())
                 .setMaster(item.getMaster())
                 .setSubgroup(item.getSubgroup())
-                .setPubDate(item.getPubDate());
+                .setPubDate(item.getPubDate())
+                .setVersion(item.getVersion());
         return clone;
     }
 

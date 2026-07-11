@@ -23,6 +23,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.eclipse.bittorrent.TorrentFile;
 
 import java.io.File;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
@@ -46,11 +47,15 @@ public class TorrentUtil {
     public static synchronized List<TorrentsInfo> getTorrentsInfos() {
         long now = System.currentTimeMillis();
         if (cachedTorrents != null && now < cacheExpireTime) {
-            return cachedTorrents;
+            // 返回副本，避免调用方原地修改污染缓存
+            return new ArrayList<>(cachedTorrents);
         }
         cachedTorrents = DOWNLOAD.getTorrentsInfos();
         cacheExpireTime = now + CACHE_TTL_MS;
-        return cachedTorrents;
+        if (cachedTorrents == null) {
+            return new ArrayList<>();
+        }
+        return new ArrayList<>(cachedTorrents);
     }
 
     /**
@@ -245,8 +250,12 @@ public class TorrentUtil {
             }
             log.info("删除已完成任务 {}", name);
         }
-        ThreadUtil.sleep(500);
+        // 不再固定 sleep；失败后短退避重试一次
         Boolean b = DOWNLOAD.delete(torrentsInfo, deleteFiles);
+        if (!b) {
+            ThreadUtil.sleep(500);
+            b = DOWNLOAD.delete(torrentsInfo, deleteFiles);
+        }
         if (!b) {
             log.error("删除任务失败 {}", name);
             return false;
@@ -289,9 +298,13 @@ public class TorrentUtil {
             return;
         }
 
-        ThreadUtil.sleep(500);
+        // 不再固定 sleep；失败后短退避重试一次
         Boolean renamed = DOWNLOAD.rename(torrentsInfo);
-        if (renamed) {
+        if (!Boolean.TRUE.equals(renamed)) {
+            ThreadUtil.sleep(500);
+            renamed = DOWNLOAD.rename(torrentsInfo);
+        }
+        if (Boolean.TRUE.equals(renamed)) {
             addTags(torrentsInfo, TorrentsTags.RENAME.getValue());
             refreshTorrentsCache();
         }
