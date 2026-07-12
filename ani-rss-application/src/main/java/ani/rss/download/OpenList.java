@@ -641,7 +641,7 @@ public class OpenList implements BaseDownload {
                         }));
                     });
         } catch (Exception e) {
-            log.error(e.getMessage(), e);
+            log.info("OpenList API 调用失败: {}", e.getMessage());
         }
         return List.of();
     }
@@ -662,7 +662,7 @@ public class OpenList implements BaseDownload {
                     });
             return Optional.of(taskInfo);
         } catch (Exception e) {
-            log.error(e.getMessage(), e);
+            log.info("OpenList API 调用失败: {}", e.getMessage());
         }
         return Optional.empty();
     }
