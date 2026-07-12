@@ -149,8 +149,8 @@ public class OpenList implements BaseDownload {
 
             mkdir(path);
 
-            // ④ 用 InfoHash 清理残留任务
-            deleteResidualTasks(infoHash);
+            // 用 magnet 清理残留任务
+            deleteResidualTasks(magnet);
 
             // 洗版
             if (standbyRss && delete && !coexist) {
@@ -687,7 +687,7 @@ public class OpenList implements BaseDownload {
      *
      * @param magnet 磁力
      */
-    public void deleteResidualTasks(String infoHash) {
+    public void deleteResidualTasks(String magnet) {
         List<OpenListTaskInfo> taskDoneList = taskDoneList();
         List<OpenListTaskInfo> taskUnDoneList = taskUnDoneList();
 
@@ -698,7 +698,7 @@ public class OpenList implements BaseDownload {
         for (OpenListTaskInfo task : tasks) {
             String id = task.getId();
             String name = task.getName();
-            if (name.toLowerCase().contains(infoHash.toLowerCase())) {
+            if (name.contains(magnet)) {
                 log.info("删除残留任务: {} {}", id, name);
                 taskDelete(id);
             }
@@ -756,17 +756,18 @@ public class OpenList implements BaseDownload {
     }
 
     /**
-     * 获取目录下及子目录的文件
-     *
-     * @param path 目录
-     * @return 文件列表
-     */
-    /**
      * 快速判断目录下是否已有视频（走 findFiles 缓存）
      */
     private boolean hasVideoFile(String path) {
         return findFiles(path).stream().anyMatch(f -> FileUtils.isVideoFormat(f.getName()));
     }
+
+    /**
+     * 获取目录下及子目录的文件
+     *
+     * @param path 目录
+     * @return 文件列表
+     */
     public synchronized List<OpenListFileInfo> findFiles(String path) {
         CachedFileList cached = findFilesCache.get(path);
         if (cached != null && cached.expireAt > System.currentTimeMillis()) {
