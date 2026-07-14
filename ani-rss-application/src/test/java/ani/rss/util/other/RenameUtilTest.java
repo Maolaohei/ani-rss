@@ -687,6 +687,34 @@ class RenameUtilTest {
     }
 
     @Test
+    void part_shang_with_title_boundary() {
+        assertEquals(1, RenameUtil.extractPartEpisode("[Sub] Title 上 [1080p]"));
+    }
+
+    @Test
+    void part_dibu_with_title_boundary() {
+        assertEquals(2, RenameUtil.extractPartEpisode("[Sub] Title 下 [1080p]"));
+    }
+
+    @Test
+    void part_shang_not_in_word() {
+        // 「上场」不应被裸 上 命中
+        assertEquals(0, RenameUtil.extractPartEpisode("[Sub] Title 上场 [1080p]"));
+    }
+
+    @Test
+    void part_dibu_not_in_download() {
+        // 「下载完成」不应被裸 下 命中
+        assertEquals(0, RenameUtil.extractPartEpisode("[Sub] Title 下载完成 [1080p]"));
+    }
+
+    @Test
+    void part_shang_pian_still_preferred() {
+        assertEquals(1, RenameUtil.extractPartEpisode("上篇"));
+        assertEquals(2, RenameUtil.extractPartEpisode("下篇"));
+    }
+
+    @Test
     void part_partNoSpace() {
         assertEquals(1, RenameUtil.extractPartEpisode("Part1"));
     }
