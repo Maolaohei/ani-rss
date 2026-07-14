@@ -122,7 +122,7 @@ public class LogUtil {
             // Fix: Escape stack trace elements before appending
             log.append("\r\n\t").append(HtmlUtil.escape(stackTraceElementProxy.toString()));
         }
-            IThrowableProxy cause = throwableProxy.getCause();
+        IThrowableProxy cause = throwableProxy.getCause();
         if (Objects.isNull(cause)) {
             return;
         }

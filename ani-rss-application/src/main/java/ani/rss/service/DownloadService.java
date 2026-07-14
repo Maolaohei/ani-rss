@@ -40,7 +40,7 @@ public class DownloadService {
      * 按订阅 id 细粒度锁：同一订阅串行，不同订阅可并行
      */
     private static final ConcurrentHashMap<String, Object> ANI_LOCKS = new ConcurrentHashMap<>();
-    /** 下载器推送串行，避免多订阅同时打下载器 API */
+    /** 非 OpenList 下载器推送串行；OpenList 不持此锁，避免长等待全局串行 */
     private static final Object DOWNLOAD_TOOL_LOCK = new Object();
 
     @Resource
@@ -487,11 +487,19 @@ public class DownloadService {
         Config config = ConfigUtil.CONFIG;
 
         Integer downloadRetry = config.getDownloadRetry();
+        // OpenList/Alist 内部会长时间等待离线完成，不能持有全局下载器锁，否则会把 3 路并行订阅串成 1 路
+        String toolType = StrUtil.blankToDefault(config.getDownloadToolType(), "");
+        boolean holdToolLock = !StrUtil.equalsAnyIgnoreCase(toolType, "OpenList", "Alist");
         for (int i = 1; i <= downloadRetry; i++) {
             try {
                 boolean ok;
-                // 下载器推送串行；订阅解析/判重可并行
-                synchronized (DOWNLOAD_TOOL_LOCK) {
+                if (holdToolLock) {
+                    // qB/Transmission 等：短推送串行，避免多订阅同时打下载器 API
+                    synchronized (DOWNLOAD_TOOL_LOCK) {
+                        ok = TorrentUtil.DOWNLOAD.download(ani, item, savePath, torrentFile);
+                    }
+                } else {
+                    // OpenList 自行按 infoHash 串行 + API 限流
                     ok = TorrentUtil.DOWNLOAD.download(ani, item, savePath, torrentFile);
                 }
                 if (ok) {
