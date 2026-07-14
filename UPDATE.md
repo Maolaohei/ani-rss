@@ -1,1 +1,3 @@
-- fix: 修复修改订阅日期错误
+- feat: Bark 通知支持设置 Level、Volume
+- feat: 增加 Bark 通知
+- chore: 同步上游版本至 3.1.73
