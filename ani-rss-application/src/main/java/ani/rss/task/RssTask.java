@@ -33,7 +33,33 @@ public class RssTask implements BaseTask {
      */
     private static final int ANI_PARALLELISM = 3;
 
+    /**
+     * 获取全局 RSS 任务锁（别名，兼容上游 API 命名）
+     */
+    public static void syncLock() {
+        sync();
+    }
+
+    /**
+     * 在已持有全局任务锁的前提下，刷新全部启用订阅
+     */
+    public static void syncDownload() {
+        syncDownload(null);
+    }
+
+    /**
+     * 在已持有全局任务锁的前提下执行下载。
+     * aniList 为 null 时刷全部启用订阅；非空时只刷指定订阅。
+     */
+    public static void syncDownload(List<Ani> aniList) {
+        download(new AtomicBoolean(true), aniList);
+    }
+
     public static void download(AtomicBoolean loop) {
+        download(loop, null);
+    }
+
+    public static void download(AtomicBoolean loop, List<Ani> targetList) {
         DownloadService downloadService = SpringUtil.getBean(DownloadService.class);
 
         ExecutorService pool = null;
@@ -42,10 +68,17 @@ public class RssTask implements BaseTask {
                 return;
             }
 
+            List<Ani> candidates = targetList == null
+                    ? new ArrayList<>(AniUtil.getAniList())
+                    : new ArrayList<>(targetList);
+
             List<Ani> enabled = new ArrayList<>();
-            for (Ani ani : AniUtil.getAniList()) {
+            for (Ani ani : candidates) {
                 if (!loop.get()) {
                     return;
+                }
+                if (ani == null) {
+                    continue;
                 }
                 String aniId = ani.getId();
                 boolean stillExists = AniUtil.getAniList().stream()
@@ -150,8 +183,8 @@ public class RssTask implements BaseTask {
         }
 
         try {
-            sync();
-            download(loop);
+            syncLock();
+            syncDownload();
         } catch (Exception e) {
             String message = ExceptionUtils.getMessage(e);
             log.error(message, e);

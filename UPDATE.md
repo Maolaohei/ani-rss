@@ -1,3 +1,4 @@
+- refactor: 局部借鉴上游 syncLock/syncDownload，统一手动刷新入口
 - feat: Bark 通知支持设置 Level、Volume
 - feat: 增加 Bark 通知
 - chore: 同步上游版本至 3.1.73
