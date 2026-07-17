@@ -50,7 +50,7 @@
         <div style="margin: 0 4px;">
           <el-button bg text @click="taskManagerRef?.show">
             <el-icon :class="elIconClass">
-              <List/>
+              <ListIcon/>
             </el-icon>
             <template v-if="isNotMobile">
               任务管理器
@@ -145,7 +145,7 @@
 
 <script setup>
 import {onMounted, ref} from "vue";
-import {Fold, List, Plus, Refresh, Setting, Tickets} from "@element-plus/icons-vue"
+import {Download, Fold, List as ListIcon, Plus, Refresh, Setting, Tickets} from "@element-plus/icons-vue"
 import Config from "./Config.vue";
 import List from "./List.vue";
 import Add from "./Add.vue";
