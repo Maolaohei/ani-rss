@@ -34,6 +34,7 @@ import org.springframework.stereotype.Service;
 import java.io.File;
 import java.nio.file.Path;
 import java.util.*;
+import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -58,6 +59,13 @@ public class OpenList implements BaseDownload {
     // findFiles 短缓存，轮询期间减少递归 list
     private static final long FIND_FILES_TTL_MS = 3000L;
     private static final Map<String, CachedFileList> findFilesCache = new ConcurrentHashMap<>();
+
+    /**
+     * 115/OpenList 返回「任务已存在(10008)」后，短时间内禁止对同一 magnet 再 add。
+     * 避免 DownloadService 外层 10 次重试把 115 打爆并误报坏种。
+     */
+    private static final long DUPLICATE_MAGNET_COOLDOWN_MS = TimeUnit.MINUTES.toMillis(30);
+    private static final ConcurrentHashMap<String, Long> DUPLICATE_MAGNET_UNTIL = new ConcurrentHashMap<>();
 
     private static final class CachedFileList {
         final long expireAt;
@@ -193,8 +201,14 @@ public class OpenList implements BaseDownload {
                 log.info("复用进行中的离线任务 tid={} {}", tid, reName);
             }
 
-            // 洗版（SEASON_REG 可能匹配不到，必须 null-safe）
-            if (standbyRss && delete && !coexist) {
+            boolean skipNewSubmit = isDuplicateMagnetCooling(infoHash);
+            if (skipNewSubmit && StrUtil.isBlank(tid)) {
+                log.warn("磁力近期已报 10008/任务已存在，跳过重复提交，仅等待文件 {}", reName);
+                tid = findExistingTaskIdPreferActive(infoHash);
+            }
+
+            // 洗版：仅在即将新提交离线时做一次；复用/10008 等待路径禁止洗，避免重试风暴删掉目标
+            if (!skipNewSubmit && StrUtil.isBlank(tid) && standbyRss && delete && !coexist) {
                 String s = ReUtil.get(StringEnum.SEASON_REG, reName, 0);
                 if (StrUtil.isNotBlank(s)) {
                     String finalSavePath = savePath;
@@ -211,20 +225,22 @@ public class OpenList implements BaseDownload {
             }
 
             // 无进行中任务时才提交离线
-            if (StrUtil.isBlank(tid)) {
+            if (StrUtil.isBlank(tid) && !skipNewSubmit) {
                 tid = fsAddOfflineDownload(magnet, path);
             }
 
-            // 10008: 任务已存在，检查文件是否已下载完成
+            // API 级 10008：tid==null；任务级 10008 在轮询中识别
             if (tid == null) {
+                markDuplicateMagnet(infoHash);
                 Optional<OpenListFileInfo> existing = findFiles(path).stream()
                         .filter(f -> FileUtils.isVideoFormat(f.getName()))
                         .findFirst();
                 if (existing.isPresent()) {
                     log.info("离线任务已存在且文件已下载，跳过 {}", reName);
+                    clearDuplicateMagnet(infoHash);
                 } else {
                     log.warn("离线任务已存在但文件未就绪，等待完成 {}", reName);
-                    tid = findExistingTaskId(infoHash);
+                    tid = findExistingTaskIdPreferActive(infoHash);
                 }
             } else {
                 log.info("添加/复用离线下载成功 tid={} {}", tid, reName);
@@ -235,8 +251,15 @@ public class OpenList implements BaseDownload {
             DateTime startTime = DateTime.now();
             long retry = 0;
             long filePollMiss = 0;
+            // 10008 冷却期内外层 DownloadService 仍可能重入：缩短等待，避免 10 * 全超时
+            int waitMinutes = ObjectUtil.defaultIfNull(alistDownloadTimeout, 30);
+            if (skipNewSubmit) {
+                waitMinutes = Math.min(waitMinutes, 2);
+                log.info("10008 冷却等待窗口缩短为 {} 分钟 {}", waitMinutes, reName);
+            }
+            long deadlineMs = DateUtil.offsetMinute(startTime, waitMinutes).getTime();
 
-            while (DateTime.now().getTime() < DateUtil.offsetMinute(startTime, alistDownloadTimeout).getTime()) {
+            while (DateTime.now().getTime() < deadlineMs) {
                 if (tid != null) {
                     Optional<OpenListTaskInfo> taskInfoOpt = taskInfo(tid);
                     if (taskInfoOpt.isEmpty()) {
@@ -250,6 +273,7 @@ public class OpenList implements BaseDownload {
                     OpenListTaskInfo.RetryPolicy policy = state.getRetryPolicy();
 
                     if (policy == OpenListTaskInfo.RetryPolicy.SUCCESS) {
+                        clearDuplicateMagnet(infoHash);
                         break;
                     }
                     if (policy == OpenListTaskInfo.RetryPolicy.NO_RETRY) {
@@ -266,12 +290,37 @@ public class OpenList implements BaseDownload {
                         continue;
                     }
 
-                    // Error/Failed 等：先兜底看文件
-                    if (hasVideoFile(path)) {
+                    // Error/Failed 等：先兜底看文件（临时目录 + 最终目录）
+                    if (hasVideoFile(path) || hasVideoFile(savePath)) {
                         log.info("资源已下载完毕，OpenList 可能处于卡死状态，此处跳过");
+                        clearDuplicateMagnet(infoHash);
                         break;
                     }
-                    // 终态任务（Failed/Error/Canceled）：重试无意义，直接放弃
+                    // 任务 error 内嵌 10008/任务已存在：不是坏种，禁止 taskRetry / 禁止立刻 return false
+                    if (isDuplicateOfflineError(taskInfo.getError())) {
+                        log.warn("离线任务报告任务已存在(10008) tid={} state={}，转为等待已有任务/文件 {}",
+                                tid, state, reName);
+                        markDuplicateMagnet(infoHash);
+                        String failedTid = tid;
+                        // 清理本次 add 产生的失败壳任务，避免列表堆积
+                        try {
+                            if (StrUtil.isNotBlank(failedTid)) {
+                                taskDelete(failedTid);
+                            }
+                        } catch (Exception ex) {
+                            log.debug("删除 10008 失败壳任务 {}: {}", failedTid, ex.getMessage());
+                        }
+                        String otherTid = findExistingTaskIdPreferActive(infoHash);
+                        if (StrUtil.isNotBlank(otherTid) && !otherTid.equals(failedTid)) {
+                            tid = otherTid;
+                            log.info("切换到已存在离线任务 tid={} {}", tid, reName);
+                        } else {
+                            tid = null; // 进入无 tid 文件轮询
+                        }
+                        ThreadUtil.sleep(2000);
+                        continue;
+                    }
+                    // 终态任务（Failed/Error/Canceled）：真失败才放弃（非 10008）
                     if (state == OpenListTaskInfo.State.Failed
                             || state == OpenListTaskInfo.State.Error
                             || state == OpenListTaskInfo.State.Canceled) {
@@ -291,8 +340,9 @@ public class OpenList implements BaseDownload {
                 }
 
                 // 无 tid（10008）：低频轮询文件是否出现
-                if (hasVideoFile(path)) {
+                if (hasVideoFile(path) || hasVideoFile(savePath)) {
                     log.info("10008 任务文件已就绪 {}", reName);
+                    clearDuplicateMagnet(infoHash);
                     break;
                 }
                 filePollMiss++;
@@ -300,10 +350,10 @@ public class OpenList implements BaseDownload {
                 ThreadUtil.sleep(Math.min(3000L + filePollMiss * 500L, 8000L));
             }
 
-            if (DateTime.now().getTime() >= DateUtil.offsetMinute(startTime, alistDownloadTimeout).getTime()) {
+            if (DateTime.now().getTime() >= deadlineMs) {
                 // 有 tid 超时直接失败；无 tid 交由后续 videoList 判定
                 if (tid != null) {
-                    log.error("{} {} 分钟还未下载完成, 停止检测下载", reName, alistDownloadTimeout);
+                    log.error("{} {} 分钟还未下载完成, 停止检测下载", reName, waitMinutes);
                     return false;
                 }
             }
@@ -719,18 +769,89 @@ public class OpenList implements BaseDownload {
     }
 
     /**
-     * 根据 infoHash 查找已存在的离线任务 ID
+     * 根据 infoHash 查找已存在的离线任务 ID（任意状态）
      */
     private String findExistingTaskId(String infoHash) {
+        return findExistingTaskIdPreferActive(infoHash);
+    }
+
+    /**
+     * 优先返回进行中任务；否则返回任意匹配 tid。
+     */
+    private String findExistingTaskIdPreferActive(String infoHash) {
+        if (StrUtil.isBlank(infoHash)) {
+            return null;
+        }
+        String key = infoHash.toLowerCase(Locale.ROOT);
         List<OpenListTaskInfo> tasks = new ArrayList<>();
-        tasks.addAll(taskDoneList());
         tasks.addAll(taskUnDoneList());
+        tasks.addAll(taskDoneList());
+
+        String anyTid = null;
         for (OpenListTaskInfo task : tasks) {
-            if (task.getName() != null && task.getName().toLowerCase().contains(infoHash.toLowerCase())) {
+            String name = task.getName();
+            if (name == null || !name.toLowerCase(Locale.ROOT).contains(key)) {
+                continue;
+            }
+            OpenListTaskInfo.State state = task.getState();
+            if (state == OpenListTaskInfo.State.Pending
+                    || state == OpenListTaskInfo.State.Running
+                    || state == OpenListTaskInfo.State.Waiting_for_Retry
+                    || state == OpenListTaskInfo.State.Preparing_to_Retry) {
                 return task.getId();
             }
+            if (anyTid == null) {
+                anyTid = task.getId();
+            }
         }
-        return null;
+        return anyTid;
+    }
+
+    /**
+     * 识别 115/OpenList「任务已存在」类错误（API code 或 task.error 内嵌 JSON/文案）
+     */
+    static boolean isDuplicateOfflineError(String error) {
+        if (StrUtil.isBlank(error)) {
+            return false;
+        }
+        String raw = error.trim();
+        if (raw.contains("10008")) {
+            return true;
+        }
+        if (raw.contains("任务已存在") || raw.contains("请勿输入重复")) {
+            return true;
+        }
+        String lower = raw.toLowerCase(Locale.ROOT);
+        return lower.contains("duplicate") && (lower.contains("task") || lower.contains("link") || lower.contains("url"));
+    }
+
+    static boolean isDuplicateMagnetCooling(String infoHash, long nowMs, ConcurrentHashMap<String, Long> table) {
+        if (StrUtil.isBlank(infoHash) || table == null) {
+            return false;
+        }
+        Long until = table.get(infoHash.toLowerCase(Locale.ROOT));
+        return until != null && until > nowMs;
+    }
+
+    private boolean isDuplicateMagnetCooling(String infoHash) {
+        long now = System.currentTimeMillis();
+        DUPLICATE_MAGNET_UNTIL.entrySet().removeIf(e -> e.getValue() == null || e.getValue() <= now);
+        return isDuplicateMagnetCooling(infoHash, now, DUPLICATE_MAGNET_UNTIL);
+    }
+
+    private void markDuplicateMagnet(String infoHash) {
+        if (StrUtil.isBlank(infoHash)) {
+            return;
+        }
+        DUPLICATE_MAGNET_UNTIL.put(infoHash.toLowerCase(Locale.ROOT),
+                System.currentTimeMillis() + DUPLICATE_MAGNET_COOLDOWN_MS);
+    }
+
+    private void clearDuplicateMagnet(String infoHash) {
+        if (StrUtil.isBlank(infoHash)) {
+            return;
+        }
+        DUPLICATE_MAGNET_UNTIL.remove(infoHash.toLowerCase(Locale.ROOT));
     }
 
     /**
