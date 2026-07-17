@@ -399,17 +399,9 @@ public class AniController extends BaseController {
     @Operation(summary = "刷新全部订阅")
     @PostMapping("/refreshAll")
     public Result<Void> refreshAll() {
-        // 未传Body, 刷新所有订阅
-        RssTask.syncLock();
-        ThreadUtil.execute(() -> {
-            try {
-                RssTask.syncDownload();
-            } catch (Exception e) {
-                String message = ExceptionUtils.getMessage(e);
-                log.error(message, e);
-            }
-        });
-        return Result.success("已开始刷新RSS");
+        // 未传Body, 刷新所有订阅；支持抢先周期任务 / 1 槽手动排队
+        String msg = RssTask.submitManualRefresh(null);
+        return Result.success(msg);
     }
 
     @Auth
@@ -423,16 +415,9 @@ public class AniController extends BaseController {
             return Result.error("修改失败");
         }
         Ani downloadAni = first.get();
-        RssTask.syncLock();
-        ThreadUtil.execute(() -> {
-            try {
-                RssTask.syncDownload(List.of(downloadAni));
-            } catch (Exception e) {
-                String message = ExceptionUtils.getMessage(e);
-                log.error(message, e);
-            }
-        });
-        return Result.success("已开始刷新RSS {}", downloadAni.getTitle());
+        // 手动刷新：可抢先周期任务；若已有手动刷新则最多排队 1 个
+        String msg = RssTask.submitManualRefresh(List.of(downloadAni));
+        return Result.success(msg);
     }
 
     @Auth

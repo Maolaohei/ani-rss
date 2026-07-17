@@ -5,6 +5,7 @@
   <Manage ref="manageRef"/>
   <Collection ref="collectionRef"/>
   <TorrentsInfos ref="torrentsInfosRef"/>
+  <TaskManager ref="taskManagerRef"/>
   <div class="content">
     <div id="header">
       <div style="margin: 10px;" class="auto-flex">
@@ -46,6 +47,16 @@
         </div>
       </div>
       <div class="add-button">
+        <div style="margin: 0 4px;">
+          <el-button bg text @click="taskManagerRef?.show">
+            <el-icon :class="elIconClass">
+              <List/>
+            </el-icon>
+            <template v-if="isNotMobile">
+              任务管理器
+            </template>
+          </el-button>
+        </div>
         <div style="margin: 0 4px;">
           <el-dropdown trigger="click">
             <el-button bg text type="primary">
@@ -134,7 +145,7 @@
 
 <script setup>
 import {onMounted, ref} from "vue";
-import {Fold, Plus, Refresh, Setting, Tickets} from "@element-plus/icons-vue"
+import {Fold, List, Plus, Refresh, Setting, Tickets} from "@element-plus/icons-vue"
 import Config from "./Config.vue";
 import List from "./List.vue";
 import Add from "./Add.vue";
@@ -145,6 +156,7 @@ import Manage from "./Manage.vue";
 import {useLocalStorage} from "@vueuse/core";
 import Collection from "./Collection.vue";
 import TorrentsInfos from "./TorrentsInfos.vue";
+import TaskManager from "./TaskManager.vue";
 import {elIconClass, initLayout, isNotMobile} from "@/js/global.js";
 import * as http from "@/js/http.js";
 
@@ -155,6 +167,7 @@ const logsRef = ref()
 const manageRef = ref()
 const collectionRef = ref()
 const torrentsInfosRef = ref()
+const taskManagerRef = ref()
 
 const title = ref('')
 const enable = useLocalStorage('select-enable', '已启用')

@@ -109,6 +109,19 @@ export let refreshAll = () => api.post('api/refreshAll')
 export let refreshAni = (ani) => api.post('api/refreshAni', ani)
 
 /**
+ * RSS 任务状态
+ * @returns {Promise<unknown>}
+ */
+export let rssJobStatus = () => api.post('api/rssJobStatus')
+
+/**
+ * 取消当前 RSS 任务
+ * @returns {Promise<unknown>}
+ */
+export let rssJobCancel = () => api.post('api/rssJobCancel')
+
+
+/**
  * 将RSS转换为订阅
  * @param ani 订阅
  * @returns {Promise<unknown>}

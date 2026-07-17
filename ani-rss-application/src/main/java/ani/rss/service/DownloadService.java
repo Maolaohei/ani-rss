@@ -8,6 +8,7 @@ import ani.rss.entity.*;
 import ani.rss.enums.NotificationStatusEnum;
 import ani.rss.enums.StringEnum;
 import ani.rss.enums.TorrentsTags;
+import ani.rss.task.RssTask;
 import ani.rss.util.other.*;
 import cn.hutool.core.date.DateField;
 import cn.hutool.core.date.DateUtil;
@@ -126,6 +127,10 @@ public class DownloadService {
         Set<String> localEpisodeIndex = buildLocalEpisodeIndex(ani, savePath);
 
         for (Item item : items) {
+            if (RssTask.isCancelRequested()) {
+                log.warn("{} 检测到任务取消，停止本订阅后续下载", title);
+                return;
+            }
             log.debug(JSONUtil.formatJsonStr(GsonStatic.toJson(item)));
             String reName = item.getReName();
             File torrent = TorrentUtil.getTorrent(ani, item);
