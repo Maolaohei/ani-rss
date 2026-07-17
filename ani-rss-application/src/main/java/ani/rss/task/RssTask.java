@@ -441,6 +441,30 @@ public class RssTask implements BaseTask {
         }
         PendingManual pending = pendingManual.get();
         JobSource source = jobSource.get();
+        boolean residualSupported = isOpenListTool();
+        Integer residualActive = null;
+        Integer residualTerminal = null;
+        Integer residualTotal = null;
+        Long residualScannedAt = null;
+        Boolean residualCleaning = null;
+        String residualMessage = null;
+        java.util.List<String> residualSamples = null;
+        if (residualSupported) {
+            try {
+                OpenList.ResidualSnapshot snap = SpringUtil.getBean(OpenList.class).getResidualSnapshot();
+                if (snap != null) {
+                    residualActive = snap.getActiveCount();
+                    residualTerminal = snap.getTerminalCount();
+                    residualTotal = snap.getTotalCount();
+                    residualScannedAt = snap.getScannedAt();
+                    residualCleaning = snap.getCleaning();
+                    residualMessage = snap.getMessage();
+                    residualSamples = snap.getSamples();
+                }
+            } catch (Exception ignored) {
+                residualMessage = "OpenList 残留快照不可用";
+            }
+        }
         return new RssJobStatus()
                 .setRunning(running)
                 .setCancelRequested(cancelRequested.get())
@@ -454,7 +478,15 @@ public class RssTask implements BaseTask {
                 .setSource(source == null ? null : source.name().toLowerCase())
                 .setPending(pending != null)
                 .setPendingTitle(pending == null ? null : pending.title)
-                .setPendingScope(pending == null ? null : pending.scope);
+                .setPendingScope(pending == null ? null : pending.scope)
+                .setResidualSupported(residualSupported)
+                .setResidualActiveCount(residualActive)
+                .setResidualTerminalCount(residualTerminal)
+                .setResidualTotalCount(residualTotal)
+                .setResidualScannedAt(residualScannedAt)
+                .setResidualCleaning(residualCleaning)
+                .setResidualMessage(residualMessage)
+                .setResidualSamples(residualSamples);
     }
 
     /**
@@ -517,7 +549,7 @@ public class RssTask implements BaseTask {
     /**
      * 当前配置是否为 OpenList/Alist（离线长等待工具）
      */
-    static boolean isOpenListTool() {
+    public static boolean isOpenListTool() {
         try {
             return isOpenListTool(ConfigUtil.CONFIG);
         } catch (Exception e) {
@@ -525,7 +557,7 @@ public class RssTask implements BaseTask {
         }
     }
 
-    static boolean isOpenListTool(Config config) {
+    public static boolean isOpenListTool(Config config) {
         if (config == null) {
             return false;
         }

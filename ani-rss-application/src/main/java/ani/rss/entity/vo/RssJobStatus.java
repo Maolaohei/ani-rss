@@ -51,4 +51,28 @@ public class RssJobStatus implements Serializable {
 
     @Schema(description = "待执行任务范围")
     private String pendingScope;
+
+    @Schema(description = "是否支持 OpenList 残留扫描(OpenList/Alist)")
+    private Boolean residualSupported;
+
+    @Schema(description = "离线残留进行中数量")
+    private Integer residualActiveCount;
+
+    @Schema(description = "离线残留终态数量")
+    private Integer residualTerminalCount;
+
+    @Schema(description = "离线残留总数")
+    private Integer residualTotalCount;
+
+    @Schema(description = "残留快照扫描时间戳 ms")
+    private Long residualScannedAt;
+
+    @Schema(description = "是否正在清理残留")
+    private Boolean residualCleaning;
+
+    @Schema(description = "残留扫描/清理消息")
+    private String residualMessage;
+
+    @Schema(description = "残留任务样例(最多5条)")
+    private java.util.List<String> residualSamples;
 }

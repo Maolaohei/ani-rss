@@ -120,6 +120,18 @@ export let rssJobStatus = () => api.post('api/rssJobStatus')
  */
 export let rssJobCancel = () => api.post('api/rssJobCancel')
 
+/**
+ * 扫描 OpenList 离线残留
+ * @returns {Promise<unknown>}
+ */
+export let rssJobResidualScan = () => api.post('api/rssJobResidualScan')
+
+/**
+ * 清理 OpenList 离线残留（含进行中；保护当前 hash）
+ * @returns {Promise<unknown>}
+ */
+export let rssJobResidualClean = () => api.post('api/rssJobResidualClean')
+
 
 /**
  * 将RSS转换为订阅

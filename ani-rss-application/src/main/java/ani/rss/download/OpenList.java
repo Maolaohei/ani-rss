@@ -56,6 +56,12 @@ public class OpenList implements BaseDownload {
     private static final AtomicReference<String> currentInfoHash = new AtomicReference<>();
     /** 用户取消时置位，打断 sleep 与轮询 */
     private static final AtomicBoolean offlineCancelRequested = new AtomicBoolean(false);
+    /** 进程内仅启动回扫一次（login 成功后异步） */
+    private static final AtomicBoolean startupResidualScanned = new AtomicBoolean(false);
+    /** 最近一次残留快照（任务管理器展示） */
+    private static final AtomicReference<ResidualSnapshot> residualSnapshot = new AtomicReference<>(ResidualSnapshot.empty());
+    /** 清理中互斥，避免并发 purge 打爆 API */
+    private static final AtomicBoolean residualCleaning = new AtomicBoolean(false);
 
     /**
      * 提交成功后的分级轮询间隔：20s -> 1min -> 5min -> 10min
@@ -117,6 +123,10 @@ public class OpenList implements BaseDownload {
                         if (jsonObject.get("code").getAsInt() != 200) {
                             log.error("登录 OpenList 失败");
                             return false;
+                        }
+                        // 非测试登录：异步启动回扫。失败不影响登录成功。
+                        if (!Boolean.TRUE.equals(test)) {
+                            scheduleStartupResidualScan();
                         }
                         return true;
                     });
@@ -1323,11 +1333,243 @@ public class OpenList implements BaseDownload {
     /**
      * 任务管理器：当前正在等待的 OpenList infoHash
      */
+
+    /**
+     * 启动后异步回扫 OpenList 离线残留：
+     * - 仅执行一次
+     * - 只删除终态记录（Succeeded/Failed/Error/Canceled 等），不打断进行中下载
+     * - 进行中任务只计数展示，留给用户手动「清理残留」
+     */
+    private void scheduleStartupResidualScan() {
+        if (!startupResidualScanned.compareAndSet(false, true)) {
+            return;
+        }
+        ThreadUtil.execute(() -> {
+            try {
+                // 错开登录瞬时流量
+                ThreadUtil.sleep(800L);
+                ResidualSnapshot snap = scanOfflineResiduals(true);
+                residualSnapshot.set(snap);
+                if (snap.getTerminalCount() > 0) {
+                    CleanResult cleaned = cleanOfflineResiduals(false);
+                    residualSnapshot.set(scanOfflineResiduals(false));
+                    log.info("OpenList 启动回扫完成: active={} terminalCleaned={} remainTerminal={} err={}",
+                            snap.getActiveCount(), cleaned.getCleaned(), residualSnapshot.get().getTerminalCount(), cleaned.getMessage());
+                } else {
+                    log.info("OpenList 启动回扫完成: active={} terminal=0", snap.getActiveCount());
+                }
+            } catch (Exception e) {
+                log.warn("OpenList 启动回扫失败: {}", ExceptionUtils.getMessage(e));
+                // 允许下次 login 再试
+                startupResidualScanned.set(false);
+            }
+        });
+    }
+
+    /**
+     * 扫描 offline 残留任务（undone + done）。
+     * @param allowRemote 是否允许远程 list；false 时仅返回缓存
+     */
+    public ResidualSnapshot scanOfflineResiduals(boolean allowRemote) {
+        if (!allowRemote) {
+            ResidualSnapshot cached = residualSnapshot.get();
+            return cached == null ? ResidualSnapshot.empty() : cached;
+        }
+        if (config == null) {
+            return ResidualSnapshot.empty().setMessage("OpenList 未登录");
+        }
+        List<OpenListTaskInfo> tasks = safeListAllOfflineTasks();
+        int active = 0;
+        int terminal = 0;
+        List<String> samples = new ArrayList<>();
+        for (OpenListTaskInfo task : tasks) {
+            if (task == null || StrUtil.isBlank(task.getId())) {
+                continue;
+            }
+            ResidualKind kind = classifyResidual(task.getState());
+            if (kind == ResidualKind.ACTIVE) {
+                active++;
+            } else {
+                terminal++;
+            }
+            if (samples.size() < 5) {
+                String name = StrUtil.blankToDefault(task.getName(), task.getId());
+                samples.add(StrUtil.maxLength(name, 80));
+            }
+        }
+        ResidualSnapshot snap = new ResidualSnapshot()
+                .setActiveCount(active)
+                .setTerminalCount(terminal)
+                .setTotalCount(active + terminal)
+                .setScannedAt(System.currentTimeMillis())
+                .setSamples(samples)
+                .setCleaning(residualCleaning.get())
+                .setMessage(active + terminal == 0 ? "无离线残留" : null);
+        residualSnapshot.set(snap);
+        return snap;
+    }
+
+    /**
+     * 清理 OpenList 离线残留。
+     * @param includeActive true=取消并删除进行中；false=仅删终态记录（启动回扫）
+     */
+    public CleanResult cleanOfflineResiduals(boolean includeActive) {
+        if (config == null) {
+            return new CleanResult().setOk(false).setMessage("OpenList 未登录");
+        }
+        if (!residualCleaning.compareAndSet(false, true)) {
+            return new CleanResult().setOk(false).setMessage("清理正在进行中，请稍候");
+        }
+        try {
+            String protectHash = currentInfoHash.get();
+            List<OpenListTaskInfo> tasks = safeListAllOfflineTasks();
+            int cleaned = 0;
+            int skipped = 0;
+            int failed = 0;
+            Set<String> seen = new HashSet<>();
+            for (OpenListTaskInfo task : tasks) {
+                if (task == null || StrUtil.isBlank(task.getId()) || !seen.add(task.getId())) {
+                    continue;
+                }
+                ResidualKind kind = classifyResidual(task.getState());
+                if (kind == ResidualKind.ACTIVE && !includeActive) {
+                    skipped++;
+                    continue;
+                }
+                // 保护当前 RSS 正在等待的 hash，避免误杀在跑任务
+                if (StrUtil.isNotBlank(protectHash) && taskNameContainsHash(task.getName(), protectHash)) {
+                    skipped++;
+                    log.info("清理残留跳过当前任务 tid={} hash={}", task.getId(), protectHash);
+                    continue;
+                }
+                try {
+                    if (kind == ResidualKind.ACTIVE) {
+                        try {
+                            taskCancel(task.getId());
+                        } catch (Exception cancelEx) {
+                            log.debug("清理残留 cancel 失败 {}: {}", task.getId(), cancelEx.getMessage());
+                        }
+                    }
+                    // 终态与成功任务：只能删记录，不能“取消下载”
+                    taskDelete(task.getId());
+                    cleaned++;
+                } catch (Exception e) {
+                    failed++;
+                    log.warn("清理残留失败 tid={} state={}: {}", task.getId(), task.getState(), e.getMessage());
+                }
+            }
+            ResidualSnapshot after = scanOfflineResiduals(true);
+            String msg = StrFormatter.format("清理完成 cleaned={} skipped={} failed={} remain={}",
+                    cleaned, skipped, failed, after.getTotalCount());
+            log.info("OpenList {}", msg);
+            return new CleanResult()
+                    .setOk(true)
+                    .setCleaned(cleaned)
+                    .setSkipped(skipped)
+                    .setFailed(failed)
+                    .setMessage(msg)
+                    .setSnapshot(after);
+        } finally {
+            residualCleaning.set(false);
+            ResidualSnapshot latest = residualSnapshot.get();
+            if (latest != null) {
+                residualSnapshot.set(latest.setCleaning(false));
+            }
+        }
+    }
+
+    public ResidualSnapshot getResidualSnapshot() {
+        ResidualSnapshot snap = residualSnapshot.get();
+        if (snap == null) {
+            return ResidualSnapshot.empty();
+        }
+        return snap.setCleaning(residualCleaning.get());
+    }
+
+    private List<OpenListTaskInfo> safeListAllOfflineTasks() {
+        List<OpenListTaskInfo> all = new ArrayList<>();
+        try {
+            List<OpenListTaskInfo> undone = taskUnDoneList();
+            if (undone != null) {
+                all.addAll(undone);
+            }
+        } catch (Exception e) {
+            log.warn("列出 undone 离线任务失败: {}", e.getMessage());
+        }
+        try {
+            List<OpenListTaskInfo> done = taskDoneList();
+            if (done != null) {
+                all.addAll(done);
+            }
+        } catch (Exception e) {
+            log.warn("列出 done 离线任务失败: {}", e.getMessage());
+        }
+        return all;
+    }
+
+    static boolean taskNameContainsHash(String name, String hash) {
+        if (StrUtil.isBlank(name) || StrUtil.isBlank(hash)) {
+            return false;
+        }
+        return name.toLowerCase(Locale.ROOT).contains(hash.toLowerCase(Locale.ROOT));
+    }
+
+    /**
+     * ACTIVE=进行中可 cancel；TERMINAL=只能删记录
+     */
+    static ResidualKind classifyResidual(OpenListTaskInfo.State state) {
+        if (state == null) {
+            return ResidualKind.TERMINAL;
+        }
+        return switch (state) {
+            case Pending, Running, Waiting_for_Retry, Preparing_to_Retry -> ResidualKind.ACTIVE;
+            case Succeeded, Error, Failing, Failed, Canceling, Canceled -> ResidualKind.TERMINAL;
+        };
+    }
+
+    enum ResidualKind {
+        ACTIVE,
+        TERMINAL
+    }
+
+    @lombok.Data
+    @lombok.experimental.Accessors(chain = true)
+    public static class ResidualSnapshot implements java.io.Serializable {
+        private int activeCount;
+        private int terminalCount;
+        private int totalCount;
+        private Long scannedAt;
+        private Boolean cleaning;
+        private String message;
+        private List<String> samples;
+
+        public static ResidualSnapshot empty() {
+            return new ResidualSnapshot()
+                    .setActiveCount(0)
+                    .setTerminalCount(0)
+                    .setTotalCount(0)
+                    .setCleaning(false)
+                    .setSamples(List.of());
+        }
+    }
+
+    @lombok.Data
+    @lombok.experimental.Accessors(chain = true)
+    public static class CleanResult implements java.io.Serializable {
+        private boolean ok;
+        private int cleaned;
+        private int skipped;
+        private int failed;
+        private String message;
+        private ResidualSnapshot snapshot;
+    }
+
+
     public String getCurrentInfoHash() {
         return currentInfoHash.get();
     }
-
-        /**
+
+    /**
      * 用户取消 RSS 任务时：打断等待并清理当前 hash 的 OpenList 离线任务。
      * 边界：
      * - Pending/Running 等：先 cancel 再 delete 记录

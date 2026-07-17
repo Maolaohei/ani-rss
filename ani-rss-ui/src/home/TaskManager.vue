@@ -1,5 +1,5 @@
 <template>
-  <el-dialog v-model="dialogVisible" center title="任务管理器" width="520px">
+  <el-dialog v-model="dialogVisible" center title="任务管理器" width="560px">
     <div class="job-body">
       <div class="job-row">
         <span class="job-label">状态</span>
@@ -41,6 +41,30 @@
         <span class="job-label">待执行</span>
         <span class="job-value">{{ pendingText }}</span>
       </div>
+
+      <template v-if="status.residualSupported">
+        <div class="job-divider"></div>
+        <div class="job-row">
+          <span class="job-label">离线残留</span>
+          <span class="job-value">
+            进行中 {{ status.residualActiveCount ?? 0 }} / 终态 {{ status.residualTerminalCount ?? 0 }}
+            <el-tag v-if="status.residualCleaning" type="warning" size="small" style="margin-left: 8px;">清理中</el-tag>
+          </span>
+        </div>
+        <div class="job-row" v-if="status.residualMessage">
+          <span class="job-label">残留消息</span>
+          <span class="job-value">{{ status.residualMessage }}</span>
+        </div>
+        <div class="job-row" v-if="status.residualSamples?.length">
+          <span class="job-label">样例</span>
+          <span class="job-value mono residual-samples">{{ status.residualSamples.join(' | ') }}</span>
+        </div>
+        <div class="job-row" v-if="status.residualScannedAt">
+          <span class="job-label">扫描于</span>
+          <span>{{ residualScannedText }}</span>
+        </div>
+      </template>
+
       <el-alert
           v-if="status.running || status.pending"
           type="info"
@@ -49,11 +73,39 @@
           title="取消会停止后续订阅推进并清空待执行；OpenList/Alist 会取消进行中的离线种子并删除记录（已成功任务仅删记录）。qB/Aria2/TR 只停 RSS 推进。"
           style="margin-top: 12px;"
       />
-      <el-empty v-else description="当前没有 RSS 任务" :image-size="80"/>
+      <el-alert
+          v-if="status.residualSupported"
+          type="warning"
+          :closable="false"
+          show-icon
+          title="清理残留会取消进行中离线任务并删除记录；已成功任务仅删记录。当前正在等待的 hash 会受保护。启动回扫只清终态。"
+          style="margin-top: 12px;"
+      />
+      <el-empty v-if="!status.running && !status.pending && !status.residualSupported" description="当前没有 RSS 任务" :image-size="80"/>
     </div>
     <template #footer>
       <div class="job-footer">
         <el-button bg text @click="refreshNow" :loading="loading">刷新</el-button>
+        <el-button
+            v-if="status.residualSupported"
+            bg
+            text
+            :loading="scanning"
+            @click="scanResidual"
+        >
+          扫描残留
+        </el-button>
+        <el-button
+            v-if="status.residualSupported"
+            type="warning"
+            bg
+            text
+            :disabled="status.residualCleaning"
+            :loading="cleaning"
+            @click="cleanResidual"
+        >
+          清理残留
+        </el-button>
         <el-button
             type="danger"
             bg
@@ -71,12 +123,14 @@
 
 <script setup>
 import {computed, ref} from "vue";
-import {ElMessage} from "element-plus";
+import {ElMessage, ElMessageBox} from "element-plus";
 import * as http from "@/js/http.js";
 
 const dialogVisible = ref(false)
 const loading = ref(false)
 const canceling = ref(false)
+const scanning = ref(false)
+const cleaning = ref(false)
 const status = ref({
   running: false,
   cancelRequested: false,
@@ -90,7 +144,15 @@ const status = ref({
   source: null,
   pending: false,
   pendingTitle: null,
-  pendingScope: null
+  pendingScope: null,
+  residualSupported: false,
+  residualActiveCount: 0,
+  residualTerminalCount: 0,
+  residualTotalCount: 0,
+  residualScannedAt: null,
+  residualCleaning: false,
+  residualMessage: null,
+  residualSamples: []
 })
 
 const scopeText = computed(() => {
@@ -131,6 +193,16 @@ const elapsedText = computed(() => {
   return `${s}秒`
 })
 
+const residualScannedText = computed(() => {
+  const ts = Number(status.value.residualScannedAt || 0)
+  if (!ts) return '-'
+  try {
+    return new Date(ts).toLocaleString()
+  } catch (_) {
+    return String(ts)
+  }
+})
+
 const show = () => {
   dialogVisible.value = true
   pollStatus()
@@ -149,7 +221,14 @@ const fetchStatus = async () => {
   try {
     const res = await http.rssJobStatus()
     if (res?.data) {
-      status.value = res.data
+      status.value = {
+        residualSupported: false,
+        residualActiveCount: 0,
+        residualTerminalCount: 0,
+        residualTotalCount: 0,
+        residualSamples: [],
+        ...res.data
+      }
     }
   } catch (_) {
   }
@@ -158,7 +237,7 @@ const fetchStatus = async () => {
 const pollStatus = async () => {
   while (dialogVisible.value) {
     await fetchStatus()
-    await sleep((status.value.running || status.value.pending) ? 2000 : 4000)
+    await sleep((status.value.running || status.value.pending || status.value.residualCleaning) ? 2000 : 4000)
   }
 }
 
@@ -168,12 +247,72 @@ const cancelJob = async () => {
     const res = await http.rssJobCancel()
     ElMessage.success(res.message || '已请求取消')
     if (res?.data) {
-      status.value = res.data
+      status.value = {
+        residualSupported: false,
+        residualActiveCount: 0,
+        residualTerminalCount: 0,
+        residualTotalCount: 0,
+        residualSamples: [],
+        ...res.data
+      }
     }
   } catch (e) {
     ElMessage.error(e?.message || '取消失败')
   } finally {
     canceling.value = false
+  }
+}
+
+const scanResidual = async () => {
+  scanning.value = true
+  try {
+    const res = await http.rssJobResidualScan()
+    ElMessage.success(res.message || '扫描完成')
+    if (res?.data) {
+      status.value = {
+        residualSupported: false,
+        residualActiveCount: 0,
+        residualTerminalCount: 0,
+        residualTotalCount: 0,
+        residualSamples: [],
+        ...res.data
+      }
+    }
+  } catch (e) {
+    ElMessage.error(e?.message || '扫描失败')
+  } finally {
+    scanning.value = false
+  }
+}
+
+const cleanResidual = async () => {
+  try {
+    await ElMessageBox.confirm(
+        '将取消 OpenList 进行中离线任务并删除记录；已成功任务仅删记录。当前 RSS 正在等待的 hash 会跳过。是否继续？',
+        '清理残留',
+        {type: 'warning', confirmButtonText: '清理', cancelButtonText: '取消'}
+    )
+  } catch (_) {
+    return
+  }
+  cleaning.value = true
+  try {
+    const res = await http.rssJobResidualClean()
+    ElMessage.success(res.message || '清理完成')
+    if (res?.data) {
+      status.value = {
+        residualSupported: false,
+        residualActiveCount: 0,
+        residualTerminalCount: 0,
+        residualTotalCount: 0,
+        residualSamples: [],
+        ...res.data
+      }
+    }
+  } catch (e) {
+    ElMessage.error(e?.message || '清理失败')
+  } finally {
+    cleaning.value = false
   }
 }
 
@@ -195,7 +334,7 @@ defineExpose({show})
 }
 
 .job-label {
-  width: 64px;
+  width: 72px;
   flex-shrink: 0;
   color: var(--el-text-color-secondary);
 }
@@ -210,9 +349,20 @@ defineExpose({show})
   font-size: 12px;
 }
 
+.residual-samples {
+  color: var(--el-text-color-secondary);
+}
+
+.job-divider {
+  height: 1px;
+  background: var(--el-border-color-lighter);
+  margin: 8px 0 12px;
+}
+
 .job-footer {
   display: flex;
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 8px;
 }
 </style>

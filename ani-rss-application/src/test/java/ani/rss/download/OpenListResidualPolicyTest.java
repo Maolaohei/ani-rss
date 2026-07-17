@@ -140,4 +140,43 @@ class OpenListResidualPolicyTest {
         assertFalse(OpenList.isOpenListBusinessOk(false, "{\"code\":200}"));
         assertFalse(OpenList.isOpenListBusinessOk(true, "not-json"));
     }
+
+
+    @Test
+    void classifyResidual_active_and_terminal() {
+        assertEquals(OpenList.ResidualKind.ACTIVE, OpenList.classifyResidual(OpenListTaskInfo.State.Pending));
+        assertEquals(OpenList.ResidualKind.ACTIVE, OpenList.classifyResidual(OpenListTaskInfo.State.Running));
+        assertEquals(OpenList.ResidualKind.ACTIVE, OpenList.classifyResidual(OpenListTaskInfo.State.Waiting_for_Retry));
+        assertEquals(OpenList.ResidualKind.ACTIVE, OpenList.classifyResidual(OpenListTaskInfo.State.Preparing_to_Retry));
+
+        assertEquals(OpenList.ResidualKind.TERMINAL, OpenList.classifyResidual(OpenListTaskInfo.State.Succeeded));
+        assertEquals(OpenList.ResidualKind.TERMINAL, OpenList.classifyResidual(OpenListTaskInfo.State.Error));
+        assertEquals(OpenList.ResidualKind.TERMINAL, OpenList.classifyResidual(OpenListTaskInfo.State.Failing));
+        assertEquals(OpenList.ResidualKind.TERMINAL, OpenList.classifyResidual(OpenListTaskInfo.State.Failed));
+        assertEquals(OpenList.ResidualKind.TERMINAL, OpenList.classifyResidual(OpenListTaskInfo.State.Canceling));
+        assertEquals(OpenList.ResidualKind.TERMINAL, OpenList.classifyResidual(OpenListTaskInfo.State.Canceled));
+        assertEquals(OpenList.ResidualKind.TERMINAL, OpenList.classifyResidual(null));
+    }
+
+    @Test
+    void taskNameContainsHash_case_insensitive() {
+        assertTrue(OpenList.taskNameContainsHash("magnet:?xt=urn:btih:ABCDEF1234", "abcdef1234"));
+        assertTrue(OpenList.taskNameContainsHash("offline-ABCDEF1234.task", "ABCDEF1234"));
+        assertFalse(OpenList.taskNameContainsHash("offline-other", "abcdef1234"));
+        assertFalse(OpenList.taskNameContainsHash(null, "abc"));
+        assertFalse(OpenList.taskNameContainsHash("name", null));
+        assertFalse(OpenList.taskNameContainsHash("", "abc"));
+    }
+
+    @Test
+    void residualSnapshot_empty_defaults() {
+        OpenList.ResidualSnapshot empty = OpenList.ResidualSnapshot.empty();
+        assertEquals(0, empty.getActiveCount());
+        assertEquals(0, empty.getTerminalCount());
+        assertEquals(0, empty.getTotalCount());
+        assertEquals(Boolean.FALSE, empty.getCleaning());
+        assertNotNull(empty.getSamples());
+        assertTrue(empty.getSamples().isEmpty());
+    }
+
 }
