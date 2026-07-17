@@ -121,6 +121,13 @@ export let rssJobStatus = () => api.post('api/rssJobStatus')
 export let rssJobCancel = () => api.post('api/rssJobCancel')
 
 /**
+ * 按条目取消 RSS/OpenList 任务
+ * @param {string} id
+ * @returns {Promise<unknown>}
+ */
+export let rssJobCancelItem = (id) => api.post('api/rssJobCancelItem', {id})
+
+/**
  * 扫描 OpenList 离线残留
  * @returns {Promise<unknown>}
  */

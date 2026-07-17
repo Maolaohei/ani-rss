@@ -4,6 +4,7 @@ import ani.rss.commons.ExceptionUtils;
 import ani.rss.download.OpenList;
 import ani.rss.entity.Ani;
 import ani.rss.entity.Config;
+import ani.rss.entity.vo.RssJobItem;
 import ani.rss.entity.vo.RssJobStatus;
 import ani.rss.service.DownloadService;
 import ani.rss.util.other.AniUtil;
@@ -68,6 +69,14 @@ public class RssTask implements BaseTask {
     private static final AtomicReference<JobSource> jobSource = new AtomicReference<>(null);
     private static final AtomicReference<ExecutorService> activePool = new AtomicReference<>();
     private static final AtomicReference<PendingManual> pendingManual = new AtomicReference<>(null);
+
+    /** 上一轮已处理完成时间 */
+    private static final AtomicLong lastFinishedAt = new AtomicLong(0);
+    private static final AtomicLong lastDurationMs = new AtomicLong(0);
+    private static final AtomicReference<String> lastResultMessage = new AtomicReference<>("");
+    private static final AtomicReference<String> lastTitle = new AtomicReference<>("");
+    private static final AtomicReference<String> lastSource = new AtomicReference<>(null);
+    private static final AtomicReference<String> lastScope = new AtomicReference<>(null);
 
     /**
      * 获取全局 RSS 任务锁（别名，兼容上游 API 命名）
@@ -211,6 +220,22 @@ public class RssTask implements BaseTask {
                 pool.shutdownNow();
             }
             activePool.compareAndSet(pool, null);
+
+            // 记录上一轮已处理时间（在清空状态前）
+            long startedAt = downloadStartTime.get();
+            long finishedAt = System.currentTimeMillis();
+            long duration = startedAt > 0 ? Math.max(0L, finishedAt - startedAt) : 0L;
+            String finishedTitle = StrUtil.blankToDefault(jobTitle.get(), "");
+            String finishedScope = StrUtil.blankToDefault(jobScope.get(), "idle");
+            JobSource finishedSource = jobSource.get();
+            String finishedMessage = StrUtil.blankToDefault(jobMessage.get(), "已完成");
+            lastFinishedAt.set(finishedAt);
+            lastDurationMs.set(duration);
+            lastTitle.set(finishedTitle);
+            lastScope.set(finishedScope);
+            lastSource.set(finishedSource == null ? null : finishedSource.name().toLowerCase());
+            lastResultMessage.set(finishedMessage);
+
             // 保留 cancelRequested 直至 drain 决策完成：取消场景不自动续跑待执行
             jobScope.set("idle");
             jobTitle.set("");
@@ -439,6 +464,11 @@ public class RssTask implements BaseTask {
                 // OpenList bean 暂不可用
             }
         }
+        boolean openListBusy = StrUtil.isNotBlank(currentHash);
+        // 兜底文案：旁路直接 downloadAni 时，RSS 锁空闲但 OpenList 仍在跑
+        if (!running && openListBusy && (pendingManual.get() == null)) {
+            message = "OpenList 离线处理中";
+        }
         PendingManual pending = pendingManual.get();
         JobSource source = jobSource.get();
         boolean residualSupported = isOpenListTool();
@@ -465,16 +495,61 @@ public class RssTask implements BaseTask {
                 residualMessage = "OpenList 残留快照不可用";
             }
         }
+
+        long finishedAt = lastFinishedAt.get();
+        long lastDuration = lastDurationMs.get();
+        String lastMsg = lastResultMessage.get();
+        String lastJobTitle = lastTitle.get();
+        String lastJobSource = lastSource.get();
+        String lastJobScope = lastScope.get();
+
+        List<RssJobItem> tasks = buildTaskItems(
+                running,
+                cancelRequested.get(),
+                scope,
+                jobTitle.get(),
+                message,
+                source,
+                startedAt,
+                elapsed,
+                pending,
+                openListBusy,
+                currentHash,
+                residualSupported,
+                residualActive,
+                residualTerminal,
+                residualTotal,
+                residualScannedAt,
+                residualCleaning,
+                residualMessage,
+                residualSamples,
+                finishedAt,
+                lastDuration,
+                lastMsg,
+                lastJobTitle,
+                lastJobSource,
+                lastJobScope
+        );
+        boolean canCancel = tasks.stream().anyMatch(t -> Boolean.TRUE.equals(t.getCancellable()));
+
         return new RssJobStatus()
                 .setRunning(running)
                 .setCancelRequested(cancelRequested.get())
+                .setCanCancel(canCancel)
                 .setScope(scope)
                 .setTitle(jobTitle.get())
                 .setAniId(jobAniId.get())
                 .setStartedAt(startedAt > 0 ? startedAt : null)
                 .setElapsedMs(elapsed)
+                .setLastFinishedAt(finishedAt > 0 ? finishedAt : null)
+                .setLastDurationMs(finishedAt > 0 ? lastDuration : null)
+                .setLastResultMessage(StrUtil.blankToDefault(lastMsg, null))
+                .setLastTitle(StrUtil.blankToDefault(lastJobTitle, null))
+                .setLastSource(lastJobSource)
+                .setLastScope(lastJobScope)
                 .setMessage(message)
                 .setCurrentHash(currentHash)
+                .setOpenListBusy(openListBusy)
                 .setSource(source == null ? null : source.name().toLowerCase())
                 .setPending(pending != null)
                 .setPendingTitle(pending == null ? null : pending.title)
@@ -486,7 +561,153 @@ public class RssTask implements BaseTask {
                 .setResidualScannedAt(residualScannedAt)
                 .setResidualCleaning(residualCleaning)
                 .setResidualMessage(residualMessage)
-                .setResidualSamples(residualSamples);
+                .setResidualSamples(residualSamples)
+                .setTasks(tasks);
+    }
+
+    private static List<RssJobItem> buildTaskItems(
+            boolean running,
+            boolean canceling,
+            String scope,
+            String title,
+            String message,
+            JobSource source,
+            long startedAt,
+            long elapsed,
+            PendingManual pending,
+            boolean openListBusy,
+            String currentHash,
+            boolean residualSupported,
+            Integer residualActive,
+            Integer residualTerminal,
+            Integer residualTotal,
+            Long residualScannedAt,
+            Boolean residualCleaning,
+            String residualMessage,
+            List<String> residualSamples,
+            long finishedAt,
+            long lastDuration,
+            String lastMsg,
+            String lastJobTitle,
+            String lastJobSource,
+            String lastJobScope
+    ) {
+        List<RssJobItem> tasks = new ArrayList<>();
+
+        if (running) {
+            tasks.add(new RssJobItem()
+                    .setId("rss-running")
+                    .setKind("rss_running")
+                    .setStatus(canceling ? "canceling" : "running")
+                    .setTitle(StrUtil.blankToDefault(title, scopeText(scope)))
+                    .setMessage(StrUtil.blankToDefault(message, "处理中"))
+                    .setSource(source == null ? null : source.name().toLowerCase())
+                    .setScope(scope)
+                    // 便于单条观察：RSS 运行中若正占用 OpenList，一并带上 hash
+                    .setHash(openListBusy ? currentHash : null)
+                    .setStartedAt(startedAt > 0 ? startedAt : null)
+                    .setElapsedMs(elapsed)
+                    .setProcessedAt(null)
+                    .setDurationMs(null)
+                    .setCancellable(true));
+        }
+
+        if (pending != null) {
+            tasks.add(new RssJobItem()
+                    .setId("rss-pending")
+                    .setKind("rss_pending")
+                    .setStatus("pending")
+                    .setTitle(StrUtil.blankToDefault(pending.title, "待执行手动刷新"))
+                    .setMessage("等待当前任务结束后执行")
+                    .setSource("manual")
+                    .setScope(pending.scope)
+                    .setHash(null)
+                    .setStartedAt(null)
+                    .setElapsedMs(null)
+                    .setProcessedAt(null)
+                    .setDurationMs(null)
+                    .setCancellable(true));
+        }
+
+        if (openListBusy) {
+            tasks.add(new RssJobItem()
+                    .setId("openlist-current")
+                    .setKind("openlist_current")
+                    .setStatus("busy")
+                    .setTitle("OpenList 离线任务")
+                    .setMessage(running ? "当前 RSS 关联的离线下载进行中" : "OpenList 离线处理中")
+                    .setSource("openlist")
+                    .setScope("offline")
+                    .setHash(currentHash)
+                    .setStartedAt(running && startedAt > 0 ? startedAt : null)
+                    .setElapsedMs(running ? elapsed : null)
+                    .setProcessedAt(null)
+                    .setDurationMs(null)
+                    .setCancellable(true));
+        }
+
+        if (residualSupported) {
+            int active = residualActive == null ? 0 : residualActive;
+            int terminal = residualTerminal == null ? 0 : residualTerminal;
+            int total = residualTotal == null ? (active + terminal) : residualTotal;
+            boolean cleaning = Boolean.TRUE.equals(residualCleaning);
+            String sampleText = (residualSamples == null || residualSamples.isEmpty())
+                    ? ""
+                    : ("；样例: " + String.join(" | ", residualSamples));
+            String residualMsg = StrUtil.blankToDefault(residualMessage,
+                    total == 0 ? "无离线残留" : ("进行中 " + active + " / 终态 " + terminal));
+            // 仅进行中/清理中视为 busy；纯终态残留不伪装成待执行，避免前端误高频轮询
+            String residualStatus = cleaning || active > 0 ? "busy" : "idle";
+            tasks.add(new RssJobItem()
+                    .setId("residual-summary")
+                    .setKind("residual")
+                    .setStatus(residualStatus)
+                    .setTitle("OpenList 离线残留")
+                    .setMessage(residualMsg + sampleText)
+                    .setSource("residual")
+                    .setScope("residual")
+                    .setHash(null)
+                    .setStartedAt(null)
+                    .setElapsedMs(null)
+                    .setProcessedAt(residualScannedAt)
+                    .setDurationMs(null)
+                    .setCancellable(false));
+        }
+
+        if (finishedAt > 0) {
+            tasks.add(new RssJobItem()
+                    .setId("last-finished")
+                    .setKind("last_finished")
+                    .setStatus("done")
+                    .setTitle(StrUtil.blankToDefault(lastJobTitle, "上一轮任务"))
+                    .setMessage(StrUtil.blankToDefault(lastMsg, "已完成"))
+                    .setSource(lastJobSource)
+                    .setScope(lastJobScope)
+                    .setHash(null)
+                    .setStartedAt(lastDuration > 0 ? Math.max(0L, finishedAt - lastDuration) : null)
+                    .setElapsedMs(null)
+                    .setProcessedAt(finishedAt)
+                    .setDurationMs(lastDuration)
+                    .setCancellable(false));
+        }
+
+        return tasks;
+    }
+
+    private static String scopeText(String scope) {
+        if ("all".equals(scope)) {
+            return "全部启用订阅";
+        }
+        if ("single".equals(scope)) {
+            return "单个订阅";
+        }
+        if ("partial".equals(scope)) {
+            return "部分订阅";
+        }
+        if ("starting".equals(scope)) {
+            return "启动中";
+        }
+        return "空闲";
     }
 
     /**
@@ -500,7 +721,22 @@ public class RssTask implements BaseTask {
         if (!download.get()) {
             if (dropped != null) {
                 jobMessage.set("已清除待执行刷新");
+                cleanupDownloadToolOnCancel("清除待执行时附带清理");
                 return true;
+            }
+            // RSS 调度空闲，但 OpenList 可能仍占用 currentInfoHash
+            if (isOpenListTool()) {
+                String hash = null;
+                try {
+                    hash = SpringUtil.getBean(OpenList.class).getCurrentInfoHash();
+                } catch (Exception ignored) {
+                }
+                if (StrUtil.isNotBlank(hash)) {
+                    jobMessage.set("取消 OpenList 离线任务...");
+                    cleanupDownloadToolOnCancel("用户取消 OpenList 占用");
+                    jobMessage.set("已请求取消 OpenList 离线任务");
+                    return true;
+                }
             }
             return false;
         }
@@ -529,6 +765,58 @@ public class RssTask implements BaseTask {
             }
         });
         return true;
+    }
+
+    /**
+     * 按任务条目取消：
+     * - rss-running: 取消当前 RSS 全局任务（并清 pending + OpenList current）
+     * - rss-pending: 仅清除排队手动刷新
+     * - openlist-current: 仅清理 OpenList 当前占用
+     * 其他条目不可取消。
+     */
+    public static boolean cancelItem(String itemId) {
+        if (StrUtil.isBlank(itemId)) {
+            return requestCancel();
+        }
+        if ("rss-running".equals(itemId)) {
+            // 全局取消：running + pending + openlist current
+            return requestCancel();
+        }
+        if ("rss-pending".equals(itemId)) {
+            PendingManual dropped = pendingManual.getAndSet(null);
+            if (dropped == null) {
+                return false;
+            }
+            // 仅空闲时更新全局文案；运行中避免覆盖“处理中: xxx”
+            if (!download.get()) {
+                jobMessage.set("已清除待执行刷新");
+            }
+            log.warn("任务管理器清除待执行刷新: {}", dropped.title);
+            return true;
+        }
+        if ("openlist-current".equals(itemId)) {
+            if (!isOpenListTool()) {
+                return false;
+            }
+            String hash = null;
+            try {
+                hash = SpringUtil.getBean(OpenList.class).getCurrentInfoHash();
+            } catch (Exception ignored) {
+            }
+            if (StrUtil.isBlank(hash)) {
+                return false;
+            }
+            // 运行中只清 OpenList 占用，不改 RSS 主文案
+            if (!download.get()) {
+                jobMessage.set("取消 OpenList 离线任务...");
+            }
+            cleanupDownloadToolOnCancel("任务条目取消 OpenList");
+            if (!download.get()) {
+                jobMessage.set("已请求取消 OpenList 离线任务");
+            }
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -605,6 +893,8 @@ public class RssTask implements BaseTask {
         if (pool != null) {
             pool.shutdownNow();
         }
+        // 锁被判定残留时，同步清掉 OpenList 当前占用，避免 UI 只剩 Hash/新任务并发冲突
+        cleanupDownloadToolOnCancel(reason);
         download.set(false);
         downloadStartTime.set(0);
         // 强制释放时不自动 drain pending，避免与取消语义冲突；保留 pending 供下次空闲提交触发

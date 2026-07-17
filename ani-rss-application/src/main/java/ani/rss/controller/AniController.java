@@ -94,11 +94,9 @@ public class AniController extends BaseController {
         AniUtil.sync();
         Boolean enable = ani.getEnable();
         if (enable) {
-            ThreadUtil.execute(() -> {
-                if (TorrentUtil.login()) {
-                    downloadService.downloadAni(ani);
-                }
-            });
+            // 必须走任务管理器：才能展示运行中状态/取消/排队，避免只剩 Hash、状态空闲
+            String downloadMsg = RssTask.submitManualRefresh(List.of(ani));
+            log.info("添加订阅后触发下载: {} => {}", ani.getTitle(), downloadMsg);
         } else {
             // 如果未开启订阅则只获取一下集数
             ThreadUtil.execute(() -> {

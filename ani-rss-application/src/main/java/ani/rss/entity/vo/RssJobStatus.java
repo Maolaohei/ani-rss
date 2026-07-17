@@ -5,6 +5,7 @@ import lombok.Data;
 import lombok.experimental.Accessors;
 
 import java.io.Serializable;
+import java.util.List;
 
 /**
  * RSS 全局任务快照（任务管理器）
@@ -18,6 +19,9 @@ public class RssJobStatus implements Serializable {
 
     @Schema(description = "是否已请求取消")
     private Boolean cancelRequested;
+
+    @Schema(description = "是否存在可取消项（全局取消按钮）")
+    private Boolean canCancel;
 
     @Schema(description = "任务范围: idle/all/single/partial/starting")
     private String scope;
@@ -33,6 +37,24 @@ public class RssJobStatus implements Serializable {
 
     @Schema(description = "已运行毫秒")
     private Long elapsedMs;
+
+    @Schema(description = "最近一次任务完成时间戳 ms")
+    private Long lastFinishedAt;
+
+    @Schema(description = "最近一次任务耗时毫秒")
+    private Long lastDurationMs;
+
+    @Schema(description = "最近一次任务结果文案")
+    private String lastResultMessage;
+
+    @Schema(description = "最近一次任务标题")
+    private String lastTitle;
+
+    @Schema(description = "最近一次任务来源")
+    private String lastSource;
+
+    @Schema(description = "最近一次任务范围")
+    private String lastScope;
 
     @Schema(description = "状态文案")
     private String message;
@@ -51,6 +73,9 @@ public class RssJobStatus implements Serializable {
 
     @Schema(description = "待执行任务范围")
     private String pendingScope;
+
+    @Schema(description = "OpenList 是否正占用当前 hash（即使 RSS 调度空闲）")
+    private Boolean openListBusy;
 
     @Schema(description = "是否支持 OpenList 残留扫描(OpenList/Alist)")
     private Boolean residualSupported;
@@ -74,5 +99,8 @@ public class RssJobStatus implements Serializable {
     private String residualMessage;
 
     @Schema(description = "残留任务样例(最多5条)")
-    private java.util.List<String> residualSamples;
+    private List<String> residualSamples;
+
+    @Schema(description = "可观察任务列表（running/pending/openlist/residual/last-finished）")
+    private List<RssJobItem> tasks;
 }
