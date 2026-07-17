@@ -651,27 +651,34 @@ public class RssTask implements BaseTask {
             int terminal = residualTerminal == null ? 0 : residualTerminal;
             int total = residualTotal == null ? (active + terminal) : residualTotal;
             boolean cleaning = Boolean.TRUE.equals(residualCleaning);
-            String sampleText = (residualSamples == null || residualSamples.isEmpty())
-                    ? ""
-                    : ("；样例: " + String.join(" | ", residualSamples));
-            String residualMsg = StrUtil.blankToDefault(residualMessage,
-                    total == 0 ? "无离线残留" : ("进行中 " + active + " / 终态 " + terminal));
-            // 仅进行中/清理中视为 busy；纯终态残留不伪装成待执行，避免前端误高频轮询
-            String residualStatus = cleaning || active > 0 ? "busy" : "idle";
-            tasks.add(new RssJobItem()
-                    .setId("residual-summary")
-                    .setKind("residual")
-                    .setStatus(residualStatus)
-                    .setTitle("OpenList 离线残留")
-                    .setMessage(residualMsg + sampleText)
-                    .setSource("residual")
-                    .setScope("residual")
-                    .setHash(null)
-                    .setStartedAt(null)
-                    .setElapsedMs(null)
-                    .setProcessedAt(residualScannedAt)
-                    .setDurationMs(null)
-                    .setCancellable(false));
+            // 空闲且无残留时不占任务列表；仅有残留/清理中/扫描异常才展示
+            boolean hasResidualError = StrUtil.isNotBlank(residualMessage)
+                    && !residualMessage.contains("无离线残留")
+                    && total == 0
+                    && !cleaning;
+            if (total > 0 || cleaning || hasResidualError) {
+                String sampleText = (residualSamples == null || residualSamples.isEmpty())
+                        ? ""
+                        : ("；样例: " + String.join(" | ", residualSamples));
+                String residualMsg = StrUtil.blankToDefault(residualMessage,
+                        "进行中 " + active + " / 终态 " + terminal);
+                // 仅进行中/清理中视为 busy；纯终态残留不伪装成待执行，避免前端误高频轮询
+                String residualStatus = cleaning || active > 0 ? "busy" : "idle";
+                tasks.add(new RssJobItem()
+                        .setId("residual-summary")
+                        .setKind("residual")
+                        .setStatus(residualStatus)
+                        .setTitle("OpenList 离线残留")
+                        .setMessage(residualMsg + sampleText)
+                        .setSource("residual")
+                        .setScope("residual")
+                        .setHash(null)
+                        .setStartedAt(null)
+                        .setElapsedMs(null)
+                        .setProcessedAt(residualScannedAt)
+                        .setDurationMs(null)
+                        .setCancellable(false));
+            }
         }
 
         if (finishedAt > 0) {

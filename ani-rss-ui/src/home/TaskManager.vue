@@ -216,13 +216,22 @@ const taskList = computed(() => {
       cancellable: true
     })
   }
-  if (status.value.residualSupported) {
+  const residualTotal = Number(status.value.residualTotalCount || 0)
+  const residualActive = Number(status.value.residualActiveCount || 0)
+  const residualTerminal = Number(status.value.residualTerminalCount || 0)
+  const residualCount = residualTotal > 0 ? residualTotal : (residualActive + residualTerminal)
+  const residualMsg = status.value.residualMessage || ''
+  const hasResidualError = !!residualMsg
+      && !residualMsg.includes('无离线残留')
+      && residualCount === 0
+      && !status.value.residualCleaning
+  if (status.value.residualSupported && (residualCount > 0 || status.value.residualCleaning || hasResidualError)) {
     list.push({
       id: 'residual-summary',
       kind: 'residual',
-      status: (status.value.residualCleaning || (status.value.residualActiveCount || 0) > 0) ? 'busy' : 'idle',
+      status: (status.value.residualCleaning || residualActive > 0) ? 'busy' : 'idle',
       title: 'OpenList 离线残留',
-      message: status.value.residualMessage || `进行中 ${status.value.residualActiveCount ?? 0} / 终态 ${status.value.residualTerminalCount ?? 0}`,
+      message: residualMsg || `进行中 ${residualActive} / 终态 ${residualTerminal}`,
       source: 'residual',
       scope: 'residual',
       processedAt: status.value.residualScannedAt,

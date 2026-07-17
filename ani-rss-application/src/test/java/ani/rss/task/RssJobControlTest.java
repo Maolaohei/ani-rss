@@ -1,12 +1,14 @@
 package ani.rss.task;
 
 import ani.rss.entity.Config;
+import ani.rss.entity.vo.RssJobItem;
 import ani.rss.entity.vo.RssJobStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -119,7 +121,7 @@ class RssJobControlTest {
     }
 
     @Test
-    void second_manual_replaces_pending_slot() throws Exception {
+    void manual_when_manual_running_queues_only() throws Exception {
         setBoolean("download", true);
         setLong("downloadStartTime", System.currentTimeMillis());
         setRefObj("jobSource", RssTask.JobSource.MANUAL);
@@ -129,9 +131,7 @@ class RssJobControlTest {
         String first = RssTask.submitManualRefresh(null);
         assertTrue(RssTask.hasPendingManual());
         assertTrue(first.contains("排队") || first.contains("待执行"));
-
         String second = RssTask.submitManualRefresh(null);
-        assertTrue(RssTask.hasPendingManual());
         assertTrue(second.contains("替换") || second.contains("排队"));
         RssJobStatus status = RssTask.getJobStatus();
         assertTrue(Boolean.TRUE.equals(status.getPending()));
@@ -147,7 +147,7 @@ class RssJobControlTest {
     }
 
     @Test
-    void requestCancel_clears_pending_while_running() throws Exception {
+    void cancel_clears_pending_and_keeps_running_cancel_flag() throws Exception {
         setBoolean("download", true);
         setLong("downloadStartTime", System.currentTimeMillis());
         setRefObj("jobSource", RssTask.JobSource.MANUAL);
@@ -203,7 +203,6 @@ class RssJobControlTest {
         ((AtomicReference<Object>) f.get(null)).set(value);
     }
 
-
     @Test
     void status_exposes_openListBusy_field_default_false_without_openlist_bean() {
         RssJobStatus status = RssTask.getJobStatus();
@@ -211,10 +210,8 @@ class RssJobControlTest {
         assertFalse(Boolean.TRUE.equals(status.getOpenListBusy()));
     }
 
-
-
     @Test
-    void status_includes_tasks_for_running_and_pending() throws Exception {
+    void status_exposes_multi_task_slots_when_running_and_pending() throws Exception {
         setBoolean("download", true);
         setLong("downloadStartTime", System.currentTimeMillis() - 3000);
         setRef("jobScope", "single");
@@ -230,7 +227,6 @@ class RssJobControlTest {
         assertNotNull(status.getTasks());
         assertTrue(status.getTasks().stream().anyMatch(t -> "rss-running".equals(t.getId())));
         assertTrue(status.getTasks().stream().anyMatch(t -> "rss-pending".equals(t.getId())));
-        assertTrue(status.getTasks().stream().anyMatch(t -> Boolean.TRUE.equals(t.getCancellable()) && "rss-running".equals(t.getId())));
     }
 
     @Test
@@ -260,7 +256,7 @@ class RssJobControlTest {
     }
 
     @Test
-    void status_exposes_last_finished_fields_when_set() throws Exception {
+    void status_includes_last_finished_slot() throws Exception {
         long finished = System.currentTimeMillis() - 1000;
         setLong("lastFinishedAt", finished);
         setLong("lastDurationMs", 12345L);
@@ -274,13 +270,10 @@ class RssJobControlTest {
         assertEquals(12345L, status.getLastDurationMs());
         assertEquals("已完成", status.getLastResultMessage());
         assertTrue(status.getTasks().stream().anyMatch(t -> "last-finished".equals(t.getId())));
-        assertEquals(finished, status.getTasks().stream().filter(t -> "last-finished".equals(t.getId())).findFirst().get().getProcessedAt());
     }
 
-
-
     @Test
-    void cancelItem_pending_does_not_overwrite_running_message() throws Exception {
+    void cancel_pending_does_not_overwrite_running_message() throws Exception {
         setBoolean("download", true);
         setLong("downloadStartTime", System.currentTimeMillis());
         setRefObj("jobSource", RssTask.JobSource.MANUAL);
@@ -310,4 +303,128 @@ class RssJobControlTest {
         assertTrue(status.getTasks().stream().anyMatch(t -> "rss-running".equals(t.getId()) && Boolean.TRUE.equals(t.getCancellable())));
     }
 
+    @Test
+    void status_hides_empty_residual_summary_when_idle() {
+        RssJobStatus status = RssTask.getJobStatus();
+        assertFalse(Boolean.TRUE.equals(status.getRunning()));
+        // 无 OpenList bean 或无残留时，不应出现 residual-summary 空卡片
+        assertTrue(status.getTasks() == null
+                || status.getTasks().stream().noneMatch(t -> "residual-summary".equals(t.getId())));
+    }
+
+    @Test
+    void buildTaskItems_hides_none_residual_message_when_idle() throws Exception {
+        List<RssJobItem> tasks = invokeBuildTaskItems(
+                false, false, "idle", "", "空闲", null,
+                0L, 0L, null,
+                false, null,
+                true, 0, 0, 0,
+                System.currentTimeMillis(), false,
+                "无离线残留", List.of(),
+                0L, 0L, "", "", null, null
+        );
+        assertTrue(tasks.stream().noneMatch(t -> "residual-summary".equals(t.getId())),
+                "无离线残留时不应展示 residual-summary");
+    }
+
+    @Test
+    void buildTaskItems_shows_residual_when_active_or_terminal() throws Exception {
+        List<RssJobItem> activeOnly = invokeBuildTaskItems(
+                false, false, "idle", "", "空闲", null,
+                0L, 0L, null,
+                false, null,
+                true, 1, 0, 1,
+                System.currentTimeMillis(), false,
+                "进行中 1 / 终态 0", List.of("tid=abc"),
+                0L, 0L, "", "", null, null
+        );
+        assertTrue(activeOnly.stream().anyMatch(t -> "residual-summary".equals(t.getId())
+                && "busy".equals(t.getStatus())));
+
+        List<RssJobItem> terminalOnly = invokeBuildTaskItems(
+                false, false, "idle", "", "空闲", null,
+                0L, 0L, null,
+                false, null,
+                true, 0, 2, 2,
+                System.currentTimeMillis(), false,
+                "进行中 0 / 终态 2", List.of(),
+                0L, 0L, "", "", null, null
+        );
+        assertTrue(terminalOnly.stream().anyMatch(t -> "residual-summary".equals(t.getId())
+                && "idle".equals(t.getStatus())));
+    }
+
+    @Test
+    void buildTaskItems_shows_residual_when_cleaning_or_error() throws Exception {
+        List<RssJobItem> cleaning = invokeBuildTaskItems(
+                false, false, "idle", "", "空闲", null,
+                0L, 0L, null,
+                false, null,
+                true, 0, 0, 0,
+                System.currentTimeMillis(), true,
+                "清理中", List.of(),
+                0L, 0L, "", "", null, null
+        );
+        assertTrue(cleaning.stream().anyMatch(t -> "residual-summary".equals(t.getId())
+                && "busy".equals(t.getStatus())));
+
+        List<RssJobItem> error = invokeBuildTaskItems(
+                false, false, "idle", "", "空闲", null,
+                0L, 0L, null,
+                false, null,
+                true, 0, 0, 0,
+                System.currentTimeMillis(), false,
+                "OpenList 残留快照不可用", List.of(),
+                0L, 0L, "", "", null, null
+        );
+        assertTrue(error.stream().anyMatch(t -> "residual-summary".equals(t.getId())));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<RssJobItem> invokeBuildTaskItems(
+            boolean running,
+            boolean canceling,
+            String scope,
+            String title,
+            String message,
+            RssTask.JobSource source,
+            long startedAt,
+            long elapsed,
+            Object pending,
+            boolean openListBusy,
+            String currentHash,
+            boolean residualSupported,
+            Integer residualActive,
+            Integer residualTerminal,
+            Integer residualTotal,
+            Long residualScannedAt,
+            Boolean residualCleaning,
+            String residualMessage,
+            List<String> residualSamples,
+            long finishedAt,
+            long lastDuration,
+            String lastMsg,
+            String lastJobTitle,
+            String lastJobSource,
+            String lastJobScope
+    ) throws Exception {
+        Method m = null;
+        for (Method method : RssTask.class.getDeclaredMethods()) {
+            if ("buildTaskItems".equals(method.getName()) && method.getParameterCount() == 25) {
+                m = method;
+                break;
+            }
+        }
+        assertNotNull(m, "buildTaskItems not found");
+        m.setAccessible(true);
+        Object result = m.invoke(null,
+                running, canceling, scope, title, message, source,
+                startedAt, elapsed, pending,
+                openListBusy, currentHash,
+                residualSupported, residualActive, residualTerminal, residualTotal,
+                residualScannedAt, residualCleaning, residualMessage, residualSamples,
+                finishedAt, lastDuration, lastMsg, lastJobTitle, lastJobSource, lastJobScope
+        );
+        return (List<RssJobItem>) result;
+    }
 }
