@@ -27,7 +27,10 @@ import java.util.concurrent.atomic.AtomicLong;
 public class RssTask implements BaseTask {
     public static final AtomicBoolean download = new AtomicBoolean(false);
     private static final AtomicLong downloadStartTime = new AtomicLong(0);
-    private static final long MAX_DOWNLOAD_DURATION_MS = TimeUnit.MINUTES.toMillis(30);
+    /** 兜底上限：若配置读取失败时使用 */
+    private static final long FALLBACK_MAX_DOWNLOAD_DURATION_MS = TimeUnit.MINUTES.toMillis(90);
+    /** 在离线超时之上留一点收尾缓冲（分钟） */
+    private static final long DOWNLOAD_LOCK_BUFFER_MINUTES = 10L;
     /**
      * 订阅间并行度：同一订阅由 DownloadService 按 id 串行，这里限制整体并发
      */
@@ -151,12 +154,31 @@ public class RssTask implements BaseTask {
         }
     }
 
+    /**
+     * 全局下载锁允许的最长持有时间。
+     * 对齐 OpenList【离线超时】，避免默认 60 分钟离线等待被 30 分钟锁误判为残留并卡住。
+     */
+    static long resolveMaxDownloadDurationMs(Config config) {
+        long minutes = 60L;
+        try {
+            if (config != null && config.getAlistDownloadTimeout() != null) {
+                minutes = Math.max(1L, config.getAlistDownloadTimeout().longValue());
+            }
+        } catch (Exception ignored) {
+            minutes = 60L;
+        }
+        long ms = TimeUnit.MINUTES.toMillis(minutes + DOWNLOAD_LOCK_BUFFER_MINUTES);
+        return Math.max(ms, FALLBACK_MAX_DOWNLOAD_DURATION_MS);
+    }
+
     public static void sync() {
+        long maxDurationMs = resolveMaxDownloadDurationMs(ConfigUtil.CONFIG);
         // 如果标记为正在下载，检查是否已超时（可能是上次崩溃残留）
         if (download.get()) {
             long elapsed = System.currentTimeMillis() - downloadStartTime.get();
-            if (elapsed > MAX_DOWNLOAD_DURATION_MS) {
-                log.warn("检测到残留任务标记（已运行 {} 分钟），自动重置", elapsed / 60000);
+            if (elapsed > maxDurationMs) {
+                log.warn("检测到残留任务标记（已运行 {} 分钟，上限 {} 分钟），自动重置",
+                        elapsed / 60000, maxDurationMs / 60000);
                 download.set(false);
                 downloadStartTime.set(0);
             } else {

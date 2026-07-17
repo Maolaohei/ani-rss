@@ -117,4 +117,27 @@ class OpenListResidualPolicyTest {
         assertFalse(OpenList.isEpisodeFileName(null, re));
         assertFalse(OpenList.isEpisodeFileName("x.mkv", null));
     }
+
+    @Test
+    void nextPollInterval_stages_20s_1m_5m_10m() {
+        assertEquals(20_000L, OpenList.nextPollIntervalMs(0));
+        assertEquals(60_000L, OpenList.nextPollIntervalMs(1));
+        assertEquals(300_000L, OpenList.nextPollIntervalMs(2));
+        assertEquals(600_000L, OpenList.nextPollIntervalMs(3));
+        assertEquals(600_000L, OpenList.nextPollIntervalMs(10));
+        assertEquals(20_000L, OpenList.nextPollIntervalMs(-1));
+    }
+
+    @Test
+    void isOpenListBusinessOk_requires_body_code_200() {
+        assertTrue(OpenList.isOpenListBusinessOk(true, "{\"code\":200,\"message\":\"success\",\"data\":null}"));
+        assertTrue(OpenList.isOpenListBusinessOk(true, ""));
+        assertTrue(OpenList.isOpenListBusinessOk(true, null));
+        // form cancel 假成功：HTTP 200 但 body code=404
+        assertFalse(OpenList.isOpenListBusinessOk(true, "{\"code\":404,\"message\":\"task not found\",\"data\":null}"));
+        // form delete_some 空 data 但 code=200：业务成功（是否真正删除靠 re-list 确认）
+        assertTrue(OpenList.isOpenListBusinessOk(true, "{\"code\":200,\"message\":\"success\",\"data\":{}}"));
+        assertFalse(OpenList.isOpenListBusinessOk(false, "{\"code\":200}"));
+        assertFalse(OpenList.isOpenListBusinessOk(true, "not-json"));
+    }
 }

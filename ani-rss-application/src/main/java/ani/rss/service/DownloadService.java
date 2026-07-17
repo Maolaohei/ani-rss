@@ -491,8 +491,12 @@ public class DownloadService {
         Integer downloadRetry = config.getDownloadRetry();
         // OpenList/Alist 内部会长时间等待离线完成，不能持有全局下载器锁，否则会把 3 路并行订阅串成 1 路
         String toolType = StrUtil.blankToDefault(config.getDownloadToolType(), "");
-        boolean holdToolLock = !StrUtil.equalsAnyIgnoreCase(toolType, "OpenList", "Alist");
-        for (int i = 1; i <= downloadRetry; i++) {
+        boolean openListTool = StrUtil.equalsAnyIgnoreCase(toolType, "OpenList", "Alist");
+        boolean holdToolLock = !openListTool;
+        // OpenList 已在内部按【离线超时】硬等待，外层再乘 downloadRetry 会把总等待放大成 N 倍
+        int maxAttempts = openListTool ? 1 : ObjectUtil.defaultIfNull(downloadRetry, 1);
+        maxAttempts = Math.max(maxAttempts, 1);
+        for (int i = 1; i <= maxAttempts; i++) {
             try {
                 boolean ok;
                 if (holdToolLock) {
@@ -508,13 +512,32 @@ public class DownloadService {
                     TorrentUtil.refreshTorrentsCache();
                     return;
                 }
+                // OpenList/Alist 返回 false：多为 10008 等待、任务 Failed/取消、离线工具侧失败
+                // 不等于坏种；占用已在 OpenList 内部按 hash 清理/释放
+                if (openListTool) {
+                    log.error("{} 离线下载未完成（OpenList 返回失败，非坏种）", name);
+                    NotificationUtil.send(ConfigUtil.CONFIG, ani,
+                            StrFormatter.format("{} 离线下载未完成（非坏种）", name),
+                            NotificationStatusEnum.ERROR);
+                    return;
+                }
+            } catch (ani.rss.download.OfflineTimeoutException e) {
+                // 超时 != 坏种：不删种子、不报疑似坏种；占用已在 OpenList 内清理
+                String message = ExceptionUtils.getMessage(e);
+                log.error("{} 离线超时失败: {}", name, message);
+                NotificationUtil.send(ConfigUtil.CONFIG, ani,
+                        StrFormatter.format("{} 离线超时失败（已清理任务，非坏种）", name),
+                        NotificationStatusEnum.ERROR);
+                return;
             } catch (Exception e) {
                 String message = ExceptionUtils.getMessage(e);
                 log.error(message, e);
             }
-            log.error("{} 下载失败将进行重试, 当前重试次数为{}次", name, i);
-            // 失败退避：1s、2s、3s...
-            ThreadUtil.sleep(Math.min(1000L * i, 3000L));
+            if (i < maxAttempts) {
+                log.error("{} 下载失败将进行重试, 当前重试次数为{}次", name, i);
+                // 失败退避：1s、2s、3s...
+                ThreadUtil.sleep(Math.min(1000L * i, 3000L));
+            }
         }
 
         // 删除下载失败的种子, 下次轮询仍会重试

@@ -51,6 +51,15 @@ public class OpenList implements BaseDownload {
     // 按 infoHash 串行，不同 hash 可并行
     private static final ConcurrentHashMap<String, Object> DOWNLOAD_LOCKS = new ConcurrentHashMap<>();
 
+    /**
+     * 提交成功后的分级轮询间隔：20s -> 1min -> 5min -> 10min
+     * 避免 2s 打爆 OpenList API。
+     */
+    private static final long POLL_INTERVAL_20S_MS = TimeUnit.SECONDS.toMillis(20);
+    private static final long POLL_INTERVAL_1M_MS = TimeUnit.MINUTES.toMillis(1);
+    private static final long POLL_INTERVAL_5M_MS = TimeUnit.MINUTES.toMillis(5);
+    private static final long POLL_INTERVAL_10M_MS = TimeUnit.MINUTES.toMillis(10);
+
     // API 最小间隔限流（替代每次固定 sleep 2s）
     private static final long API_MIN_INTERVAL_MS = 300L;
     private static final Object API_RATE_LOCK = new Object();
@@ -178,13 +187,20 @@ public class OpenList implements BaseDownload {
                 // 等待持有方结束，返回 true 避免 DownloadService 删种子
                 log.info("infoHash 正在处理中，等待其完成 {}", reName);
                 Integer waitMinutes = ObjectUtil.defaultIfNull(config.getAlistDownloadTimeout(), 30);
+                waitMinutes = Math.max(waitMinutes, 1);
                 long deadline = System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(waitMinutes);
+                int waitPoll = 0;
                 while (inFlightTasks.contains(infoHash)
                         && System.currentTimeMillis() < deadline) {
-                    ThreadUtil.sleep(2000);
+                    long remain = deadline - System.currentTimeMillis();
+                    if (remain <= 0) {
+                        break;
+                    }
+                    ThreadUtil.sleep(Math.min(nextPollIntervalMs(waitPoll++), remain));
                 }
                 if (inFlightTasks.contains(infoHash)) {
-                    log.warn("等待同 hash 任务超时，交由后续轮询处理 {}", reName);
+                    log.error("等待同 hash 任务超过离线超时 {} 分钟，放弃 {}", waitMinutes, reName);
+                    throw new OfflineTimeoutException(reName + " 等待同 hash 任务超过离线超时 " + waitMinutes + " 分钟");
                 } else {
                     log.info("同 hash 任务已结束 {}", reName);
                 }
@@ -250,21 +266,21 @@ public class OpenList implements BaseDownload {
             Long alistDownloadRetryNumber = config.getAlistDownloadRetryNumber();
             DateTime startTime = DateTime.now();
             long retry = 0;
-            long filePollMiss = 0;
-            // 10008 冷却期内外层 DownloadService 仍可能重入：缩短等待，避免 10 * 全超时
+            // 唯一截止：用户配置的【离线超时】
             int waitMinutes = ObjectUtil.defaultIfNull(alistDownloadTimeout, 30);
-            if (skipNewSubmit) {
-                waitMinutes = Math.min(waitMinutes, 2);
-                log.info("10008 冷却等待窗口缩短为 {} 分钟 {}", waitMinutes, reName);
-            }
+            waitMinutes = Math.max(waitMinutes, 1);
             long deadlineMs = DateUtil.offsetMinute(startTime, waitMinutes).getTime();
+            int pollIndex = 0;
+            if (skipNewSubmit) {
+                log.info("10008 冷却期内不重复提交，按离线超时 {} 分钟等待文件/任务 {}", waitMinutes, reName);
+            }
 
             while (DateTime.now().getTime() < deadlineMs) {
                 if (tid != null) {
                     Optional<OpenListTaskInfo> taskInfoOpt = taskInfo(tid);
                     if (taskInfoOpt.isEmpty()) {
                         // 避免 taskInfo 空响应时 tight loop
-                        ThreadUtil.sleep(1000);
+                        sleepUntilNextPoll(deadlineMs, pollIndex++);
                         continue;
                     }
 
@@ -286,7 +302,7 @@ public class OpenList implements BaseDownload {
                             || state == OpenListTaskInfo.State.Running
                             || state == OpenListTaskInfo.State.Waiting_for_Retry
                             || state == OpenListTaskInfo.State.Preparing_to_Retry) {
-                        ThreadUtil.sleep(2000);
+                        sleepUntilNextPoll(deadlineMs, pollIndex++);
                         continue;
                     }
 
@@ -311,7 +327,7 @@ public class OpenList implements BaseDownload {
                         } else {
                             tid = null; // 进入无 tid 文件轮询
                         }
-                        ThreadUtil.sleep(2000);
+                        sleepUntilNextPoll(deadlineMs, pollIndex++);
                         continue;
                     }
                     // Error/Failed：仅当本集临时目录或最终目录命中本集文件时才当完成
@@ -320,11 +336,11 @@ public class OpenList implements BaseDownload {
                         clearDuplicateMagnet(infoHash);
                         break;
                     }
-                    // 终态任务（Failed/Error/Canceled）：真失败才放弃（非 10008）
+                    // 终态任务（Failed/Error/Canceled）：无文件才算失败。Failed 不等于坏种。
                     if (state == OpenListTaskInfo.State.Failed
                             || state == OpenListTaskInfo.State.Error
                             || state == OpenListTaskInfo.State.Canceled) {
-                        log.error("离线任务已终结 state={} error={}，放弃重试", state, taskInfo.getError());
+                        log.error("离线任务已终结 state={} error={}，放弃重试（非坏种判定）", state, taskInfo.getError());
                         return false;
                     }
                     // 非终态异常（Failing 等）：按次数重试
@@ -335,7 +351,7 @@ public class OpenList implements BaseDownload {
                     retry++;
                     log.info("离线任务重试 {}/{} state={}", retry, alistDownloadRetryNumber, state);
                     taskRetry(tid);
-                    ThreadUtil.sleep(2000);
+                    sleepUntilNextPoll(deadlineMs, pollIndex++);
                     continue;
                 }
 
@@ -345,19 +361,27 @@ public class OpenList implements BaseDownload {
                     clearDuplicateMagnet(infoHash);
                     break;
                 }
-                filePollMiss++;
-                // 3s 起跳，最多 8s，减少无意义 findFiles
-                ThreadUtil.sleep(Math.min(3000L + filePollMiss * 500L, 8000L));
+                // 与有 tid 一致：20s -> 1min -> 5min -> 10min
+                sleepUntilNextPoll(deadlineMs, pollIndex++);
             }
 
             if (DateTime.now().getTime() >= deadlineMs) {
-                // 有 tid 超时直接失败；无 tid 交由后续 videoList 判定
-                if (tid != null) {
-                    log.error("{} {} 分钟还未下载完成, 停止检测下载", reName, waitMinutes);
-                    return false;
+                // 最终兜底：超时瞬间文件可能刚落盘
+                if (hasEpisodeVideo(path, reName) || hasEpisodeVideo(savePath, reName)) {
+                    log.info("离线超时前本集文件已就绪，继续后处理 {}", reName);
+                    clearDuplicateMagnet(infoHash);
+                } else {
+                    log.error("{} 超过离线超时 {} 分钟，强制失败并清理 OpenList/本地占用", reName, waitMinutes);
+                    try {
+                        purgeHashTasks(infoHash);
+                    } catch (Exception purgeEx) {
+                        log.warn("超时清理 OpenList 任务失败 {}: {}", infoHash, purgeEx.getMessage());
+                    }
+                    clearDuplicateMagnet(infoHash);
+                    throw new OfflineTimeoutException(StrFormatter.format(
+                            "{} 超过离线超时 {} 分钟", reName, waitMinutes));
                 }
             }
-
             // ① finally 前先扫描文件：临时目录优先；否则最终目录中本集相关文件
             List<OpenListFileInfo> openListFileInfos = findFiles(path);
             List<OpenListFileInfo> videoList = openListFileInfos.stream()
@@ -554,6 +578,9 @@ public class OpenList implements BaseDownload {
                     StrFormatter.format("{} 下载完成", item.getReName()),
                     NotificationStatusEnum.DOWNLOAD_END);
             return true;
+        } catch (OfflineTimeoutException e) {
+            // 超时必须向上抛给 DownloadService，避免被当成普通 false/坏种
+            throw e;
         } catch (Exception e) {
             log.error(e.getMessage(), e);
             return false;
@@ -562,7 +589,7 @@ public class OpenList implements BaseDownload {
             if (claimedInFlight) {
                 inFlightTasks.remove(infoHash);
             }
-            // 配置要求删除时清理离线任务记录
+            // 配置要求删除时清理离线任务记录（超时 purge 已处理同 hash）
             if (tid != null && delete) {
                 try {
                     taskDelete(tid);
@@ -903,10 +930,25 @@ public class OpenList implements BaseDownload {
                 }
                 case DELETE_DUPLICATE_RUNNING -> {
                     log.warn("同 hash 存在多个进行中任务，删除多余: {} {}", id, name);
+                    try {
+                        taskCancel(id);
+                    } catch (Exception ignore) {
+                    }
                     taskDelete(id);
                 }
                 case DELETE -> {
                     log.info("删除可清理残留任务: {} {} state={}", id, name, task.getState());
+                    if (task.getState() == OpenListTaskInfo.State.Pending
+                            || task.getState() == OpenListTaskInfo.State.Running
+                            || task.getState() == OpenListTaskInfo.State.Waiting_for_Retry
+                            || task.getState() == OpenListTaskInfo.State.Preparing_to_Retry
+                            || task.getState() == OpenListTaskInfo.State.Canceling
+                            || task.getState() == OpenListTaskInfo.State.Failing) {
+                        try {
+                            taskCancel(id);
+                        } catch (Exception ignore) {
+                        }
+                    }
                     taskDelete(id);
                 }
             }
@@ -997,9 +1039,31 @@ public class OpenList implements BaseDownload {
      * @param tid 任务id
      */
     public void taskRetry(String tid) {
+        if (StrUtil.isBlank(tid)) {
+            return;
+        }
         postApi("task/offline_download/retry")
                 .form("tid", tid)
                 .thenFunction(HttpResponse::isOk);
+    }
+
+    /**
+     * 取消任务（运行中任务应先 cancel 再 delete）
+     *
+     * @param tid 任务id
+     */
+    public void taskCancel(String tid) {
+        if (StrUtil.isBlank(tid)) {
+            return;
+        }
+        // 现网 OpenList/AList：query tid 有效；form 常返回 HTTP 200 + body code=404 且任务仍在
+        if (tryTaskAction("task/offline_download/cancel?tid=" + tid, null, "cancel/query", tid)) {
+            return;
+        }
+        if (tryTaskAction("task/offline_download/cancel", tid, "cancel/form", tid)) {
+            return;
+        }
+        log.debug("cancel 任务失败 {}", tid);
     }
 
     /**
@@ -1008,9 +1072,207 @@ public class OpenList implements BaseDownload {
      * @param tid 任务id
      */
     public void taskDelete(String tid) {
-        postApi("task/offline_download/delete_some")
-                .body(GsonStatic.toJson(List.of(tid)))
-                .thenFunction(HttpResponse::isOk);
+        if (StrUtil.isBlank(tid)) {
+            return;
+        }
+        // 现网有效路径：POST delete?tid=
+        // form delete_some 常返回 code=200 data={} 但 running 任务仍残留，不能优先也不能只信 HTTP 200
+        if (tryTaskAction("task/offline_download/delete?tid=" + tid, null, "delete/query", tid)) {
+            return;
+        }
+        if (tryTaskAction("task/offline_download/delete", tid, "delete/form", tid)) {
+            return;
+        }
+        if (tryTaskAction("task/offline_download/delete_some", tid, "delete_some/form", tid)) {
+            return;
+        }
+        // 兼容旧版：JSON 数组 body（部分服务器会 400 invalid request format）
+        try {
+            HttpResponse res = postApi("task/offline_download/delete_some")
+                    .body(GsonStatic.toJson(List.of(tid)))
+                    .execute();
+            if (isOpenListCodeOk(res)) {
+                return;
+            }
+            log.debug("delete_some/json 失败 {}: {}", tid, res.body());
+        } catch (Exception e) {
+            log.debug("delete_some/json 异常 {}: {}", tid, e.getMessage());
+        }
+        log.warn("删除离线任务失败 {}", tid);
+    }
+
+    /**
+     * 执行 cancel/delete 类动作，并校验 body.code==200（不能只看 HTTP 200）。
+     *
+     * @param action  API path（可含 query）
+     * @param formTid 非空时用 form tid；空则只发 path
+     */
+    private boolean tryTaskAction(String action, String formTid, String label, String tid) {
+        try {
+            HttpRequest req = postApi(action);
+            if (StrUtil.isNotBlank(formTid)) {
+                req.form("tid", formTid);
+            }
+            HttpResponse res = req.execute();
+            if (isOpenListCodeOk(res)) {
+                return true;
+            }
+            log.debug("{} 未生效 tid={} body={}", label, tid, res.body());
+        } catch (Exception e) {
+            log.debug("{} 异常 tid={}: {}", label, tid, e.getMessage());
+        }
+        return false;
+    }
+
+    /**
+     * HTTP 层 ok 且 JSON code==200 才算 OpenList 业务成功。
+     * form cancel/delete 常返回 HTTP 200 + code 404/空成功，必须拆开判断。
+     */
+    static boolean isOpenListCodeOk(HttpResponse res) {
+        if (res == null) {
+            return false;
+        }
+        return isOpenListBusinessOk(res.isOk(), res.body());
+    }
+
+    /**
+     * 纯函数：便于单测。HTTP 非 2xx 直接失败；body 有 code 时必须 200。
+     */
+    static boolean isOpenListBusinessOk(boolean httpOk, String body) {
+        if (!httpOk) {
+            return false;
+        }
+        try {
+            if (StrUtil.isBlank(body)) {
+                // 少数实现只回 HTTP 200
+                return true;
+            }
+            JsonObject jsonObject = GsonStatic.fromJson(body, JsonObject.class);
+            if (jsonObject == null || !jsonObject.has("code")) {
+                return true;
+            }
+            return jsonObject.get("code").getAsInt() == 200;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * 超时/强制失败时：按 hash 清理 OpenList 上所有匹配离线任务。
+     * 运行中：cancel -> delete；终态：delete。
+     * 与 config.delete 无关，避免坏任务卡住后续流程。
+     */
+    public void purgeHashTasks(String infoHash) {
+        if (StrUtil.isBlank(infoHash)) {
+            return;
+        }
+        String key = infoHash.toLowerCase(Locale.ROOT);
+        // 清理后 re-list 确认；form 假成功时靠二次确认兜住
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            List<OpenListTaskInfo> tasks = listTasksMatchingHash(key);
+            if (tasks.isEmpty()) {
+                if (attempt > 1) {
+                    log.info("超时清理完成 hash={}（第 {} 次确认已清空）", key, attempt);
+                }
+                return;
+            }
+            Set<String> seen = new HashSet<>();
+            for (OpenListTaskInfo task : tasks) {
+                if (task == null || StrUtil.isBlank(task.getId()) || !seen.add(task.getId())) {
+                    continue;
+                }
+                OpenListTaskInfo.State state = task.getState();
+                log.info("超时清理离线任务 attempt={} tid={} state={} name={}",
+                        attempt, task.getId(), state, task.getName());
+                if (state == null
+                        || state == OpenListTaskInfo.State.Pending
+                        || state == OpenListTaskInfo.State.Running
+                        || state == OpenListTaskInfo.State.Waiting_for_Retry
+                        || state == OpenListTaskInfo.State.Preparing_to_Retry
+                        || state == OpenListTaskInfo.State.Canceling
+                        || state == OpenListTaskInfo.State.Failing) {
+                    try {
+                        taskCancel(task.getId());
+                    } catch (Exception e) {
+                        log.debug("cancel {} 失败: {}", task.getId(), e.getMessage());
+                    }
+                }
+                try {
+                    taskDelete(task.getId());
+                } catch (Exception e) {
+                    log.debug("delete {} 失败: {}", task.getId(), e.getMessage());
+                }
+            }
+            // 给 OpenList/115 一点收敛时间再确认
+            ThreadUtil.sleep(attempt == 1 ? 500L : 1000L);
+        }
+        List<OpenListTaskInfo> remain = listTasksMatchingHash(key);
+        if (!remain.isEmpty()) {
+            log.warn("超时清理后仍有残留 hash={} count={} tids={}",
+                    key,
+                    remain.size(),
+                    remain.stream().map(OpenListTaskInfo::getId).filter(Objects::nonNull).toList());
+        }
+    }
+
+    /**
+     * 汇总 undone+done 中 name 含 infoHash 的任务。
+     */
+    private List<OpenListTaskInfo> listTasksMatchingHash(String infoHash) {
+        if (StrUtil.isBlank(infoHash)) {
+            return List.of();
+        }
+        String key = infoHash.toLowerCase(Locale.ROOT);
+        List<OpenListTaskInfo> all = new ArrayList<>();
+        try {
+            all.addAll(taskUnDoneList());
+        } catch (Exception e) {
+            log.debug("读取 undone 失败: {}", e.getMessage());
+        }
+        try {
+            all.addAll(taskDoneList());
+        } catch (Exception e) {
+            log.debug("读取 done 失败: {}", e.getMessage());
+        }
+        List<OpenListTaskInfo> matched = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (OpenListTaskInfo task : all) {
+            if (task == null || StrUtil.isBlank(task.getId()) || !seen.add(task.getId())) {
+                continue;
+            }
+            String name = task.getName();
+            if (name != null && name.toLowerCase(Locale.ROOT).contains(key)) {
+                matched.add(task);
+            }
+        }
+        return matched;
+    }
+
+    /**
+     * 分级轮询间隔：20s -> 1min -> 5min -> 10min
+     */
+    static long nextPollIntervalMs(int pollIndex) {
+        if (pollIndex <= 0) {
+            return POLL_INTERVAL_20S_MS;
+        }
+        if (pollIndex == 1) {
+            return POLL_INTERVAL_1M_MS;
+        }
+        if (pollIndex == 2) {
+            return POLL_INTERVAL_5M_MS;
+        }
+        return POLL_INTERVAL_10M_MS;
+    }
+
+    /**
+     * 睡眠到下次轮询，但不超过 deadline。
+     */
+    private static void sleepUntilNextPoll(long deadlineMs, int pollIndex) {
+        long remain = deadlineMs - System.currentTimeMillis();
+        if (remain <= 0) {
+            return;
+        }
+        ThreadUtil.sleep(Math.min(nextPollIntervalMs(pollIndex), remain));
     }
 
     /**
