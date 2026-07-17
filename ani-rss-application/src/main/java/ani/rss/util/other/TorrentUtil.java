@@ -240,7 +240,7 @@ public class TorrentUtil {
         String name = torrentsInfo.getName();
 
         if (forcedDelete) {
-            log.info("删除任务 {}", name);
+            log.info("删除任务 title:{} forcedDelete:{} deleteFiles:{}", name, forcedDelete, deleteFiles);
         } else {
             if (!isDelete(torrentsInfo)) {
                 return false;
@@ -248,7 +248,7 @@ public class TorrentUtil {
             if (!delete) {
                 return false;
             }
-            log.info("删除已完成任务 {}", name);
+            log.info("删除已完成任务 title:{} deleteFiles:{}", name, deleteFiles);
         }
         // 不再固定 sleep；失败后短退避重试一次
         Boolean b = DOWNLOAD.delete(torrentsInfo, deleteFiles);
