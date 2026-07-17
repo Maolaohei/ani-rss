@@ -290,13 +290,7 @@ public class OpenList implements BaseDownload {
                         continue;
                     }
 
-                    // Error/Failed 等：先兜底看文件（临时目录 + 最终目录）
-                    if (hasVideoFile(path) || hasVideoFile(savePath)) {
-                        log.info("资源已下载完毕，OpenList 可能处于卡死状态，此处跳过");
-                        clearDuplicateMagnet(infoHash);
-                        break;
-                    }
-                    // 任务 error 内嵌 10008/任务已存在：不是坏种，禁止 taskRetry / 禁止立刻 return false
+                    // 10008 优先于文件兜底：否则会误把同季其它集视频当成成功，又因临时目录无文件 return false
                     if (isDuplicateOfflineError(taskInfo.getError())) {
                         log.warn("离线任务报告任务已存在(10008) tid={} state={}，转为等待已有任务/文件 {}",
                                 tid, state, reName);
@@ -320,6 +314,12 @@ public class OpenList implements BaseDownload {
                         ThreadUtil.sleep(2000);
                         continue;
                     }
+                    // Error/Failed：仅当本集临时目录或最终目录命中本集文件时才当完成
+                    if (hasEpisodeVideo(path, reName) || hasEpisodeVideo(savePath, reName)) {
+                        log.info("本集资源已就绪，OpenList 任务状态异常但文件可用，继续后处理 {}", reName);
+                        clearDuplicateMagnet(infoHash);
+                        break;
+                    }
                     // 终态任务（Failed/Error/Canceled）：真失败才放弃（非 10008）
                     if (state == OpenListTaskInfo.State.Failed
                             || state == OpenListTaskInfo.State.Error
@@ -339,9 +339,9 @@ public class OpenList implements BaseDownload {
                     continue;
                 }
 
-                // 无 tid（10008）：低频轮询文件是否出现
-                if (hasVideoFile(path) || hasVideoFile(savePath)) {
-                    log.info("10008 任务文件已就绪 {}", reName);
+                // 无 tid（10008）：低频轮询本集文件是否出现（勿扫整季其它集）
+                if (hasEpisodeVideo(path, reName) || hasEpisodeVideo(savePath, reName)) {
+                    log.info("10008 本集任务文件已就绪 {}", reName);
                     clearDuplicateMagnet(infoHash);
                     break;
                 }
@@ -358,7 +358,7 @@ public class OpenList implements BaseDownload {
                 }
             }
 
-            // ① finally 前先扫描文件
+            // ① finally 前先扫描文件：临时目录优先；否则最终目录中本集相关文件
             List<OpenListFileInfo> openListFileInfos = findFiles(path);
             List<OpenListFileInfo> videoList = openListFileInfos.stream()
                     .filter(f -> FileUtils.isVideoFormat(f.getName()))
@@ -367,6 +367,28 @@ public class OpenList implements BaseDownload {
             List<OpenListFileInfo> subtitleList = openListFileInfos.stream()
                     .filter(f -> FileUtils.isSubtitleFormat(f.getName()))
                     .toList();
+
+            if (videoList.isEmpty()) {
+                // 可能已在 savePath 落盘（历史完成/被其它路径移动）
+                List<OpenListFileInfo> saveFiles = findEpisodeFiles(savePath, reName);
+                videoList = saveFiles.stream()
+                        .filter(f -> FileUtils.isVideoFormat(f.getName()))
+                        .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
+                        .toList();
+                subtitleList = saveFiles.stream()
+                        .filter(f -> FileUtils.isSubtitleFormat(f.getName()))
+                        .toList();
+                openListFileInfos = saveFiles;
+                if (!videoList.isEmpty()) {
+                    // 已在最终目录：不要再 rename/move 到自己，直接成功
+                    log.info("本集文件已在最终目录，视为下载完成 {}", reName);
+                    clearDuplicateMagnet(infoHash);
+                    NotificationUtil.send(config, ani,
+                            StrFormatter.format("{} 下载完成", item.getReName()),
+                            NotificationStatusEnum.DOWNLOAD_END);
+                    return true;
+                }
+            }
 
             if (videoList.isEmpty()) {
                 return false;
@@ -996,6 +1018,48 @@ public class OpenList implements BaseDownload {
      */
     private boolean hasVideoFile(String path) {
         return findFiles(path).stream().anyMatch(f -> FileUtils.isVideoFormat(f.getName()));
+    }
+
+    /**
+     * 是否存在“本集”视频。禁止用整季 savePath 任意视频冒充当前集完成。
+     */
+    private boolean hasEpisodeVideo(String dir, String reName) {
+        return findEpisodeFiles(dir, reName).stream()
+                .anyMatch(f -> FileUtils.isVideoFormat(f.getName()));
+    }
+
+    /**
+     * 在 dir 下找本集相关文件：
+     * 1) 直接子路径名包含 reName 的目录递归（临时目录 path 通常以 reName 结尾）
+     * 2) 文件名包含 SEASON 片段（S01E03）或完整 reName
+     */
+    static boolean isEpisodeFileName(String fileName, String reName) {
+        if (StrUtil.isBlank(fileName) || StrUtil.isBlank(reName)) {
+            return false;
+        }
+        String name = fileName;
+        String rn = reName;
+        if (name.equalsIgnoreCase(rn) || name.toLowerCase(Locale.ROOT).contains(rn.toLowerCase(Locale.ROOT))) {
+            return true;
+        }
+        String season = ReUtil.get(StringEnum.SEASON_REG, rn, 0);
+        return StrUtil.isNotBlank(season) && name.toUpperCase(Locale.ROOT).contains(season.toUpperCase(Locale.ROOT));
+    }
+
+    private List<OpenListFileInfo> findEpisodeFiles(String dir, String reName) {
+        if (StrUtil.isBlank(dir) || StrUtil.isBlank(reName)) {
+            return List.of();
+        }
+        // 临时目录本身就是 .../reName
+        String normalizedDir = dir.replace('\\', '/');
+        String normalizedRe = reName.replace('\\', '/');
+        if (normalizedDir.toLowerCase(Locale.ROOT).endsWith("/" + normalizedRe.toLowerCase(Locale.ROOT))
+                || normalizedDir.equalsIgnoreCase(normalizedRe)) {
+            return findFiles(dir);
+        }
+        return findFiles(dir).stream()
+                .filter(f -> isEpisodeFileName(f.getName(), reName))
+                .toList();
     }
 
     /**

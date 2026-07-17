@@ -105,4 +105,16 @@ class OpenListResidualPolicyTest {
         assertFalse(OpenList.isDuplicateOfflineError("{\"errcode\":10007,\"error_msg\":\"other\"}"));
         assertFalse(OpenList.isDuplicateOfflineError("failed to upload"));
     }
+
+    @Test
+    void isEpisodeFileName_matches_season_token() {
+        String re = "Show Title S01E03";
+        assertTrue(OpenList.isEpisodeFileName(re + ".mkv", re));
+        assertTrue(OpenList.isEpisodeFileName("foo.S01E03.1080p.mkv", re));
+        assertTrue(OpenList.isEpisodeFileName("foo.s01e03.mkv", re));
+        assertFalse(OpenList.isEpisodeFileName("foo.S01E01.mkv", re));
+        assertFalse(OpenList.isEpisodeFileName("foo.S01E02.mkv", re));
+        assertFalse(OpenList.isEpisodeFileName(null, re));
+        assertFalse(OpenList.isEpisodeFileName("x.mkv", null));
+    }
 }
