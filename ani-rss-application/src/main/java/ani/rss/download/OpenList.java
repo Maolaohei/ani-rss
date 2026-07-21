@@ -175,9 +175,11 @@ public class OpenList implements BaseDownload {
 
     private Boolean downloadLocked(Ani ani, Item item, String savePath, File torrentFile,
                                    String magnet, String infoHash) {
-        String reName = item.getReName();
+        // 最终重命名始终使用订阅模板结果；合集临时目录可单独使用源标题
+        String finalRenameBase = item.getReName();
+        String reName = finalRenameBase;
+        String tempDirName = finalRenameBase;
 
-        // 合集：使用原始标题作为临时目录名，避免用单集名导致目录混乱
         boolean isCollection = item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty();
         if (isCollection) {
             String collectionName = item.getTitle();
@@ -188,13 +190,13 @@ public class OpenList implements BaseDownload {
             }
             collectionName = RenameUtil.getName(collectionName);
             if (StrUtil.isNotBlank(collectionName)) {
-                reName = collectionName;
+                tempDirName = collectionName;
             }
-            log.info("合集下载，使用原始标题作为临时目录: {}", reName);
+            log.info("合集下载，使用原始标题作为临时目录: {}，最终命名仍使用模板: {}", tempDirName, finalRenameBase);
         }
 
         // 下载位置：与 savePath 不同则为临时目录，移动后需清理
-        String path = savePath + "/" + reName;
+        String path = savePath + "/" + tempDirName;
         String tempDownloadDir = path.equals(savePath) ? null : path;
         Boolean standbyRss = config.getStandbyRss();
         Boolean delete = config.getDelete();
@@ -262,7 +264,7 @@ public class OpenList implements BaseDownload {
 
             // 洗版：仅在即将新提交离线时做一次；复用/10008 等待路径禁止洗，避免重试风暴删掉目标
             if (!skipNewSubmit && StrUtil.isBlank(tid) && standbyRss && delete && !coexist) {
-                String s = ReUtil.get(StringEnum.SEASON_REG, reName, 0);
+                String s = ReUtil.get(StringEnum.SEASON_REG, finalRenameBase, 0);
                 if (StrUtil.isNotBlank(s)) {
                     String finalSavePath = savePath;
                     String seasonKey = s;
@@ -378,8 +380,8 @@ public class OpenList implements BaseDownload {
                         continue;
                     }
                     // Error/Failed：仅当本集临时目录或最终目录命中本集文件时才当完成
-                    if (hasEpisodeVideos(path, reName, item.getEpisodeRange())
-                        || hasEpisodeVideos(savePath, reName, item.getEpisodeRange())) {
+                    if (hasEpisodeVideos(path, tempDirName, item.getEpisodeRange())
+                        || hasEpisodeVideos(savePath, finalRenameBase, item.getEpisodeRange())) {
                         log.info("本集资源已就绪，OpenList 任务状态异常但文件可用，继续后处理 {}", reName);
                         clearDuplicateMagnet(infoHash);
                         break;
@@ -404,8 +406,8 @@ public class OpenList implements BaseDownload {
                 }
 
                 // 无 tid（10008）：低频轮询本集文件是否出现（勿扫整季其它集）
-                if (hasEpisodeVideos(path, reName, item.getEpisodeRange())
-                        || hasEpisodeVideos(savePath, reName, item.getEpisodeRange())) {
+                if (hasEpisodeVideos(path, tempDirName, item.getEpisodeRange())
+                        || hasEpisodeVideos(savePath, finalRenameBase, item.getEpisodeRange())) {
                     log.info("10008 本集任务文件已就绪 {}", reName);
                     clearDuplicateMagnet(infoHash);
                     break;
@@ -417,7 +419,7 @@ public class OpenList implements BaseDownload {
             if (DateTime.now().getTime() >= deadlineMs) {
                 // 最终兜底：绕过缓存并确认文件大小稳定，避免状态更新滞后导致误判失败。
                 TimeoutFileInspection inspection = inspectTimeoutFiles(
-                        path, savePath, reName, item.getEpisodeRange());
+                        path, savePath, tempDirName, item.getEpisodeRange());
                 String finalState = tid == null
                         ? "no-tid"
                         : taskInfo(tid).map(info -> String.valueOf(info.getState())).orElse("unknown");
@@ -452,7 +454,7 @@ public class OpenList implements BaseDownload {
 
             if (videoList.isEmpty()) {
                 // 可能已在 savePath 落盘（历史完成/被其它路径移动）
-                List<OpenListFileInfo> saveFiles = findEpisodeFiles(savePath, reName);
+                List<OpenListFileInfo> saveFiles = findEpisodeFiles(savePath, finalRenameBase);
                 videoList = saveFiles.stream()
                         .filter(f -> FileUtils.isVideoFormat(f.getName()))
                         .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
@@ -482,8 +484,8 @@ public class OpenList implements BaseDownload {
             if (videoList.size() == 1) {
                 OpenListFileInfo videoFile = videoList.get(0);
                 String videoReName = isCollection
-                        ? collectionEpisodeReName(videoFile.getName(), reName, ani.getSeason())
-                        : reName;
+                        ? collectionEpisodeReName(videoFile.getName(), finalRenameBase, ani.getSeason())
+                        : finalRenameBase;
                 renameMap.put(videoFile.getName(), videoReName + "." + FileUtil.extName(videoFile.getName()));
                 for (OpenListFileInfo sub : subtitleList) {
                     String name = sub.getName();
@@ -502,15 +504,15 @@ public class OpenList implements BaseDownload {
                     String videoExt = FileUtil.extName(videoName);
                     String videoReName;
                     if (isCollection) {
-                        videoReName = collectionEpisodeReName(videoName, reName, ani.getSeason());
+                        videoReName = collectionEpisodeReName(videoName, finalRenameBase, ani.getSeason());
                     } else {
                         String episode = extractEpisodeFromFileName(videoName);
-                        if (episode != null && reName.contains(".E")) {
-                            videoReName = reName.replaceAll("\\.E\\d+(\\.5)?", ".E" + episode);
-                        } else if (episode != null && reName.matches(".*[Ss]\\d+.*E\\d+.*")) {
-                            videoReName = reName.replaceAll("E\\d+(\\.5)?", "E" + episode);
+                        if (episode != null && finalRenameBase.contains(".E")) {
+                            videoReName = finalRenameBase.replaceAll("\\.E\\d+(\\.5)?", ".E" + episode);
+                        } else if (episode != null && finalRenameBase.matches(".*[Ss]\\d+.*E\\d+.*")) {
+                            videoReName = finalRenameBase.replaceAll("E\\d+(\\.5)?", "E" + episode);
                         } else {
-                            videoReName = reName;
+                            videoReName = finalRenameBase;
                         }
                     }
                     renameMap.put(videoName, videoReName + "." + videoExt);
@@ -539,7 +541,7 @@ public class OpenList implements BaseDownload {
                     String name = sub.getName();
                     String ext = FileUtil.extName(name);
                     // 使用视频文件名作为基础名，而不是统一的 reName
-                    String videoBase = videoList.isEmpty() ? reName : FileUtil.mainName(videoList.get(0).getName());
+                    String videoBase = videoList.isEmpty() ? finalRenameBase : FileUtil.mainName(videoList.get(0).getName());
                     String newName = videoBase;
                     String lang = FileUtil.extName(FileUtil.mainName(name));
                     if (StrUtil.isNotBlank(lang)) {
@@ -614,8 +616,8 @@ public class OpenList implements BaseDownload {
             } else {
                 // 清理临时下载目录（仅在验证通过后）
                 if (tempDownloadDir != null) {
-                    fsRemove(savePath, List.of(reName));
-                    log.info("已删除临时目录 {}/{}", savePath, reName);
+                    fsRemove(savePath, List.of(tempDirName));
+                    log.info("已删除临时目录 {}/{}", savePath, tempDirName);
                 }
             }
 
@@ -662,9 +664,8 @@ public class OpenList implements BaseDownload {
     }
 
     /**
-     * Keeps the episode number from a collection's original file name.
-     * Collection temporary directories use the source title, so reName may
-     * no longer contain an SxxExx template for the final file name.
+     * 合集最终命名：以订阅模板命名结果为基名，仅替换/补全集数。
+     * 临时目录名使用源标题，不应传入本方法。
      */
     String collectionEpisodeReName(String originalName, String reName, Integer season) {
         if (StrUtil.isBlank(originalName) || StrUtil.isBlank(reName)) {
@@ -1715,7 +1716,11 @@ public class OpenList implements BaseDownload {
         List<OpenListFileInfo> videos = expectedEpisodeVideos(findEpisodeFiles(tempPath, reName), expectedEpisodes);
         if (videos.isEmpty() && !Objects.equals(tempPath, savePath)) {
             invalidateFindFilesCache();
+            // 最终目录通常是模板命名；reName 可能是合集临时目录名，回退扫最终目录视频
             videos = expectedEpisodeVideos(findEpisodeFiles(savePath, reName), expectedEpisodes);
+            if (videos.isEmpty()) {
+                videos = expectedEpisodeVideos(findFiles(savePath), expectedEpisodes);
+            }
         }
         LinkedHashMap<String, Long> files = new LinkedHashMap<>();
         for (OpenListFileInfo video : videos) {

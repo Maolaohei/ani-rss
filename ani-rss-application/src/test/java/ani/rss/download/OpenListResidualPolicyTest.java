@@ -184,16 +184,23 @@ class OpenListResidualPolicyTest {
     }
 
 
-    @Test
-    void collection_single_video_keeps_episode_number_without_template() {
+        @Test
+    void collection_uses_subscription_template_instead_of_source_title() {
         OpenList openList = new OpenList();
 
-        String actual = openList.collectionEpisodeReName(
-                "[ANi] GRAND BLUE ???? 3 - 03 [1080P][Baha][WEB-DL][AAC AVC][CHT].mp4",
-                "[ANi] Grand Blue Dreaming",
-                3);
+        // 正确路径：finalRenameBase 是订阅模板结果，而不是 RSS 源标题
+        assertEquals("碧蓝之海 S03E03",
+                openList.collectionEpisodeReName(
+                        "[ANi] GRAND BLUE 碧藍之海 3 - 03 [1080P][Baha][WEB-DL][AAC AVC][CHT].mp4",
+                        "碧蓝之海 S03E01",
+                        3));
 
-        assertEquals("[ANi] Grand Blue Dreaming S03E03", actual);
+        // 错误回归：源标题不应再作为最终命名基名
+        assertNotEquals("[ANi] Grand Blue Dreaming S03E03",
+                openList.collectionEpisodeReName(
+                        "[ANi] GRAND BLUE 碧藍之海 3 - 03 [1080P][Baha][WEB-DL][AAC AVC][CHT].mp4",
+                        "碧蓝之海 S03E01",
+                        3));
     }
 
     @Test
