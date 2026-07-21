@@ -21,6 +21,14 @@
           <span class="job-label">消息</span>
           <span class="job-value">{{ status.message || '-' }}</span>
         </div>
+        <div v-if="status.running && status.subscriptionTotal > 0" class="job-row">
+          <span class="job-label">订阅进度</span>
+          <span class="job-value progress-summary">
+            已处理 {{ status.subscriptionCompleted }}/{{ status.subscriptionTotal }}
+            <span>运行中 {{ status.subscriptionActive }}</span>
+            <span v-if="status.subscriptionFailed > 0" class="progress-failed">失败 {{ status.subscriptionFailed }}</span>
+          </span>
+        </div>
         <div class="job-row">
           <span class="job-label">已处理时间</span>
           <span>{{ lastProcessedText }}</span>
@@ -125,6 +133,9 @@ import * as http from "@/js/http.js";
 
 const dialogVisible = ref(false)
 let pollToken = 0
+let requestSeq = 0
+let appliedSeq = 0
+let actionInFlight = 0
 const loading = ref(false)
 const cancelingAll = ref(false)
 const cancelingId = ref('')
@@ -142,6 +153,10 @@ function emptyStatus() {
     aniId: '',
     startedAt: null,
     elapsedMs: 0,
+    subscriptionTotal: 0,
+    subscriptionActive: 0,
+    subscriptionCompleted: 0,
+    subscriptionFailed: 0,
     lastFinishedAt: null,
     lastDurationMs: null,
     lastResultMessage: null,
@@ -344,6 +359,14 @@ const applyStatus = (data) => {
   }
 }
 
+const nextRequestSeq = () => ++requestSeq
+
+const applyResponseStatus = (seq, data) => {
+  if (!data || seq < appliedSeq) return
+  appliedSeq = seq
+  applyStatus(data)
+}
+
 const show = () => {
   dialogVisible.value = true
   pollStatus()
@@ -359,11 +382,11 @@ const refreshNow = async () => {
 }
 
 const fetchStatus = async () => {
+  if (actionInFlight > 0) return
+  const seq = nextRequestSeq()
   try {
     const res = await http.rssJobStatus()
-    if (res?.data) {
-      applyStatus(res.data)
-    }
+    applyResponseStatus(seq, res?.data)
   } catch (_) {
   }
 }
@@ -388,20 +411,29 @@ const pollStatus = async () => {
 }
 
 const cancelAll = async () => {
+  const seq = nextRequestSeq()
+  actionInFlight++
   cancelingAll.value = true
   try {
     const res = await http.rssJobCancel()
-    ElMessage.success(res.message || '已请求取消')
-    if (res?.data) applyStatus(res.data)
-  } catch (e) {
-    ElMessage.error(e?.message || '取消失败')
+    const msg = res.message || '已请求取消'
+    if (msg.includes('没有') || msg.includes('不可取消') || msg.includes('不存在')) {
+      ElMessage.warning(msg)
+    } else {
+      ElMessage.success(msg)
+    }
+    applyResponseStatus(seq, res?.data)
+  } catch (_) {
   } finally {
+    actionInFlight--
     cancelingAll.value = false
   }
 }
 
 const cancelItem = async (item) => {
   if (!item?.id || !item.cancellable) return
+  const seq = nextRequestSeq()
+  actionInFlight++
   cancelingId.value = item.id
   try {
     const res = await http.rssJobCancelItem(item.id)
@@ -412,23 +444,25 @@ const cancelItem = async (item) => {
     } else {
       ElMessage.success(msg)
     }
-    if (res?.data) applyStatus(res.data)
-  } catch (e) {
-    ElMessage.error(e?.message || '取消失败')
+    applyResponseStatus(seq, res?.data)
+  } catch (_) {
   } finally {
+    actionInFlight--
     cancelingId.value = ''
   }
 }
 
 const scanResidual = async () => {
+  const seq = nextRequestSeq()
+  actionInFlight++
   scanning.value = true
   try {
     const res = await http.rssJobResidualScan()
     ElMessage.success(res.message || '扫描完成')
-    if (res?.data) applyStatus(res.data)
-  } catch (e) {
-    ElMessage.error(e?.message || '扫描失败')
+    applyResponseStatus(seq, res?.data)
+  } catch (_) {
   } finally {
+    actionInFlight--
     scanning.value = false
   }
 }
@@ -443,14 +477,16 @@ const cleanResidual = async () => {
   } catch (_) {
     return
   }
+  const seq = nextRequestSeq()
+  actionInFlight++
   cleaning.value = true
   try {
     const res = await http.rssJobResidualClean()
     ElMessage.success(res.message || '清理完成')
-    if (res?.data) applyStatus(res.data)
-  } catch (e) {
-    ElMessage.error(e?.message || '清理失败')
+    applyResponseStatus(seq, res?.data)
+  } catch (_) {
   } finally {
+    actionInFlight--
     cleaning.value = false
   }
 }
@@ -485,6 +521,16 @@ defineExpose({show})
 .job-value {
   flex: 1;
   word-break: break-all;
+}
+
+.progress-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+}
+
+.progress-failed {
+  color: var(--el-color-danger);
 }
 
 .job-divider {

@@ -1449,4 +1449,20 @@ class RenameUtilTest {
         assertNull(RenameUtil.extractEpisodeRange(
                 "[Sub-Group] Title - 12 [1080p].mkv"));
     }
+
+    @Test
+    void rssRetryDelayUsesExponentialBackoffWithBoundedStableJitter() {
+        String url = "https://mikanime.tv/RSS/Bangumi?bangumiId=4039";
+
+        long first = ItemsUtil.rssRetryDelayMs(1, url);
+        long second = ItemsUtil.rssRetryDelayMs(2, url);
+        long third = ItemsUtil.rssRetryDelayMs(3, url);
+        long later = ItemsUtil.rssRetryDelayMs(10, url);
+
+        assertTrue(first >= 1_000L && first <= 1_250L);
+        assertTrue(second >= 2_000L && second <= 2_250L);
+        assertTrue(third >= 4_000L && third <= 4_250L);
+        assertTrue(later >= 8_000L && later <= 8_250L);
+        assertEquals(second, ItemsUtil.rssRetryDelayMs(2, url));
+    }
 }

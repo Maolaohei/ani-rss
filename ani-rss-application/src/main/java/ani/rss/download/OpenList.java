@@ -39,6 +39,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -80,6 +81,10 @@ public class OpenList implements BaseDownload {
     // findFiles 短缓存，轮询期间减少递归 list
     private static final long FIND_FILES_TTL_MS = 3000L;
     private static final Map<String, CachedFileList> findFilesCache = new ConcurrentHashMap<>();
+
+    private static final int IDEMPOTENT_API_MAX_ATTEMPTS = 3;
+    private static final long[] IDEMPOTENT_API_RETRY_DELAYS_MS = {500L, 1500L};
+    private static final long TIMEOUT_FILE_STABILITY_WAIT_MS = 2000L;
 
     /**
      * 115/OpenList 返回「任务已存在(10008)」后，短时间内禁止对同一 magnet 再 add。
@@ -373,7 +378,8 @@ public class OpenList implements BaseDownload {
                         continue;
                     }
                     // Error/Failed：仅当本集临时目录或最终目录命中本集文件时才当完成
-                    if (hasEpisodeVideo(path, reName) || hasEpisodeVideo(savePath, reName)) {
+                    if (hasEpisodeVideos(path, reName, item.getEpisodeRange())
+                        || hasEpisodeVideos(savePath, reName, item.getEpisodeRange())) {
                         log.info("本集资源已就绪，OpenList 任务状态异常但文件可用，继续后处理 {}", reName);
                         clearDuplicateMagnet(infoHash);
                         break;
@@ -398,7 +404,8 @@ public class OpenList implements BaseDownload {
                 }
 
                 // 无 tid（10008）：低频轮询本集文件是否出现（勿扫整季其它集）
-                if (hasEpisodeVideo(path, reName) || hasEpisodeVideo(savePath, reName)) {
+                if (hasEpisodeVideos(path, reName, item.getEpisodeRange())
+                        || hasEpisodeVideos(savePath, reName, item.getEpisodeRange())) {
                     log.info("10008 本集任务文件已就绪 {}", reName);
                     clearDuplicateMagnet(infoHash);
                     break;
@@ -408,12 +415,21 @@ public class OpenList implements BaseDownload {
             }
 
             if (DateTime.now().getTime() >= deadlineMs) {
-                // 最终兜底：超时瞬间文件可能刚落盘
-                if (hasEpisodeVideo(path, reName) || hasEpisodeVideo(savePath, reName)) {
-                    log.info("离线超时前本集文件已就绪，继续后处理 {}", reName);
+                // 最终兜底：绕过缓存并确认文件大小稳定，避免状态更新滞后导致误判失败。
+                TimeoutFileInspection inspection = inspectTimeoutFiles(
+                        path, savePath, reName, item.getEpisodeRange());
+                String finalState = tid == null
+                        ? "no-tid"
+                        : taskInfo(tid).map(info -> String.valueOf(info.getState())).orElse("unknown");
+                if (inspection.ready()) {
+                    log.info("离线超时终检通过，继续后处理 {} tid={} state={} videos={} totalBytes={} stable={}",
+                            reName, tid, finalState, inspection.videoCount(), inspection.totalBytes(), inspection.stable());
                     clearDuplicateMagnet(infoHash);
                 } else {
-                    log.error("{} 超过离线超时 {} 分钟，强制失败并清理 OpenList/本地占用", reName, waitMinutes);
+                    log.error("{} 超过离线超时 {} 分钟，终检未发现稳定的本集视频，强制失败并清理 "
+                                    + "OpenList/本地占用 tid={} state={} videos={} totalBytes={} stable={}",
+                            reName, waitMinutes, tid, finalState, inspection.videoCount(),
+                            inspection.totalBytes(), inspection.stable());
                     try {
                         purgeHashTasks(infoHash);
                     } catch (Exception purgeEx) {
@@ -465,11 +481,14 @@ public class OpenList implements BaseDownload {
 
             if (videoList.size() == 1) {
                 OpenListFileInfo videoFile = videoList.get(0);
-                renameMap.put(videoFile.getName(), reName + "." + FileUtil.extName(videoFile.getName()));
+                String videoReName = isCollection
+                        ? collectionEpisodeReName(videoFile.getName(), reName, ani.getSeason())
+                        : reName;
+                renameMap.put(videoFile.getName(), videoReName + "." + FileUtil.extName(videoFile.getName()));
                 for (OpenListFileInfo sub : subtitleList) {
                     String name = sub.getName();
                     String ext = FileUtil.extName(name);
-                    String newName = reName;
+                    String newName = videoReName;
                     String lang = FileUtil.extName(FileUtil.mainName(name));
                     if (StrUtil.isNotBlank(lang)) {
                         newName = newName + "." + lang;
@@ -481,14 +500,18 @@ public class OpenList implements BaseDownload {
                     String videoName = video.getName();
                     String videoBase = FileUtil.mainName(videoName);
                     String videoExt = FileUtil.extName(videoName);
-                    String ep = extractEpisodeFromFileName(videoName);
                     String videoReName;
-                    if (ep != null && reName.contains(".E")) {
-                        videoReName = reName.replaceAll("\\.E\\d+(\\.5)?", ".E" + ep);
-                    } else if (ep != null && reName.matches(".*[Ss]\\d+.*E\\d+.*")) {
-                        videoReName = reName.replaceAll("E\\d+(\\.5)?", "E" + ep);
+                    if (isCollection) {
+                        videoReName = collectionEpisodeReName(videoName, reName, ani.getSeason());
                     } else {
-                        videoReName = reName;
+                        String episode = extractEpisodeFromFileName(videoName);
+                        if (episode != null && reName.contains(".E")) {
+                            videoReName = reName.replaceAll("\\.E\\d+(\\.5)?", ".E" + episode);
+                        } else if (episode != null && reName.matches(".*[Ss]\\d+.*E\\d+.*")) {
+                            videoReName = reName.replaceAll("E\\d+(\\.5)?", "E" + episode);
+                        } else {
+                            videoReName = reName;
+                        }
                     }
                     renameMap.put(videoName, videoReName + "." + videoExt);
 
@@ -596,23 +619,18 @@ public class OpenList implements BaseDownload {
                 }
             }
 
-            // 缺集校验：对比标题声明范围与实际下载文件
+            // 缺集校验：扫描整季目录，但日志只报告本次声明范围的命中情况。
             if (item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty()) {
-                List<Double> expected = item.getEpisodeRange();
                 List<OpenListFileInfo> actualVideos = findFiles(savePath).stream()
                         .filter(f -> FileUtils.isVideoFormat(f.getName()))
                         .toList();
-                Set<Double> downloadedEps = actualVideos.stream()
-                        .map(f -> extractEpisodeFromFileName(f.getName()))
-                        .filter(Objects::nonNull)
-                        .map(ep -> Double.parseDouble(ep.replace(".5", "")))
-                        .collect(Collectors.toSet());
-                List<Double> missing = expected.stream()
-                        .filter(ep -> !downloadedEps.contains(ep))
-                        .toList();
-                if (!missing.isEmpty()) {
-                    log.warn("合集缺集: {} 预期 {} 集, 实际 {} 集, 缺失 {}",
-                            reName, expected.size(), downloadedEps.size(), missing);
+                EpisodeValidation validation = validateCollectionEpisodes(item.getEpisodeRange(), actualVideos);
+                if (validation.missing().isEmpty()) {
+                    log.info("合集集数校验通过: {} 本次期望 {}, 已命中 {}",
+                            reName, validation.expected(), validation.matched());
+                } else {
+                    log.warn("合集缺集: {} 本次期望 {}, 已命中 {}, 缺失 {}",
+                            reName, validation.expected(), validation.matched(), validation.missing());
                 }
             }
 
@@ -641,6 +659,74 @@ public class OpenList implements BaseDownload {
                 }
             }
         }
+    }
+
+    /**
+     * Keeps the episode number from a collection's original file name.
+     * Collection temporary directories use the source title, so reName may
+     * no longer contain an SxxExx template for the final file name.
+     */
+    String collectionEpisodeReName(String originalName, String reName, Integer season) {
+        if (StrUtil.isBlank(originalName) || StrUtil.isBlank(reName)) {
+            return reName;
+        }
+
+        String episode = extractEpisodeFromFileName(originalName);
+        if (StrUtil.isBlank(episode)) {
+            return reName;
+        }
+        if (reName.contains(".E")) {
+            return reName.replaceAll("\\.E\\d+(\\.5)?", ".E" + episode);
+        }
+        if (reName.matches(".*[Ss]\\d+.*E\\d+.*")) {
+            return reName.replaceAll("E\\d+(\\.5)?", "E" + episode);
+        }
+
+        int seasonNumber = season == null || season < 0 ? 1 : season;
+        return reName + " S" + String.format("%02d", seasonNumber) + "E" + formatEpisode(episode);
+    }
+
+    private static String formatEpisode(String episode) {
+        try {
+            if (episode.endsWith(".5")) {
+                return String.format("%02d.5", Integer.parseInt(episode.substring(0, episode.length() - 2)));
+            }
+            return String.format("%02d", Integer.parseInt(episode));
+        } catch (NumberFormatException ignored) {
+            return episode;
+        }
+    }
+
+    EpisodeValidation validateCollectionEpisodes(List<Double> expected, List<OpenListFileInfo> actualVideos) {
+        LinkedHashSet<Double> expectedEpisodes = expected == null
+                ? new LinkedHashSet<>()
+                : expected.stream()
+                .filter(Objects::nonNull)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+        Set<Double> downloadedEpisodes = actualVideos == null
+                ? Set.of()
+                : actualVideos.stream()
+                .filter(f -> FileUtils.isVideoFormat(f.getName()))
+                .map(OpenListFileInfo::getName)
+                .map(this::extractEpisodeFromFileName)
+                .filter(StrUtil::isNotBlank)
+                .map(OpenList::parseEpisodeNumber)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        List<Double> matched = expectedEpisodes.stream().filter(downloadedEpisodes::contains).toList();
+        List<Double> missing = expectedEpisodes.stream().filter(ep -> !downloadedEpisodes.contains(ep)).toList();
+        return new EpisodeValidation(List.copyOf(expectedEpisodes), matched, missing);
+    }
+
+    private static Double parseEpisodeNumber(String episode) {
+        try {
+            return Double.parseDouble(episode);
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+    }
+
+    record EpisodeValidation(List<Double> expected, List<Double> matched, List<Double> missing) {
     }
 
     @Override
@@ -675,36 +761,39 @@ public class OpenList implements BaseDownload {
      */
     public void mkdir(String path) {
         invalidateFindFilesCache();
-        postApi("fs/mkdir")
-                .body(GsonStatic.toJson(Map.of(
-                        "path", path
-                )))
-                .then(res -> {
-                    JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                    int code = jsonObject.get("code").getAsInt();
-                    String message = jsonObject.get("message").getAsString();
-                    if (code == 200) {
-                        log.info("创建文件夹: {}", path);
-                        return;
-                    }
+        retryIdempotent("fs/mkdir " + path, () -> {
+            postApi("fs/mkdir")
+                    .body(GsonStatic.toJson(Map.of(
+                            "path", path
+                    )))
+                    .then(res -> {
+                        HttpReq.assertStatus(res);
+                        JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
+                        int code = jsonObject.get("code").getAsInt();
+                        String message = jsonObject.has("message") ? jsonObject.get("message").getAsString() : "";
+                        if (code == 200) {
+                            log.info("创建文件夹: {}", path);
+                            return;
+                        }
 
-                    if (!message.startsWith("failed to check if dir exists")) {
-                        return;
-                    }
+                        if (!message.startsWith("failed to check if dir exists")) {
+                            throw new IllegalStateException("fs/mkdir 失败 code=" + code + " " + message);
+                        }
 
-                    Path pathObj = Path.of(path);
+                        Path pathObj = Path.of(path);
+                        if (pathObj.getNameCount() <= 1) {
+                            throw new IllegalStateException("fs/mkdir 失败 code=" + code + " " + message);
+                        }
 
-                    if (pathObj.getNameCount() <= 1) {
-                        return;
-                    }
-
-                    String parentPath = pathObj
-                            .getParent()
-                            .toString()
-                            .replace('\\', '/');
-                    mkdir(parentPath);
-                    mkdir(path);
-                });
+                        String parentPath = pathObj
+                                .getParent()
+                                .toString()
+                                .replace('\\', '/');
+                        mkdir(parentPath);
+                        mkdir(path);
+                    });
+            return null;
+        });
     }
 
     /**
@@ -802,7 +891,7 @@ public class OpenList implements BaseDownload {
      */
     public List<OpenListFileInfo> fsList(String path, Boolean refresh) {
         try {
-            return postApi("fs/list")
+            return retryIdempotent("fs/list " + path, () -> postApi("fs/list")
                     .body(GsonStatic.toJson(Map.of(
                             "path", path,
                             "page", 1,
@@ -810,6 +899,7 @@ public class OpenList implements BaseDownload {
                             "refresh", refresh
                     )))
                     .thenFunction(res -> {
+                        HttpReq.assertStatus(res);
                         JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
                         int code = jsonObject.get("code").getAsInt();
                         if (code != 200) {
@@ -819,8 +909,7 @@ public class OpenList implements BaseDownload {
                         if (Objects.isNull(data) || data.isJsonNull()) {
                             return List.of();
                         }
-                        JsonElement content = data.getAsJsonObject()
-                                .get("content");
+                        JsonElement content = data.getAsJsonObject().get("content");
                         if (Objects.isNull(content) || content.isJsonNull()) {
                             return List.of();
                         }
@@ -832,11 +921,11 @@ public class OpenList implements BaseDownload {
                             Long size = fileInfo.getSize();
                             return Long.MAX_VALUE - ObjectUtil.defaultIfNull(size, 0L);
                         }));
-                    });
+                    }));
         } catch (Exception e) {
-            log.info("OpenList API 调用失败: {}", e.getMessage());
+            log.warn("OpenList fs/list 调用失败 path={}: {}", path, ExceptionUtils.getMessage(e));
+            return List.of();
         }
-        return List.of();
     }
 
     /**
@@ -847,17 +936,22 @@ public class OpenList implements BaseDownload {
      */
     public Optional<OpenListTaskInfo> taskInfo(String tid) {
         try {
-            OpenListTaskInfo taskInfo = postApi("task/offline_download/info?tid=" + tid)
-                    .thenFunction(res -> {
-                        JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                        JsonObject data = jsonObject.get("data").getAsJsonObject();
-                        return GsonStatic.fromJson(data, OpenListTaskInfo.class);
-                    });
-            return Optional.of(taskInfo);
+            OpenListTaskInfo taskInfo = retryIdempotent("task/info " + tid,
+                    () -> postApi("task/offline_download/info?tid=" + tid)
+                            .thenFunction(res -> {
+                                HttpReq.assertStatus(res);
+                                JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
+                                int code = jsonObject.get("code").getAsInt();
+                                if (code != 200 || !jsonObject.has("data") || jsonObject.get("data").isJsonNull()) {
+                                    throw new IllegalStateException("task/info 失败 code=" + code);
+                                }
+                                return GsonStatic.fromJson(jsonObject.get("data").getAsJsonObject(), OpenListTaskInfo.class);
+                            }));
+            return Optional.ofNullable(taskInfo);
         } catch (Exception e) {
-            log.info("OpenList API 调用失败: {}", e.getMessage());
+            log.warn("OpenList task/info 调用失败 tid={}: {}", tid, ExceptionUtils.getMessage(e));
+            return Optional.empty();
         }
-        return Optional.empty();
     }
 
     /**
@@ -1376,9 +1470,9 @@ public class OpenList implements BaseDownload {
             return cached == null ? ResidualSnapshot.empty() : cached;
         }
         if (config == null) {
-            return ResidualSnapshot.empty().setMessage("OpenList 未登录");
+            throw new IllegalStateException("OpenList 未登录");
         }
-        List<OpenListTaskInfo> tasks = safeListAllOfflineTasks();
+        List<OpenListTaskInfo> tasks = listAllOfflineTasksStrict();
         int active = 0;
         int terminal = 0;
         List<String> samples = new ArrayList<>();
@@ -1422,7 +1516,7 @@ public class OpenList implements BaseDownload {
         }
         try {
             String protectHash = currentInfoHash.get();
-            List<OpenListTaskInfo> tasks = safeListAllOfflineTasks();
+            List<OpenListTaskInfo> tasks = listAllOfflineTasksStrict();
             int cleaned = 0;
             int skipped = 0;
             int failed = 0;
@@ -1463,7 +1557,7 @@ public class OpenList implements BaseDownload {
                     cleaned, skipped, failed, after.getTotalCount());
             log.info("OpenList {}", msg);
             return new CleanResult()
-                    .setOk(true)
+                    .setOk(failed == 0)
                     .setCleaned(cleaned)
                     .setSkipped(skipped)
                     .setFailed(failed)
@@ -1486,23 +1580,15 @@ public class OpenList implements BaseDownload {
         return snap.setCleaning(residualCleaning.get());
     }
 
-    private List<OpenListTaskInfo> safeListAllOfflineTasks() {
+    private List<OpenListTaskInfo> listAllOfflineTasksStrict() {
         List<OpenListTaskInfo> all = new ArrayList<>();
-        try {
-            List<OpenListTaskInfo> undone = taskUnDoneList();
-            if (undone != null) {
-                all.addAll(undone);
-            }
-        } catch (Exception e) {
-            log.warn("列出 undone 离线任务失败: {}", e.getMessage());
+        List<OpenListTaskInfo> undone = taskUnDoneList();
+        if (undone != null) {
+            all.addAll(undone);
         }
-        try {
-            List<OpenListTaskInfo> done = taskDoneList();
-            if (done != null) {
-                all.addAll(done);
-            }
-        } catch (Exception e) {
-            log.warn("列出 done 离线任务失败: {}", e.getMessage());
+        List<OpenListTaskInfo> done = taskDoneList();
+        if (done != null) {
+            all.addAll(done);
         }
         return all;
     }
@@ -1568,7 +1654,8 @@ public class OpenList implements BaseDownload {
     public String getCurrentInfoHash() {
         return currentInfoHash.get();
     }
-
+
+
     /**
      * 用户取消 RSS 任务时：打断等待并清理当前 hash 的 OpenList 离线任务。
      * 边界：
@@ -1609,6 +1696,80 @@ public class OpenList implements BaseDownload {
         return offlineCancelRequested.get() || ani.rss.task.RssTask.isCancelRequested();
     }
 
+    private TimeoutFileInspection inspectTimeoutFiles(String tempPath, String savePath, String reName,
+                                                       List<Double> expectedEpisodes) {
+        TimeoutFileSnapshot first = freshEpisodeVideoSnapshot(tempPath, savePath, reName, expectedEpisodes);
+        if (!snapshotCoversExpectedEpisodes(first, expectedEpisodes) || first.totalBytes() <= 0) {
+            return new TimeoutFileInspection(false, first.videoCount(), first.totalBytes(), false);
+        }
+        ThreadUtil.sleep(TIMEOUT_FILE_STABILITY_WAIT_MS);
+        TimeoutFileSnapshot second = freshEpisodeVideoSnapshot(tempPath, savePath, reName, expectedEpisodes);
+        boolean stable = first.files().equals(second.files()) && second.totalBytes() > 0;
+        boolean ready = stable && snapshotCoversExpectedEpisodes(second, expectedEpisodes);
+        return new TimeoutFileInspection(ready, second.videoCount(), second.totalBytes(), stable);
+    }
+
+    private TimeoutFileSnapshot freshEpisodeVideoSnapshot(String tempPath, String savePath, String reName,
+                                                          List<Double> expectedEpisodes) {
+        invalidateFindFilesCache();
+        List<OpenListFileInfo> videos = expectedEpisodeVideos(findEpisodeFiles(tempPath, reName), expectedEpisodes);
+        if (videos.isEmpty() && !Objects.equals(tempPath, savePath)) {
+            invalidateFindFilesCache();
+            videos = expectedEpisodeVideos(findEpisodeFiles(savePath, reName), expectedEpisodes);
+        }
+        LinkedHashMap<String, Long> files = new LinkedHashMap<>();
+        for (OpenListFileInfo video : videos) {
+            String key = StrUtil.blankToDefault(video.getPath(), "") + "/" + video.getName();
+            files.put(key, ObjectUtil.defaultIfNull(video.getSize(), 0L));
+        }
+        return snapshotTimeoutFiles(files);
+    }
+
+    private List<OpenListFileInfo> expectedEpisodeVideos(List<OpenListFileInfo> files, List<Double> expectedEpisodes) {
+        Set<Double> expected = normalizedEpisodes(expectedEpisodes);
+        return files.stream()
+                .filter(f -> FileUtils.isVideoFormat(f.getName()))
+                .filter(f -> expected.isEmpty() || expected.contains(parseEpisodeNumber(extractEpisodeFromFileName(f.getName()))))
+                .toList();
+    }
+
+    boolean snapshotCoversExpectedEpisodes(TimeoutFileSnapshot snapshot, List<Double> expectedEpisodes) {
+        if (snapshot == null || snapshot.videoCount() == 0) {
+            return false;
+        }
+        Set<Double> expected = normalizedEpisodes(expectedEpisodes);
+        if (expected.isEmpty()) {
+            return true;
+        }
+        Set<Double> actual = snapshot.files().keySet().stream()
+                .map(this::extractEpisodeFromFileName)
+                .map(OpenList::parseEpisodeNumber)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        return actual.containsAll(expected);
+    }
+
+    private static Set<Double> normalizedEpisodes(List<Double> episodes) {
+        return episodes == null
+                ? Set.of()
+                : episodes.stream().filter(Objects::nonNull).collect(Collectors.toSet());
+    }
+
+    static TimeoutFileSnapshot snapshotTimeoutFiles(Map<String, Long> files) {
+        LinkedHashMap<String, Long> normalized = new LinkedHashMap<>();
+        if (files != null) {
+            files.forEach((name, size) -> normalized.put(name, ObjectUtil.defaultIfNull(size, 0L)));
+        }
+        long totalBytes = normalized.values().stream().mapToLong(Long::longValue).sum();
+        return new TimeoutFileSnapshot(Map.copyOf(normalized), normalized.size(), totalBytes);
+    }
+
+    record TimeoutFileSnapshot(Map<String, Long> files, int videoCount, long totalBytes) {
+    }
+
+    record TimeoutFileInspection(boolean ready, int videoCount, long totalBytes, boolean stable) {
+    }
+
     /**
      * 快速判断目录下是否已有视频（走 findFiles 缓存）
      */
@@ -1619,9 +1780,12 @@ public class OpenList implements BaseDownload {
     /**
      * 是否存在“本集”视频。禁止用整季 savePath 任意视频冒充当前集完成。
      */
-    private boolean hasEpisodeVideo(String dir, String reName) {
-        return findEpisodeFiles(dir, reName).stream()
-                .anyMatch(f -> FileUtils.isVideoFormat(f.getName()));
+    private boolean hasEpisodeVideos(String dir, String reName, List<Double> expectedEpisodes) {
+        List<OpenListFileInfo> videos = expectedEpisodeVideos(findEpisodeFiles(dir, reName), expectedEpisodes);
+        if (normalizedEpisodes(expectedEpisodes).isEmpty()) {
+            return !videos.isEmpty();
+        }
+        return validateCollectionEpisodes(expectedEpisodes, videos).missing().isEmpty();
     }
 
     /**
@@ -1685,6 +1849,55 @@ public class OpenList implements BaseDownload {
         }));
         findFilesCache.put(path, new CachedFileList(sorted, FIND_FILES_TTL_MS));
         return sorted;
+    }
+
+    private <T> T retryIdempotent(String action, Supplier<T> supplier) {
+        return retryIdempotent(action, supplier, IDEMPOTENT_API_RETRY_DELAYS_MS);
+    }
+
+    static <T> T retryIdempotent(String action, Supplier<T> supplier, long[] retryDelaysMs) {
+        int attempts = Math.max(1, Math.min(IDEMPOTENT_API_MAX_ATTEMPTS,
+                (retryDelaysMs == null ? 0 : retryDelaysMs.length) + 1));
+        RuntimeException last = null;
+        for (int attempt = 1; attempt <= attempts; attempt++) {
+            try {
+                return supplier.get();
+            } catch (RuntimeException e) {
+                last = e;
+                if (!isTransientOpenListFailure(e) || attempt >= attempts) {
+                    throw e;
+                }
+                long delay = Math.max(0L, retryDelaysMs[attempt - 1]);
+                log.warn("OpenList 临时故障，准备重试 action={} attempt={}/{} delayMs={} error={}",
+                        action, attempt, attempts, delay, ExceptionUtils.getMessage(e));
+                if (delay > 0) {
+                    ThreadUtil.sleep(delay);
+                }
+            }
+        }
+        throw last == null ? new IllegalStateException(action + " failed") : last;
+    }
+
+    static boolean isTransientOpenListFailure(Throwable throwable) {
+        Throwable current = throwable;
+        while (current != null) {
+            String className = current.getClass().getSimpleName().toLowerCase(Locale.ROOT);
+            String message = StrUtil.blankToDefault(current.getMessage(), "").toLowerCase(Locale.ROOT);
+            if (className.contains("sockettimeout")
+                    || className.contains("connectexception")
+                    || className.contains("noroutetohost")
+                    || message.contains("read timed out")
+                    || message.contains("connect timed out")
+                    || message.contains("connection reset")
+                    || message.contains("connection refused")
+                    || message.contains("status: 502")
+                    || message.contains("status: 503")
+                    || message.contains("status: 504")) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     /**

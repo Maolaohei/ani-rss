@@ -85,8 +85,8 @@ public class RssJobController extends BaseController {
                     : ("扫描完成: 进行中 " + active + " / 终态 " + terminal));
             return result;
         } catch (Exception e) {
-            Result<RssJobStatus> result = Result.success(RssTask.getJobStatus());
-            result.setMessage("扫描残留失败: " + e.getMessage());
+            Result<RssJobStatus> result = Result.error(RssTask.getJobStatus());
+            result.setMessage("扫描残留失败: " + StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName()));
             return result;
         }
     }
@@ -102,14 +102,20 @@ public class RssJobController extends BaseController {
         }
         try {
             OpenList.CleanResult cleaned = SpringUtil.getBean(OpenList.class).cleanOfflineResiduals(true);
-            Result<RssJobStatus> result = Result.success(RssTask.getJobStatus());
-            result.setMessage(cleaned == null || cleaned.getMessage() == null
+            String message = cleaned == null || StrUtil.isBlank(cleaned.getMessage())
                     ? "清理完成"
-                    : cleaned.getMessage());
+                    : cleaned.getMessage();
+            if (cleaned == null || !cleaned.isOk()) {
+                Result<RssJobStatus> result = Result.error(RssTask.getJobStatus());
+                result.setMessage(cleaned == null ? "清理残留失败: 未返回清理结果" : message);
+                return result;
+            }
+            Result<RssJobStatus> result = Result.success(RssTask.getJobStatus());
+            result.setMessage(message);
             return result;
         } catch (Exception e) {
-            Result<RssJobStatus> result = Result.success(RssTask.getJobStatus());
-            result.setMessage("清理残留失败: " + e.getMessage());
+            Result<RssJobStatus> result = Result.error(RssTask.getJobStatus());
+            result.setMessage("清理残留失败: " + StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName()));
             return result;
         }
     }

@@ -11,6 +11,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -23,13 +24,21 @@ class RssJobControlTest {
         setBoolean("download", false);
         setLong("downloadStartTime", 0L);
         setBoolean("cancelRequested", false);
+        setCancelReason("NONE");
         setRef("jobScope", "idle");
         setRef("jobTitle", "");
         setRef("jobAniId", "");
         setRef("jobMessage", "空闲");
         setRefObj("jobSource", null);
         setRefObj("activePool", null);
+        setRefObj("activeRunner", null);
         setRefObj("pendingManual", null);
+        setLong("generationSequence", 0L);
+        setLong("activeGeneration", 0L);
+        setInteger("subscriptionTotal", 0);
+        setInteger("subscriptionActive", 0);
+        setInteger("subscriptionCompleted", 0);
+        setInteger("subscriptionFailed", 0);
         setLong("lastFinishedAt", 0L);
         setLong("lastDurationMs", 0L);
         setRef("lastResultMessage", "");
@@ -158,6 +167,84 @@ class RssJobControlTest {
         assertTrue(RssTask.isCancelRequested());
     }
 
+    @Test
+    void preempt_finish_drains_pending_manual_refresh() throws Exception {
+        setBoolean("download", true);
+        setLong("downloadStartTime", System.currentTimeMillis());
+        setLong("activeGeneration", 7L);
+        setCancelReason("PREEMPT");
+        setBoolean("cancelRequested", true);
+        setPendingManual(null, "抢先刷新", "all");
+
+        Object next = invokePrivate("finishGeneration", new Class<?>[]{long.class}, 7L);
+
+        assertNotNull(next);
+        assertFalse(RssTask.hasPendingManual());
+        assertFalse(Boolean.TRUE.equals(RssTask.getJobStatus().getRunning()));
+    }
+
+    @Test
+    void user_cancel_finish_discards_pending_manual_refresh() throws Exception {
+        setBoolean("download", true);
+        setLong("downloadStartTime", System.currentTimeMillis());
+        setLong("activeGeneration", 8L);
+        setCancelReason("USER");
+        setBoolean("cancelRequested", true);
+        setPendingManual(null, "不应执行", "all");
+
+        Object next = invokePrivate("finishGeneration", new Class<?>[]{long.class}, 8L);
+
+        assertNull(next);
+        assertFalse(RssTask.hasPendingManual());
+        assertFalse(Boolean.TRUE.equals(RssTask.getJobStatus().getRunning()));
+    }
+
+    @Test
+    void stale_generation_cannot_finish_current_job() throws Exception {
+        setBoolean("download", true);
+        setLong("downloadStartTime", System.currentTimeMillis());
+        setLong("activeGeneration", 12L);
+        setRef("jobTitle", "当前任务");
+
+        Object next = invokePrivate("finishGeneration", new Class<?>[]{long.class}, 11L);
+
+        assertNull(next);
+        RssJobStatus status = RssTask.getJobStatus();
+        assertTrue(Boolean.TRUE.equals(status.getRunning()));
+        assertEquals("当前任务", status.getTitle());
+        assertEquals(12L, atomicLong("activeGeneration").get());
+    }
+
+    @Test
+    void force_release_refuses_while_runner_is_alive() throws Exception {
+        setBoolean("download", true);
+        setLong("downloadStartTime", System.currentTimeMillis());
+        setLong("activeGeneration", 15L);
+        setRefObj("activeRunner", Thread.currentThread());
+
+        Object released = invokePrivate("forceReleaseLock", new Class<?>[]{String.class}, "test");
+
+        assertEquals(Boolean.FALSE, released);
+        assertTrue(Boolean.TRUE.equals(RssTask.getJobStatus().getRunning()));
+        assertEquals(15L, atomicLong("activeGeneration").get());
+    }
+
+    @Test
+    void status_exposes_subscription_progress() throws Exception {
+        setBoolean("download", true);
+        setLong("downloadStartTime", System.currentTimeMillis());
+        setInteger("subscriptionTotal", 6);
+        setInteger("subscriptionActive", 2);
+        setInteger("subscriptionCompleted", 3);
+        setInteger("subscriptionFailed", 1);
+
+        RssJobStatus status = RssTask.getJobStatus();
+
+        assertEquals(6, status.getSubscriptionTotal());
+        assertEquals(2, status.getSubscriptionActive());
+        assertEquals(3, status.getSubscriptionCompleted());
+        assertEquals(1, status.getSubscriptionFailed());
+    }
     private static void setPendingManual(List<?> targetList, String title, String scope) throws Exception {
         Class<?> pendingCls = null;
         for (Class<?> c : RssTask.class.getDeclaredClasses()) {
@@ -189,6 +276,32 @@ class RssJobControlTest {
         ((AtomicLong) f.get(null)).set(value);
     }
 
+    private static void setInteger(String field, int value) throws Exception {
+        Field f = RssTask.class.getDeclaredField(field);
+        f.setAccessible(true);
+        ((AtomicInteger) f.get(null)).set(value);
+    }
+
+    private static AtomicLong atomicLong(String field) throws Exception {
+        Field f = RssTask.class.getDeclaredField(field);
+        f.setAccessible(true);
+        return (AtomicLong) f.get(null);
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private static void setCancelReason(String constant) throws Exception {
+        Field f = RssTask.class.getDeclaredField("cancelReason");
+        f.setAccessible(true);
+        AtomicReference ref = (AtomicReference) f.get(null);
+        Class<? extends Enum> enumType = (Class<? extends Enum>) Class.forName(RssTask.class.getName() + "$CancelReason");
+        ref.set(Enum.valueOf(enumType, constant));
+    }
+
+    private static Object invokePrivate(String name, Class<?>[] parameterTypes, Object... args) throws Exception {
+        Method method = RssTask.class.getDeclaredMethod(name, parameterTypes);
+        method.setAccessible(true);
+        return method.invoke(null, args);
+    }
     @SuppressWarnings("unchecked")
     private static void setRef(String field, String value) throws Exception {
         Field f = RssTask.class.getDeclaredField(field);

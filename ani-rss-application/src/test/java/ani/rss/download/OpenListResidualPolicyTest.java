@@ -1,9 +1,13 @@
 package ani.rss.download;
 
+import ani.rss.entity.OpenListFileInfo;
 import ani.rss.entity.OpenListTaskInfo;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -177,6 +181,121 @@ class OpenListResidualPolicyTest {
         assertEquals(Boolean.FALSE, empty.getCleaning());
         assertNotNull(empty.getSamples());
         assertTrue(empty.getSamples().isEmpty());
+    }
+
+
+    @Test
+    void collection_single_video_keeps_episode_number_without_template() {
+        OpenList openList = new OpenList();
+
+        String actual = openList.collectionEpisodeReName(
+                "[ANi] GRAND BLUE ???? 3 - 03 [1080P][Baha][WEB-DL][AAC AVC][CHT].mp4",
+                "[ANi] Grand Blue Dreaming",
+                3);
+
+        assertEquals("[ANi] Grand Blue Dreaming S03E03", actual);
+    }
+
+    @Test
+    void collection_episode_replaces_existing_template() {
+        OpenList openList = new OpenList();
+
+        assertEquals("Show S03E03",
+                openList.collectionEpisodeReName("Show - 03.mkv", "Show S03E01", 3));
+        assertEquals("Show.E03",
+                openList.collectionEpisodeReName("Show - 03.mkv", "Show.E01", 3));
+        assertEquals("Show S03E03.5",
+                openList.collectionEpisodeReName("Show - 03.5.mkv", "Show S03E01", 3));
+    }
+
+    @Test
+    void collection_episode_keeps_name_when_episode_cannot_be_extracted() {
+        OpenList openList = new OpenList();
+
+        assertEquals("Show", openList.collectionEpisodeReName("Show movie.mkv", "Show", 3));
+    }
+
+    @Test
+    void collection_validation_counts_only_expected_episodes_and_preserves_half_episode() {
+        OpenList openList = new OpenList();
+        List<OpenListFileInfo> videos = List.of(
+                new OpenListFileInfo().setName("Show S03E01.mkv"),
+                new OpenListFileInfo().setName("Show S03E02.mkv"),
+                new OpenListFileInfo().setName("Show S03E03.5.mkv"));
+
+        OpenList.EpisodeValidation validation = openList.validateCollectionEpisodes(
+                List.of(3.0, 3.5), videos);
+
+        assertEquals(List.of(3.0, 3.5), validation.expected());
+        assertEquals(List.of(3.5), validation.matched());
+        assertEquals(List.of(3.0), validation.missing());
+    }
+
+    @Test
+    void collection_validation_deduplicates_expected_and_downloaded_episodes() {
+        OpenList openList = new OpenList();
+        List<OpenListFileInfo> videos = List.of(
+                new OpenListFileInfo().setName("Show - 03.mkv"),
+                new OpenListFileInfo().setName("Show - 03.zh-CN.ass"),
+                new OpenListFileInfo().setName("Show S03E03.mp4"));
+
+        OpenList.EpisodeValidation validation = openList.validateCollectionEpisodes(
+                List.of(3.0, 3.0), videos);
+
+        assertEquals(List.of(3.0), validation.expected());
+        assertEquals(List.of(3.0), validation.matched());
+        assertTrue(validation.missing().isEmpty());
+    }
+
+    @Test
+    void transient_openlist_failures_are_retried_but_business_errors_are_not() {
+        AtomicInteger transientAttempts = new AtomicInteger();
+        String result = OpenList.retryIdempotent("test", () -> {
+            if (transientAttempts.incrementAndGet() < 3) {
+                throw new IllegalStateException("Read timed out");
+            }
+            return "ok";
+        }, new long[]{0L, 0L});
+
+        assertEquals("ok", result);
+        assertEquals(3, transientAttempts.get());
+
+        AtomicInteger businessAttempts = new AtomicInteger();
+        assertThrows(IllegalStateException.class, () -> OpenList.retryIdempotent("test", () -> {
+            businessAttempts.incrementAndGet();
+            throw new IllegalStateException("permission denied");
+        }, new long[]{0L, 0L}));
+        assertEquals(1, businessAttempts.get());
+    }
+
+    @Test
+    void transient_openlist_failure_classifier_covers_timeouts_and_gateway_errors() {
+        assertTrue(OpenList.isTransientOpenListFailure(new IllegalStateException("Read timed out")));
+        assertTrue(OpenList.isTransientOpenListFailure(new IllegalStateException("url status: 503")));
+        assertTrue(OpenList.isTransientOpenListFailure(
+                new IllegalStateException("wrapper", new java.net.SocketTimeoutException("timeout"))));
+        assertFalse(OpenList.isTransientOpenListFailure(new IllegalStateException("permission denied")));
+    }
+
+    @Test
+    void timeout_file_snapshot_tracks_count_and_total_size() {
+        OpenList.TimeoutFileSnapshot snapshot = OpenList.snapshotTimeoutFiles(Map.of(
+                "/show/ep03.mkv", 1_000L,
+                "/show/ep03-extra.mp4", 20L));
+
+        assertEquals(2, snapshot.videoCount());
+        assertEquals(1_020L, snapshot.totalBytes());
+        assertEquals(2, snapshot.files().size());
+    }
+
+    @Test
+    void timeout_snapshot_requires_every_expected_collection_episode() {
+        OpenList openList = new OpenList();
+        OpenList.TimeoutFileSnapshot snapshot = OpenList.snapshotTimeoutFiles(Map.of(
+                "/show/Show S03E03.mkv", 1_000L));
+
+        assertTrue(openList.snapshotCoversExpectedEpisodes(snapshot, List.of(3.0)));
+        assertFalse(openList.snapshotCoversExpectedEpisodes(snapshot, List.of(3.0, 4.0)));
     }
 
 }

@@ -56,6 +56,12 @@ public class Config implements Serializable {
     private Integer downloadRetry;
 
     /**
+     * RSS 获取重试次数
+     */
+    @Schema(description = "RSS 获取重试次数")
+    private Integer rssRetry;
+
+    /**
      * 下载工具 地址
      */
     @Schema(description = "下载工具地址")

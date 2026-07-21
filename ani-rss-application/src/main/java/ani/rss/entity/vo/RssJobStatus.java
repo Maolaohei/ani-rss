@@ -38,6 +38,18 @@ public class RssJobStatus implements Serializable {
     @Schema(description = "已运行毫秒")
     private Long elapsedMs;
 
+    @Schema(description = "本轮订阅总数")
+    private Integer subscriptionTotal;
+
+    @Schema(description = "本轮正在处理的订阅数")
+    private Integer subscriptionActive;
+
+    @Schema(description = "本轮已处理的订阅数")
+    private Integer subscriptionCompleted;
+
+    @Schema(description = "本轮处理失败的订阅数")
+    private Integer subscriptionFailed;
+
     @Schema(description = "最近一次任务完成时间戳 ms")
     private Long lastFinishedAt;
 

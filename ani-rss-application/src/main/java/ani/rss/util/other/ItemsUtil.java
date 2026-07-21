@@ -1,6 +1,7 @@
 package ani.rss.util.other;
 
 import ani.rss.commons.CacheUtils;
+import ani.rss.commons.ExceptionUtils;
 import ani.rss.commons.FileUtils;
 import ani.rss.entity.Ani;
 import ani.rss.entity.Config;
@@ -30,6 +31,14 @@ import java.util.stream.Collectors;
 
 @Slf4j
 public class ItemsUtil {
+
+    private static final Object[] RSS_FETCH_LOCKS = new Object[32];
+    private static final long RSS_CACHE_TTL_MS = TimeUnit.SECONDS.toMillis(45);
+
+    static {
+        Arrays.setAll(RSS_FETCH_LOCKS, ignored -> new Object());
+    }
+    private static final long RSS_LAST_SUCCESS_TTL_MS = TimeUnit.MINUTES.toMillis(15);
 
     /**
      * 获取视频列表
@@ -314,41 +323,72 @@ public class ItemsUtil {
      */
     public static String getRss(String url) {
         String cacheKey = "rss:" + url;
+        String lastSuccessKey = "rss:last-success:" + url;
         String cached = CacheUtils.get(cacheKey);
         if (StrUtil.isNotBlank(cached)) {
             return cached;
         }
 
-        Config config = ConfigUtil.CONFIG;
-        int retry = config.getDownloadRetry();
-
-        for (int i = 1; i <= retry; i++) {
-            try {
-                String xml = HttpReq.thenClose(
-                        HttpReq.get(url).timeout(config.getRssTimeout() * 1000),
-                        res -> {
-                            HttpReq.assertStatus(res);
-                            HttpReq.assertXml(res);
-                            return res.body();
-                        });
-
-                Assert.notBlank(xml, "xml is blank");
-                boolean isXml = StrUtil.startWith(xml, '<');
-                Assert.isTrue(isXml, "xml error");
-
-                // 成功才缓存 45 秒；失败不缓存
-                CacheUtils.put(cacheKey, xml, TimeUnit.SECONDS.toMillis(45));
-                return xml;
-            } catch (Exception e) {
-                if (i < retry) {
-                    log.warn("RSS获取失败 ({}), 将重试 ({}/{}): {}", url, i, retry, e.getMessage());
-                    ThreadUtil.sleep(2000);
-                } else {
-                    throw e;
+        Object lock = RSS_FETCH_LOCKS[Math.floorMod(Objects.hashCode(url), RSS_FETCH_LOCKS.length)];
+        synchronized (lock) {
+                cached = CacheUtils.get(cacheKey);
+                if (StrUtil.isNotBlank(cached)) {
+                    return cached;
                 }
-            }
+
+                Config config = ConfigUtil.CONFIG;
+                int retry = Math.max(1, ObjectUtil.defaultIfNull(config.getRssRetry(), 3));
+                int timeoutSeconds = Math.max(1, ObjectUtil.defaultIfNull(config.getRssTimeout(), 20));
+                Exception lastError = null;
+
+                for (int attempt = 1; attempt <= retry; attempt++) {
+                    try {
+                        String xml = HttpReq.thenClose(
+                                HttpReq.get(url).timeout(timeoutSeconds * 1000),
+                                res -> {
+                                    HttpReq.assertStatus(res);
+                                    HttpReq.assertXml(res);
+                                    return res.body();
+                                });
+
+                        Assert.notBlank(xml, "xml is blank");
+                        Assert.isTrue(StrUtil.startWith(xml, '<'), "xml error");
+
+                        CacheUtils.put(cacheKey, xml, RSS_CACHE_TTL_MS);
+                        CacheUtils.put(lastSuccessKey, xml, RSS_LAST_SUCCESS_TTL_MS);
+                        if (attempt > 1) {
+                            log.info("RSS获取重试恢复 ({}) attempt={}/{}", url, attempt, retry);
+                        }
+                        return xml;
+                    } catch (Exception e) {
+                        lastError = e;
+                        if (attempt < retry) {
+                            long delayMs = rssRetryDelayMs(attempt, url);
+                            log.warn("RSS获取失败 ({}), 将重试 ({}/{}) delayMs={}: {}",
+                                    url, attempt, retry, delayMs, ExceptionUtils.getMessage(e));
+                            ThreadUtil.sleep(delayMs);
+                        }
+                    }
+                }
+
+                String lastSuccess = CacheUtils.get(lastSuccessKey);
+                if (StrUtil.isNotBlank(lastSuccess)) {
+                    log.warn("RSS获取重试耗尽，临时使用最近成功结果 ({}): {}",
+                            url, lastError == null ? "unknown" : ExceptionUtils.getMessage(lastError));
+                    return lastSuccess;
+                }
+                if (lastError instanceof RuntimeException runtimeException) {
+                    throw runtimeException;
+                }
+            throw new IllegalStateException("RSS获取失败: " + url, lastError);
         }
-        throw new IllegalStateException("RSS获取失败: " + url);
+    }
+
+    static long rssRetryDelayMs(int failedAttempt, String url) {
+        int exponent = Math.max(0, Math.min(failedAttempt - 1, 3));
+        long baseMs = Math.min(10_000L, 1000L << exponent);
+        long jitterMs = Math.floorMod(Objects.hashCode(url), 251);
+        return baseMs + jitterMs;
     }
 
     public static synchronized List<Integer> omitList(Ani ani, List<Item> items) {
