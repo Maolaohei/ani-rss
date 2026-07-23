@@ -66,7 +66,7 @@ public class TmdbUtils {
      * @return 名称
      */
     public static String getFinalName(Tmdb tmdb) {
-        boolean tmdbOriginalNameEnable = CONFIG.getTmdbOriginalName();
+        boolean tmdbOriginalNameEnable = Boolean.TRUE.equals(ConfigUtil.CONFIG.getTmdbOriginalName());
 
         String themoviedbName = tmdbOriginalNameEnable ?
                 tmdb.getOriginalName() :

@@ -63,6 +63,7 @@ export let configData = {
     "tmdbIdPlexMode": false,
     "tmdbLanguage": "zh-CN",
     "tmdbRomaji": false,
+    "tmdbOriginalName": false,
     "ipWhitelist": false,
     "ipWhitelistStr": "",
     "omit": true,

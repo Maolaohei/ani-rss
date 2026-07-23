@@ -12,8 +12,17 @@
     <el-form-item label="地址">
       <el-input v-model:model-value="props.config.downloadToolHost" placeholder="http://192.168.1.x:8080"/>
     </el-form-item>
-    <el-form-item v-if="props.config.downloadToolType === 'Aria2'" label="RPC 密钥">
-      <el-input v-model:model-value="props.config.downloadToolPassword" placeholder="" show-password>
+    <el-form-item v-if="props.config.downloadToolType === 'qBittorrent'" label="ApiKey">
+      <el-input v-model.trim="props.config.downloadToolPassword" placeholder="qbt_xxxx" show-password>
+        <template #prefix>
+          <el-icon class="el-input__icon">
+            <Key/>
+          </el-icon>
+        </template>
+      </el-input>
+    </el-form-item>
+    <el-form-item v-else-if="props.config.downloadToolType === 'Aria2'" label="RPC 密钥">
+      <el-input v-model.trim="props.config.downloadToolPassword" placeholder="" show-password>
         <template #prefix>
           <el-icon class="el-input__icon">
             <Key/>
