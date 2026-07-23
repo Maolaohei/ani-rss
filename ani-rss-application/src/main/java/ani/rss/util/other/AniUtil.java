@@ -511,6 +511,7 @@ public class AniUtil {
                         new Tmdb()
                                 .setId("")
                                 .setName("")
+                                .setOriginalName("")
                                 .setDate(new Date())
                 )
                 .setUpload(config.getUpload())
