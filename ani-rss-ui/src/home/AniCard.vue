@@ -33,7 +33,8 @@
           >
             健康 {{ item.healthScore }}
           </el-tag>
-          <el-text v-else
+          <!-- 与历史一致：仅在关闭「显示评分」且没有健康分时，才用 RSS 地址当副标题 -->
+          <el-text v-else-if="!showScore"
                    line-clamp="2"
                    size="small"
                    class="list-card-url">
