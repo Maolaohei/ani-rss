@@ -639,6 +639,7 @@ public class RssTask implements BaseTask {
         Boolean residualCleaning = null;
         String residualMessage = null;
         java.util.List<String> residualSamples = null;
+        java.util.List<ani.rss.entity.vo.ResidualPreviewItem> residualItems = null;
         if (residualSupported) {
             try {
                 OpenList.ResidualSnapshot snap = SpringUtil.getBean(OpenList.class).getResidualSnapshot();
@@ -650,6 +651,7 @@ public class RssTask implements BaseTask {
                     residualCleaning = snap.getCleaning();
                     residualMessage = snap.getMessage();
                     residualSamples = snap.getSamples();
+                    residualItems = toResidualPreviewItems(snap.getItems());
                 }
             } catch (Exception ignored) {
                 residualMessage = "OpenList 残留快照不可用";
@@ -719,6 +721,7 @@ public class RssTask implements BaseTask {
                 .setResidualCleaning(residualCleaning)
                 .setResidualMessage(residualMessage)
                 .setResidualSamples(residualSamples)
+                .setResidualItems(residualItems)
                 .setTasks(tasks);
     }
     private static List<RssJobItem> buildTaskItems(
@@ -871,6 +874,29 @@ public class RssTask implements BaseTask {
             return "启动中";
         }
         return "空闲";
+    }
+
+    private static List<ani.rss.entity.vo.ResidualPreviewItem> toResidualPreviewItems(List<OpenList.ResidualItem> items) {
+        if (items == null || items.isEmpty()) {
+            return List.of();
+        }
+        List<ani.rss.entity.vo.ResidualPreviewItem> out = new ArrayList<>(items.size());
+        for (OpenList.ResidualItem item : items) {
+            if (item == null) {
+                continue;
+            }
+            out.add(new ani.rss.entity.vo.ResidualPreviewItem()
+                    .setId(item.getId())
+                    .setName(item.getName())
+                    .setState(item.getState())
+                    .setKind(item.getKind())
+                    .setProgress(item.getProgress())
+                    .setTotalBytes(item.getTotalBytes())
+                    .setError(item.getError())
+                    .setProtectedCurrent(item.getProtectedCurrent())
+                    .setAction(item.getAction()));
+        }
+        return out;
     }
 
     /**

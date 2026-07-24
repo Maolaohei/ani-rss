@@ -80,9 +80,10 @@ public class RssJobController extends BaseController {
             int total = snap == null ? 0 : snap.getTotalCount();
             int active = snap == null ? 0 : snap.getActiveCount();
             int terminal = snap == null ? 0 : snap.getTerminalCount();
+            int preview = snap == null || snap.getItems() == null ? 0 : snap.getItems().size();
             result.setMessage(total == 0
                     ? "无离线残留"
-                    : ("扫描完成: 进行中 " + active + " / 终态 " + terminal));
+                    : ("扫描完成: 进行中 " + active + " / 终态 " + terminal + "（预览 " + preview + " 条）"));
             return result;
         } catch (Exception e) {
             Result<RssJobStatus> result = Result.error(RssTask.getJobStatus());

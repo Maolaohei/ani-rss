@@ -1708,35 +1708,98 @@ public class OpenList implements BaseDownload {
             throw new IllegalStateException("OpenList 未登录");
         }
         List<OpenListTaskInfo> tasks = listAllOfflineTasksStrict();
-        int active = 0;
-        int terminal = 0;
-        List<String> samples = new ArrayList<>();
-        for (OpenListTaskInfo task : tasks) {
-            if (task == null || StrUtil.isBlank(task.getId())) {
-                continue;
-            }
-            ResidualKind kind = classifyResidual(task.getState());
-            if (kind == ResidualKind.ACTIVE) {
-                active++;
-            } else {
-                terminal++;
-            }
-            if (samples.size() < 5) {
-                String name = StrUtil.blankToDefault(task.getName(), task.getId());
-                samples.add(StrUtil.maxLength(name, 80));
-            }
-        }
-        ResidualSnapshot snap = new ResidualSnapshot()
-                .setActiveCount(active)
-                .setTerminalCount(terminal)
-                .setTotalCount(active + terminal)
-                .setScannedAt(System.currentTimeMillis())
-                .setSamples(samples)
-                .setCleaning(residualCleaning.get())
-                .setMessage(active + terminal == 0 ? "无离线残留" : null);
+        ResidualSnapshot snap = buildResidualSnapshot(tasks, currentInfoHash.get(), residualCleaning.get(), System.currentTimeMillis());
         residualSnapshot.set(snap);
         return snap;
     }
+
+    /**
+     * 从离线任务列表构建残留快照（纯函数，便于单测）。
+     * 预览最多保留 {@link #RESIDUAL_PREVIEW_LIMIT} 条明细；samples 仍截断前 5 条名称。
+     */
+    static ResidualSnapshot buildResidualSnapshot(List<OpenListTaskInfo> tasks,
+                                                  String protectHash,
+                                                  boolean cleaning,
+                                                  long scannedAt) {
+        int active = 0;
+        int terminal = 0;
+        List<String> samples = new ArrayList<>();
+        List<ResidualItem> items = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        if (tasks != null) {
+            for (OpenListTaskInfo task : tasks) {
+                if (task == null || StrUtil.isBlank(task.getId()) || !seen.add(task.getId())) {
+                    continue;
+                }
+                ResidualKind kind = classifyResidual(task.getState());
+                if (kind == ResidualKind.ACTIVE) {
+                    active++;
+                } else {
+                    terminal++;
+                }
+                ResidualItem item = toResidualItem(task, protectHash);
+                if (items.size() < RESIDUAL_PREVIEW_LIMIT) {
+                    items.add(item);
+                }
+                if (samples.size() < 5) {
+                    samples.add(StrUtil.maxLength(item.getName(), 80));
+                }
+            }
+        }
+        int total = active + terminal;
+        String message;
+        if (total == 0) {
+            message = "无离线残留";
+        } else {
+            message = StrFormatter.format("进行中 {} / 终态 {}（可预览 {} 条）",
+                    active, terminal, items.size());
+        }
+        return new ResidualSnapshot()
+                .setActiveCount(active)
+                .setTerminalCount(terminal)
+                .setTotalCount(total)
+                .setScannedAt(scannedAt)
+                .setSamples(samples)
+                .setItems(items)
+                .setCleaning(cleaning)
+                .setMessage(message);
+    }
+
+    static ResidualItem toResidualItem(OpenListTaskInfo task, String protectHash) {
+        ResidualKind kind = classifyResidual(task == null ? null : task.getState());
+        String id = task == null ? "" : StrUtil.blankToDefault(task.getId(), "");
+        String name = task == null ? "" : StrUtil.blankToDefault(task.getName(), id);
+        boolean protectedCurrent = task != null && taskNameContainsHash(task.getName(), protectHash);
+        String stateName = task != null && task.getState() != null ? task.getState().name() : "Unknown";
+        String error = task == null ? null : StrUtil.blankToDefault(task.getError(), null);
+        Integer progress = task == null ? null : task.getProgress();
+        String totalBytes = task == null ? null : task.getTotalBytes();
+        return new ResidualItem()
+                .setId(id)
+                .setName(StrUtil.maxLength(name, 160))
+                .setState(stateName)
+                .setKind(kind.name())
+                .setProgress(progress)
+                .setTotalBytes(totalBytes)
+                .setError(error == null ? null : StrUtil.maxLength(error, 200))
+                .setProtectedCurrent(protectedCurrent)
+                .setAction(residualActionLabel(kind, protectedCurrent));
+    }
+
+    /**
+     * 预览用动作文案：清理时会做什么。
+     */
+    static String residualActionLabel(ResidualKind kind, boolean protectedCurrent) {
+        if (protectedCurrent) {
+            return "保护中（当前 RSS 等待，清理时跳过）";
+        }
+        if (kind == ResidualKind.ACTIVE) {
+            return "取消并删除记录";
+        }
+        return "删除记录";
+    }
+
+    private static final int RESIDUAL_PREVIEW_LIMIT = 30;
 
     /**
      * 清理 OpenList 离线残留。
@@ -1863,6 +1926,8 @@ public class OpenList implements BaseDownload {
         private Boolean cleaning;
         private String message;
         private List<String> samples;
+        /** 结构化预览明细（最多 {@link #RESIDUAL_PREVIEW_LIMIT} 条） */
+        private List<ResidualItem> items;
 
         public static ResidualSnapshot empty() {
             return new ResidualSnapshot()
@@ -1870,8 +1935,25 @@ public class OpenList implements BaseDownload {
                     .setTerminalCount(0)
                     .setTotalCount(0)
                     .setCleaning(false)
-                    .setSamples(List.of());
+                    .setSamples(List.of())
+                    .setItems(List.of());
         }
+    }
+
+    @lombok.Data
+    @lombok.experimental.Accessors(chain = true)
+    public static class ResidualItem implements java.io.Serializable {
+        private String id;
+        private String name;
+        private String state;
+        /** ACTIVE / TERMINAL */
+        private String kind;
+        private Integer progress;
+        private String totalBytes;
+        private String error;
+        private Boolean protectedCurrent;
+        /** 清理时将执行的动作说明 */
+        private String action;
     }
 
     @lombok.Data

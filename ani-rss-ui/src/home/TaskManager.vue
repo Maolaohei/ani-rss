@@ -72,11 +72,31 @@
       </div>
       <el-empty v-else description="当前没有可观察任务" :image-size="80"/>
 
+      <div v-if="residualPreview.length" class="residual-preview">
+        <div class="residual-preview-head">
+          <span class="residual-preview-title">残留预览</span>
+          <span class="muted">共 {{ residualCountText }}，展示 {{ residualPreview.length }} 条</span>
+        </div>
+        <div v-for="row in residualPreview" :key="row.id || row.name" class="residual-row">
+          <div class="residual-row-main">
+            <el-tag size="small" :type="residualKindTag(row)">{{ residualKindText(row) }}</el-tag>
+            <el-tag v-if="row.protectedCurrent" size="small" type="success" style="margin-left: 6px;">保护中</el-tag>
+            <span class="residual-name" :title="row.name">{{ row.name || row.id || '-' }}</span>
+          </div>
+          <div class="residual-row-meta">
+            <span>{{ row.state || '-' }}</span>
+            <span v-if="row.progress != null">进度 {{ row.progress }}%</span>
+            <span class="residual-action">{{ row.action || residualDefaultAction(row) }}</span>
+          </div>
+          <div v-if="row.error" class="residual-error">{{ row.error }}</div>
+        </div>
+      </div>
+
       <el-alert
           type="info"
           :closable="false"
           show-icon
-          title="可同时看到：运行中 RSS、待执行手动刷新、OpenList 当前离线占用、残留摘要、上一轮已处理记录。取消只对可取消条目生效；残留请用清理残留。"
+          title="可同时看到：运行中 RSS、待执行手动刷新、OpenList 当前离线占用、残留摘要/预览、上一轮已处理记录。取消只对可取消条目生效；残留请先扫描再一键清理。"
           style="margin-top: 12px;"
       />
       <el-alert
@@ -178,8 +198,41 @@ function emptyStatus() {
     residualCleaning: false,
     residualMessage: null,
     residualSamples: [],
+    residualItems: [],
     tasks: []
   }
+}
+
+const residualPreview = computed(() => {
+  const items = status.value.residualItems
+  return Array.isArray(items) ? items : []
+})
+
+const residualCountText = computed(() => {
+  const total = Number(status.value.residualTotalCount || 0)
+  const active = Number(status.value.residualActiveCount || 0)
+  const terminal = Number(status.value.residualTerminalCount || 0)
+  const count = total > 0 ? total : (active + terminal)
+  return `进行中 ${active} / 终态 ${terminal} / 合计 ${count}`
+})
+
+const residualKindText = (row) => {
+  if (!row) return '-'
+  if (row.kind === 'ACTIVE') return '进行中'
+  if (row.kind === 'TERMINAL') return '终态'
+  return row.kind || '-'
+}
+
+const residualKindTag = (row) => {
+  if (row?.kind === 'ACTIVE') return 'warning'
+  if (row?.protectedCurrent) return 'success'
+  return 'info'
+}
+
+const residualDefaultAction = (row) => {
+  if (row?.protectedCurrent) return '保护中（清理时跳过）'
+  if (row?.kind === 'ACTIVE') return '取消并删除记录'
+  return '删除记录'
 }
 
 const taskList = computed(() => {
@@ -468,10 +521,16 @@ const scanResidual = async () => {
 }
 
 const cleanResidual = async () => {
+  const active = Number(status.value.residualActiveCount || 0)
+  const terminal = Number(status.value.residualTerminalCount || 0)
+  const previewN = residualPreview.value.length
+  const detail = previewN > 0
+      ? `当前扫描：进行中 ${active} / 终态 ${terminal}（预览 ${previewN} 条）。`
+      : `当前扫描：进行中 ${active} / 终态 ${terminal}。`
   try {
     await ElMessageBox.confirm(
-        '将取消 OpenList 进行中离线任务并删除记录；已成功任务仅删记录。当前 RSS 正在等待的 hash 会跳过。是否继续？',
-        '清理残留',
+        `${detail}将取消进行中离线任务并删除记录；已成功任务仅删记录。当前 RSS 正在等待的 hash 会跳过。是否继续？`,
+        '一键清理残留',
         {type: 'warning', confirmButtonText: '清理', cancelButtonText: '取消'}
     )
   } catch (_) {
@@ -609,6 +668,73 @@ defineExpose({show})
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.residual-preview {
+  margin-top: 14px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--el-fill-color-light);
+  max-height: 280px;
+  overflow: auto;
+}
+
+.residual-preview-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.residual-preview-title {
+  font-weight: 600;
+}
+
+.residual-row {
+  padding: 8px 0;
+  border-top: 1px dashed var(--el-border-color-lighter);
+}
+
+.residual-row:first-of-type {
+  border-top: none;
+}
+
+.residual-row-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.residual-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.residual-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.residual-action {
+  color: var(--el-color-warning);
+}
+
+.residual-error {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--el-color-danger);
+  word-break: break-all;
 }
 
 @media (max-width: 640px) {

@@ -181,6 +181,99 @@ class OpenListResidualPolicyTest {
         assertEquals(Boolean.FALSE, empty.getCleaning());
         assertNotNull(empty.getSamples());
         assertTrue(empty.getSamples().isEmpty());
+        assertNotNull(empty.getItems());
+        assertTrue(empty.getItems().isEmpty());
+    }
+
+    @Test
+    void buildResidualSnapshot_classifies_and_marks_protected_preview() {
+        String protectHash = "abcdef1234";
+        List<OpenListTaskInfo> tasks = List.of(
+                new OpenListTaskInfo()
+                        .setId("t1")
+                        .setName("magnet:?xt=urn:btih:ABCDEF1234")
+                        .setState(OpenListTaskInfo.State.Running)
+                        .setProgress(40),
+                new OpenListTaskInfo()
+                        .setId("t2")
+                        .setName("old-done.task")
+                        .setState(OpenListTaskInfo.State.Succeeded)
+                        .setError(null),
+                new OpenListTaskInfo()
+                        .setId("t3")
+                        .setName("failed-offline")
+                        .setState(OpenListTaskInfo.State.Failed)
+                        .setError("disk full"),
+                // 无 id 应跳过
+                new OpenListTaskInfo().setId("").setName("skip").setState(OpenListTaskInfo.State.Running),
+                // 重复 id 应去重
+                new OpenListTaskInfo().setId("t2").setName("dup").setState(OpenListTaskInfo.State.Failed)
+        );
+
+        OpenList.ResidualSnapshot snap = OpenList.buildResidualSnapshot(tasks, protectHash, false, 123L);
+
+        assertEquals(1, snap.getActiveCount());
+        assertEquals(2, snap.getTerminalCount());
+        assertEquals(3, snap.getTotalCount());
+        assertEquals(123L, snap.getScannedAt());
+        assertEquals(Boolean.FALSE, snap.getCleaning());
+        assertEquals(3, snap.getItems().size());
+        assertTrue(snap.getMessage().contains("进行中 1"));
+        assertTrue(snap.getMessage().contains("终态 2"));
+
+        OpenList.ResidualItem protectedItem = snap.getItems().stream()
+                .filter(i -> "t1".equals(i.getId()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals("ACTIVE", protectedItem.getKind());
+        assertEquals(Boolean.TRUE, protectedItem.getProtectedCurrent());
+        assertTrue(protectedItem.getAction().contains("保护"));
+        assertEquals(40, protectedItem.getProgress());
+
+        OpenList.ResidualItem terminal = snap.getItems().stream()
+                .filter(i -> "t2".equals(i.getId()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals("TERMINAL", terminal.getKind());
+        assertEquals(Boolean.FALSE, terminal.getProtectedCurrent());
+        assertEquals("删除记录", terminal.getAction());
+
+        OpenList.ResidualItem failed = snap.getItems().stream()
+                .filter(i -> "t3".equals(i.getId()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals("disk full", failed.getError());
+        assertEquals("删除记录", failed.getAction());
+    }
+
+    @Test
+    void buildResidualSnapshot_empty_tasks() {
+        OpenList.ResidualSnapshot snap = OpenList.buildResidualSnapshot(List.of(), null, true, 1L);
+        assertEquals(0, snap.getTotalCount());
+        assertEquals("无离线残留", snap.getMessage());
+        assertTrue(snap.getItems().isEmpty());
+        assertEquals(Boolean.TRUE, snap.getCleaning());
+    }
+
+    @Test
+    void residualActionLabel_matrix() {
+        assertEquals("保护中（当前 RSS 等待，清理时跳过）",
+                OpenList.residualActionLabel(OpenList.ResidualKind.ACTIVE, true));
+        assertEquals("取消并删除记录",
+                OpenList.residualActionLabel(OpenList.ResidualKind.ACTIVE, false));
+        assertEquals("删除记录",
+                OpenList.residualActionLabel(OpenList.ResidualKind.TERMINAL, false));
+        assertEquals("保护中（当前 RSS 等待，清理时跳过）",
+                OpenList.residualActionLabel(OpenList.ResidualKind.TERMINAL, true));
+    }
+
+    @Test
+    void toResidualItem_null_safe() {
+        OpenList.ResidualItem item = OpenList.toResidualItem(null, "abc");
+        assertEquals("", item.getId());
+        assertEquals("TERMINAL", item.getKind());
+        assertEquals("Unknown", item.getState());
+        assertEquals(Boolean.FALSE, item.getProtectedCurrent());
     }
 
     @Test

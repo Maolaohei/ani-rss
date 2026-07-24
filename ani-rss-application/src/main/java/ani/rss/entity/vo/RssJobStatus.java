@@ -113,6 +113,9 @@ public class RssJobStatus implements Serializable {
     @Schema(description = "残留任务样例(最多5条)")
     private List<String> residualSamples;
 
+    @Schema(description = "残留任务预览明细(最多30条)")
+    private List<ResidualPreviewItem> residualItems;
+
     @Schema(description = "可观察任务列表（running/pending/openlist/residual/last-finished）")
     private List<RssJobItem> tasks;
 }
