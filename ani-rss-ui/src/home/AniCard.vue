@@ -24,6 +24,15 @@
               {{ item['score'].toFixed(1) }}
             </h4>
           </div>
+          <el-tag
+              v-if="item.healthScore != null"
+              size="small"
+              :type="healthTagType"
+              class="list-card-health"
+              :title="healthTooltip"
+          >
+            健康 {{ item.healthScore }}
+          </el-tag>
           <el-text v-else
                    line-clamp="2"
                    size="small"
@@ -93,6 +102,7 @@
 </template>
 
 <script setup>
+import {computed} from "vue";
 import {isNotMobile, showLastDownloadTime, showPlaylist, showScore, toApiFile} from "@/js/global.js";
 import {Delete, Edit as EditIcon, Files} from "@element-plus/icons-vue";
 
@@ -114,6 +124,19 @@ let decodeURLComponentSafe = (str) => {
 
 const emit = defineEmits(['edit', 'playlist', 'cover', 'del', 'rate'])
 let props = defineProps(["item"])
+
+const healthTagType = computed(() => {
+  const l = props.item?.healthLevel
+  if (l === 'good' || l === 'completed') return 'success'
+  if (l === 'warn') return 'warning'
+  if (l === 'bad') return 'danger'
+  return 'info'
+})
+const healthTooltip = computed(() => {
+  const rs = props.item?.healthReasons
+  if (Array.isArray(rs) && rs.length) return rs.join('；')
+  return '运维健康分（非 BGM 评分）'
+})
 </script>
 
 <style scoped>

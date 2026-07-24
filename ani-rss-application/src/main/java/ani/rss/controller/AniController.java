@@ -26,6 +26,7 @@ import cn.hutool.core.lang.Assert;
 import cn.hutool.core.lang.UUID;
 import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.core.util.ObjectUtil;
+import cn.hutool.core.util.StrUtil;
 import io.swagger.v3.oas.annotations.Operation;
 import jakarta.annotation.Resource;
 import jakarta.servlet.http.HttpServletRequest;
@@ -323,6 +324,7 @@ public class AniController extends BaseController {
         }
 
         int index = 0;
+        long now = System.currentTimeMillis();
         for (Ani ani : aniList) {
             ani.setSort(index++);
             String title = ani.getTitle();
@@ -332,6 +334,15 @@ public class AniController extends BaseController {
             Date releaseDate = ani.getReleaseDate();
             int week = DateUtil.dayOfWeek(releaseDate) - 1;
             String weekLabel = weeks.get(week);
+
+            // 运维健康分（不落盘）；列表阶段不做 RSS 漏集探测，omit=0
+            try {
+                SubscriptionHealth.Score health = SubscriptionHealth.compute(ani, 0, now);
+                ani.setHealthScore(health.score())
+                        .setHealthLevel(health.level())
+                        .setHealthReasons(health.reasons());
+            } catch (Exception ignored) {
+            }
 
             ani
                     .setPinyin(pinyin)
@@ -457,12 +468,111 @@ public class AniController extends BaseController {
         // 预览专用：合集折叠聚合
         items = ItemsUtil.groupCollectionForPreview(items);
 
-        Map<String, Object> map = Map.of(
-                "downloadPath", downloadPath,
-                "items", items,
-                "omitList", omitList
-        );
+        // 洗版预览：取首个未下载主 RSS 条目估算将删除内容
+        List<Map<String, String>> washPreview = new ArrayList<>();
+        try {
+            Optional<Item> washItem = items.stream()
+                    .filter(it -> it != null && !Boolean.TRUE.equals(it.getLocal()))
+                    .filter(it -> Boolean.TRUE.equals(it.getMaster()) || it.getMaster() == null)
+                    .findFirst();
+            if (washItem.isEmpty()) {
+                washItem = items.stream().filter(it -> it != null && !Boolean.TRUE.equals(it.getLocal())).findFirst();
+            }
+            if (washItem.isPresent()) {
+                for (WashPreview.Candidate c : downloadService.previewStandbyDeletes(ani, washItem.get())) {
+                    washPreview.add(Map.of(
+                            "name", StrUtil.blankToDefault(c.name(), ""),
+                            "kind", StrUtil.blankToDefault(c.kind(), ""),
+                            "reason", StrUtil.blankToDefault(c.reason(), "")
+                    ));
+                }
+            }
+        } catch (Exception e) {
+            log.debug("洗版预览失败: {}", e.getMessage());
+        }
+
+        // 健康分（非 BGM 评分）
+        SubscriptionHealth.Score health = SubscriptionHealth.compute(ani, omitList == null ? 0 : omitList.size(), System.currentTimeMillis());
+
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("downloadPath", downloadPath);
+        map.put("items", items);
+        map.put("omitList", omitList);
+        map.put("washPreview", washPreview);
+        map.put("healthScore", health.score());
+        map.put("healthLevel", health.level());
+        map.put("healthReasons", health.reasons());
         return Result.success(map);
+    }
+
+    @Auth
+    @Operation(summary = "失败下载队列")
+    @PostMapping("/failedDownloadQueue")
+    public Result<List<FailedDownloadQueue.FailedItem>> failedDownloadQueue() {
+        return Result.success(FailedDownloadQueue.list());
+    }
+
+    @Auth
+    @Operation(summary = "移除失败队列条目")
+    @PostMapping("/failedDownloadQueueRemove")
+    public Result<Void> failedDownloadQueueRemove(@RequestBody Map<String, Object> body) {
+        String id = body == null || body.get("id") == null ? null : String.valueOf(body.get("id"));
+        if (StrUtil.isBlank(id)) {
+            return Result.error("id 不能为空");
+        }
+        boolean ok = FailedDownloadQueue.remove(id);
+        return ok ? Result.success("已移除") : Result.error("条目不存在");
+    }
+
+    @Auth
+    @Operation(summary = "清空失败队列")
+    @PostMapping("/failedDownloadQueueClear")
+    public Result<Void> failedDownloadQueueClear() {
+        int n = FailedDownloadQueue.clear();
+        return Result.success("已清空 " + n + " 条");
+    }
+
+    @Auth
+    @Operation(summary = "重试失败队列条目（触发对应订阅刷新）")
+    @PostMapping("/failedDownloadQueueRetry")
+    public Result<Void> failedDownloadQueueRetry(@RequestBody Map<String, Object> body) {
+        String id = body == null || body.get("id") == null ? null : String.valueOf(body.get("id"));
+        if (StrUtil.isBlank(id)) {
+            return Result.error("id 不能为空");
+        }
+        Optional<FailedDownloadQueue.FailedItem> hit = FailedDownloadQueue.list().stream()
+                .filter(i -> id.equals(i.getId()))
+                .findFirst();
+        if (hit.isEmpty()) {
+            return Result.error("条目不存在");
+        }
+        FailedDownloadQueue.FailedItem failed = hit.get();
+        Optional<Ani> aniOpt = AniUtil.getAniList().stream()
+                .filter(a -> Objects.equals(a.getId(), failed.getAniId()))
+                .findFirst();
+        if (aniOpt.isEmpty()) {
+            return Result.error("关联订阅不存在");
+        }
+        // 删除本地失败标记对应的种子缓存后触发订阅刷新，让 RSS 重新拉取
+        try {
+            Ani ani = aniOpt.get();
+            if (StrUtil.isNotBlank(failed.getInfoHash())) {
+                File torrentDir = TorrentUtil.getTorrentDir(ani);
+                File[] files = torrentDir.listFiles();
+                if (files != null) {
+                    for (File f : files) {
+                        if (f.getName().toLowerCase(Locale.ROOT).contains(failed.getInfoHash().toLowerCase(Locale.ROOT))) {
+                            FileUtil.del(f);
+                        }
+                    }
+                }
+            }
+            FailedDownloadQueue.remove(id);
+            String msg = RssTask.submitManualRefresh(List.of(ani));
+            return Result.success(StrUtil.blankToDefault(msg, "已触发重试刷新"));
+        } catch (Exception e) {
+            return Result.error("重试失败: " + ExceptionUtils.getMessage(e));
+        }
     }
 
     @Auth

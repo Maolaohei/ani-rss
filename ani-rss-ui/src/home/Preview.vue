@@ -108,9 +108,25 @@
             </template>
           </el-table-column>
         </el-table>
-        <div v-if="data['omitList'].length">
+        <div v-if="data['omitList'] && data['omitList'].length">
           <el-alert :title="`缺少集数: ${data['omitList'].slice(0,10).join('、')}`" type="warning" show-icon
                     :closable="false"/>
+        </div>
+        <div v-if="data.healthScore != null" style="margin-top: 8px;">
+          <el-alert
+              :type="healthAlertType"
+              show-icon
+              :closable="false"
+              :title="`运维健康 ${data.healthScore}（${healthLevelText}）${healthReasonText}`"
+          />
+        </div>
+        <div v-if="data.washPreview && data.washPreview.length" class="wash-preview">
+          <div class="wash-preview-title">洗版预览（将删除）</div>
+          <div v-for="(row, idx) in data.washPreview" :key="idx" class="wash-preview-row">
+            <el-tag size="small" :type="row.kind === 'torrent' ? 'warning' : 'info'">{{ row.kind === 'torrent' ? '种子' : '文件' }}</el-tag>
+            <span class="wash-name" :title="row.name">{{ row.name }}</span>
+            <span class="wash-reason">{{ row.reason }}</span>
+          </div>
         </div>
       </div>
     </div>
@@ -122,7 +138,7 @@
 </template>
 
 <script setup>
-import {ref} from "vue";
+import {computed, ref} from "vue";
 import {ElMessage} from "element-plus";
 import Popconfirm from "@/other/Popconfirm.vue";
 import * as http from "@/js/http.js";
@@ -151,9 +167,35 @@ const dialogVisible = ref(false)
 const data = ref({
   'downloadPath': '',
   'items': [],
-  'omitList': []
+  'omitList': [],
+  washPreview: [],
+  healthScore: null,
+  healthLevel: null,
+  healthReasons: []
 })
 const loading = ref(true)
+
+const healthLevelText = computed(() => {
+  const l = data.value.healthLevel
+  if (l === 'good') return '健康'
+  if (l === 'warn') return '注意'
+  if (l === 'bad') return '异常'
+  if (l === 'paused') return '停用'
+  if (l === 'completed') return '完结'
+  return l || '未知'
+})
+const healthAlertType = computed(() => {
+  const l = data.value.healthLevel
+  if (l === 'good' || l === 'completed') return 'success'
+  if (l === 'warn') return 'warning'
+  if (l === 'bad') return 'error'
+  return 'info'
+})
+const healthReasonText = computed(() => {
+  const rs = data.value.healthReasons
+  if (!Array.isArray(rs) || !rs.length) return ''
+  return ' · ' + rs.slice(0, 3).join('；')
+})
 
 let copy = (v) => {
   const input = document.createElement('input');
@@ -216,6 +258,41 @@ let props = defineProps(['ani'])
 <style scoped>
 .items-content {
   width: 100%;
+}
+
+.wash-preview {
+  margin-top: 10px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--el-fill-color-light);
+  max-height: 180px;
+  overflow: auto;
+}
+
+.wash-preview-title {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.wash-preview-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 12px;
+}
+
+.wash-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wash-reason {
+  color: var(--el-text-color-secondary);
 }
 
 .items-select-container {

@@ -120,4 +120,59 @@ public class RssJobController extends BaseController {
             return result;
         }
     }
+
+    @Auth
+    @Operation(summary = "扫描 OpenList 临时目录残留")
+    @PostMapping("/rssJobTempDirResidualScan")
+    public Result<RssJobStatus> rssJobTempDirResidualScan() {
+        if (!RssTask.isOpenListTool()) {
+            Result<RssJobStatus> result = Result.success(RssTask.getJobStatus());
+            result.setMessage("当前下载工具不是 OpenList/Alist，无需扫描临时目录");
+            return result;
+        }
+        try {
+            OpenList.TempDirResidualSnapshot snap = SpringUtil.getBean(OpenList.class).scanTempDirResiduals(true);
+            Result<RssJobStatus> result = Result.success(RssTask.getJobStatus());
+            int total = snap == null ? 0 : snap.getTotalCount();
+            int cleanable = snap == null ? 0 : snap.getCleanableCount();
+            int preview = snap == null || snap.getItems() == null ? 0 : snap.getItems().size();
+            result.setMessage(total == 0
+                    ? "无临时目录残留"
+                    : ("扫描完成: 可清理 " + cleanable + " / 合计 " + total + "（预览 " + preview + " 条）"));
+            return result;
+        } catch (Exception e) {
+            Result<RssJobStatus> result = Result.error(RssTask.getJobStatus());
+            result.setMessage("扫描临时目录失败: " + StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName()));
+            return result;
+        }
+    }
+
+    @Auth
+    @Operation(summary = "清理 OpenList 临时目录残留（仅 FORCE/JUNK）")
+    @PostMapping("/rssJobTempDirResidualClean")
+    public Result<RssJobStatus> rssJobTempDirResidualClean() {
+        if (!RssTask.isOpenListTool()) {
+            Result<RssJobStatus> result = Result.success(RssTask.getJobStatus());
+            result.setMessage("当前下载工具不是 OpenList/Alist，无需清理临时目录");
+            return result;
+        }
+        try {
+            OpenList.CleanResult cleaned = SpringUtil.getBean(OpenList.class).cleanTempDirResiduals();
+            String message = cleaned == null || StrUtil.isBlank(cleaned.getMessage())
+                    ? "临时目录清理完成"
+                    : cleaned.getMessage();
+            if (cleaned == null || !cleaned.isOk()) {
+                Result<RssJobStatus> result = Result.error(RssTask.getJobStatus());
+                result.setMessage(cleaned == null ? "清理临时目录失败: 未返回结果" : message);
+                return result;
+            }
+            Result<RssJobStatus> result = Result.success(RssTask.getJobStatus());
+            result.setMessage(message);
+            return result;
+        } catch (Exception e) {
+            Result<RssJobStatus> result = Result.error(RssTask.getJobStatus());
+            result.setMessage("清理临时目录失败: " + StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName()));
+            return result;
+        }
+    }
 }

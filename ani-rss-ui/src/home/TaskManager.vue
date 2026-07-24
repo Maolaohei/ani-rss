@@ -62,6 +62,10 @@
             <span>范围：{{ scopeText(item.scope) }}</span>
           </div>
           <div class="task-message">{{ item.message || '-' }}</div>
+          <div v-if="item.progress != null" class="task-progress">
+            <el-progress :percentage="Number(item.progress) || 0" :stroke-width="10"/>
+            <span v-if="item.etaMs != null" class="muted eta">ETA {{ formatDuration(item.etaMs, true) }}</span>
+          </div>
           <div class="task-grid">
             <div><span class="muted">已运行</span> {{ formatDuration(item.elapsedMs, item.status === 'running' || item.status === 'busy' || item.status === 'canceling') }}</div>
             <div><span class="muted">已处理时间</span> {{ formatTime(item.processedAt) }}</div>
@@ -72,9 +76,34 @@
       </div>
       <el-empty v-else description="当前没有可观察任务" :image-size="80"/>
 
+      <div v-if="Number(status.failedQueueCount || 0) > 0" class="failed-queue">
+        <div class="residual-preview-head">
+          <span class="residual-preview-title">失败队列 {{ status.failedQueueCount }}</span>
+          <div class="failed-queue-actions">
+            <el-button size="small" bg text :loading="failedLoading" @click="loadFailedQueue">刷新</el-button>
+            <el-button size="small" bg text type="danger" :loading="failedClearing" @click="clearFailedQueue">清空</el-button>
+          </div>
+        </div>
+        <div v-if="!failedItems.length" class="muted">点击刷新加载明细</div>
+        <div v-for="row in failedItems" :key="row.id" class="residual-row">
+          <div class="residual-row-main">
+            <el-tag size="small" type="danger">{{ row.errorCode || 'FAIL' }}</el-tag>
+            <span class="residual-name" :title="row.reName || row.title">{{ row.reName || row.title || row.id }}</span>
+            <el-button size="small" bg text type="primary" :loading="failedActingId === row.id" @click="retryFailed(row)">重试</el-button>
+            <el-button size="small" bg text @click="removeFailed(row)">移除</el-button>
+          </div>
+          <div class="residual-row-meta">
+            <span>{{ row.message || '-' }}</span>
+            <span v-if="row.suggestion">{{ row.suggestion }}</span>
+            <span v-if="row.attempts">×{{ row.attempts }}</span>
+            <span>{{ formatTime(row.failedAt) }}</span>
+          </div>
+        </div>
+      </div>
+
       <div v-if="residualPreview.length" class="residual-preview">
         <div class="residual-preview-head">
-          <span class="residual-preview-title">残留预览</span>
+          <span class="residual-preview-title">离线残留预览</span>
           <span class="muted">共 {{ residualCountText }}，展示 {{ residualPreview.length }} 条</span>
         </div>
         <div v-for="row in residualPreview" :key="row.id || row.name" class="residual-row">
@@ -92,11 +121,29 @@
         </div>
       </div>
 
+      <div v-if="tempDirPreview.length" class="residual-preview">
+        <div class="residual-preview-head">
+          <span class="residual-preview-title">临时目录残留</span>
+          <span class="muted">共 {{ tempDirCountText }}，展示 {{ tempDirPreview.length }} 条</span>
+        </div>
+        <div v-for="row in tempDirPreview" :key="row.id || row.name" class="residual-row">
+          <div class="residual-row-main">
+            <el-tag size="small" :type="tempDirKindTag(row)">{{ row.state || 'TEMP' }}</el-tag>
+            <el-tag v-if="row.protectedCurrent" size="small" type="success" style="margin-left: 6px;">保护中</el-tag>
+            <span class="residual-name" :title="row.name">{{ row.name || row.id || '-' }}</span>
+          </div>
+          <div class="residual-row-meta">
+            <span class="residual-action">{{ row.action || '-' }}</span>
+          </div>
+          <div v-if="row.error" class="residual-error">{{ row.error }}</div>
+        </div>
+      </div>
+
       <el-alert
           type="info"
           :closable="false"
           show-icon
-          title="可同时看到：运行中 RSS、待执行手动刷新、OpenList 当前离线占用、残留摘要/预览、上一轮已处理记录。取消只对可取消条目生效；残留请先扫描再一键清理。"
+          title="可同时看到：运行中 RSS、待执行手动刷新、OpenList 当前离线占用、离线/临时目录残留、失败队列、上一轮已处理记录。临时目录仅清理 FORCE/JUNK，保护活动下载。"
           style="margin-top: 12px;"
       />
       <el-alert
@@ -104,7 +151,7 @@
           type="warning"
           :closable="false"
           show-icon
-          title="清理残留会取消进行中离线任务并删除记录；已成功任务仅删记录。当前正在等待的 hash 会受保护。启动回扫只清终态。"
+          title="清理离线残留会取消进行中离线任务并删除记录；已成功任务仅删记录。当前正在等待的 hash 会受保护。启动回扫只清终态。"
           style="margin-top: 12px;"
       />
     </div>
@@ -118,7 +165,7 @@
             :loading="scanning"
             @click="scanResidual"
         >
-          扫描残留
+          扫描离线残留
         </el-button>
         <el-button
             v-if="status.residualSupported"
@@ -129,7 +176,27 @@
             :loading="cleaning"
             @click="cleanResidual"
         >
-          清理残留
+          清理离线残留
+        </el-button>
+        <el-button
+            v-if="status.residualSupported"
+            bg
+            text
+            :loading="scanningTemp"
+            @click="scanTempDir"
+        >
+          扫描临时目录
+        </el-button>
+        <el-button
+            v-if="status.residualSupported"
+            type="warning"
+            bg
+            text
+            :disabled="status.tempDirResidualCleaning"
+            :loading="cleaningTemp"
+            @click="cleanTempDir"
+        >
+          清理临时目录
         </el-button>
         <el-button
             type="danger"
@@ -161,6 +228,12 @@ const cancelingAll = ref(false)
 const cancelingId = ref('')
 const scanning = ref(false)
 const cleaning = ref(false)
+const scanningTemp = ref(false)
+const cleaningTemp = ref(false)
+const failedLoading = ref(false)
+const failedClearing = ref(false)
+const failedActingId = ref('')
+const failedItems = ref([])
 const status = ref(emptyStatus())
 
 function emptyStatus() {
@@ -185,6 +258,12 @@ function emptyStatus() {
     lastScope: null,
     message: '空闲',
     currentHash: null,
+    offlineTitle: null,
+    offlineProgress: null,
+    offlineState: null,
+    offlineDeadlineMs: null,
+    offlineEtaMs: null,
+    failedQueueCount: 0,
     source: null,
     pending: false,
     pendingTitle: null,
@@ -199,12 +278,25 @@ function emptyStatus() {
     residualMessage: null,
     residualSamples: [],
     residualItems: [],
+    tempDirResidualTotalCount: 0,
+    tempDirResidualCleanableCount: 0,
+    tempDirResidualProtectedCount: 0,
+    tempDirResidualKeepCount: 0,
+    tempDirResidualScannedAt: null,
+    tempDirResidualCleaning: false,
+    tempDirResidualMessage: null,
+    tempDirResidualItems: [],
     tasks: []
   }
 }
 
 const residualPreview = computed(() => {
   const items = status.value.residualItems
+  return Array.isArray(items) ? items : []
+})
+
+const tempDirPreview = computed(() => {
+  const items = status.value.tempDirResidualItems
   return Array.isArray(items) ? items : []
 })
 
@@ -216,16 +308,31 @@ const residualCountText = computed(() => {
   return `进行中 ${active} / 终态 ${terminal} / 合计 ${count}`
 })
 
+const tempDirCountText = computed(() => {
+  const total = Number(status.value.tempDirResidualTotalCount || 0)
+  const cleanable = Number(status.value.tempDirResidualCleanableCount || 0)
+  const protect = Number(status.value.tempDirResidualProtectedCount || 0)
+  const keep = Number(status.value.tempDirResidualKeepCount || 0)
+  return `可清理 ${cleanable} / 保护 ${protect} / 保留 ${keep} / 合计 ${total}`
+})
+
 const residualKindText = (row) => {
   if (!row) return '-'
   if (row.kind === 'ACTIVE') return '进行中'
   if (row.kind === 'TERMINAL') return '终态'
+  if (row.kind === 'TEMP_DIR') return '临时目录'
   return row.kind || '-'
 }
 
 const residualKindTag = (row) => {
   if (row?.kind === 'ACTIVE') return 'warning'
   if (row?.protectedCurrent) return 'success'
+  return 'info'
+}
+
+const tempDirKindTag = (row) => {
+  if (row?.state === 'FORCE_CLEAN' || row?.state === 'JUNK_CLEAN') return 'warning'
+  if (row?.state === 'PROTECT_ACTIVE' || row?.protectedCurrent) return 'success'
   return 'info'
 }
 
@@ -356,6 +463,7 @@ const kindText = (kind) => {
   if (kind === 'rss_pending') return 'RSS 待执行'
   if (kind === 'openlist_current') return 'OpenList 当前'
   if (kind === 'residual') return '残留摘要'
+  if (kind === 'tempdir_residual') return '临时目录残留'
   if (kind === 'last_finished') return '上一轮已处理'
   return kind || '-'
 }
@@ -423,6 +531,9 @@ const applyResponseStatus = (seq, data) => {
 const show = () => {
   dialogVisible.value = true
   pollStatus()
+  if (Number(status.value.failedQueueCount || 0) > 0 || failedItems.value.length) {
+    loadFailedQueue()
+  }
 }
 
 const refreshNow = async () => {
@@ -453,10 +564,11 @@ const pollStatus = async () => {
         || status.value.pending
         || status.value.openListBusy
         || status.value.residualCleaning
+        || status.value.tempDirResidualCleaning
         || status.value.cancelRequested
         // residual 终态/空闲不触发高频轮询；pending 仅指 RSS 排队
         || taskList.value.some(t => {
-          if (t.kind === 'residual' || t.kind === 'last_finished') return false
+          if (t.kind === 'residual' || t.kind === 'tempdir_residual' || t.kind === 'last_finished') return false
           return t.status === 'running' || t.status === 'busy' || t.status === 'canceling' || t.status === 'pending'
         })
     await sleep(busy ? 2000 : 4000)
@@ -530,7 +642,7 @@ const cleanResidual = async () => {
   try {
     await ElMessageBox.confirm(
         `${detail}将取消进行中离线任务并删除记录；已成功任务仅删记录。当前 RSS 正在等待的 hash 会跳过。是否继续？`,
-        '一键清理残留',
+        '一键清理离线残留',
         {type: 'warning', confirmButtonText: '清理', cancelButtonText: '取消'}
     )
   } catch (_) {
@@ -547,6 +659,101 @@ const cleanResidual = async () => {
   } finally {
     actionInFlight--
     cleaning.value = false
+  }
+}
+
+const scanTempDir = async () => {
+  const seq = nextRequestSeq()
+  actionInFlight++
+  scanningTemp.value = true
+  try {
+    const res = await http.rssJobTempDirResidualScan()
+    ElMessage.success(res.message || '临时目录扫描完成')
+    applyResponseStatus(seq, res?.data)
+  } catch (_) {
+  } finally {
+    actionInFlight--
+    scanningTemp.value = false
+  }
+}
+
+const cleanTempDir = async () => {
+  const cleanable = Number(status.value.tempDirResidualCleanableCount || 0)
+  const total = Number(status.value.tempDirResidualTotalCount || 0)
+  try {
+    await ElMessageBox.confirm(
+        `将仅删除 FORCE/JUNK 临时目录（可清理约 ${cleanable} / 合计 ${total}）。PROTECT/KEEP 不会自动删除。是否继续？`,
+        '清理临时目录残留',
+        {type: 'warning', confirmButtonText: '清理', cancelButtonText: '取消'}
+    )
+  } catch (_) {
+    return
+  }
+  const seq = nextRequestSeq()
+  actionInFlight++
+  cleaningTemp.value = true
+  try {
+    const res = await http.rssJobTempDirResidualClean()
+    ElMessage.success(res.message || '临时目录清理完成')
+    applyResponseStatus(seq, res?.data)
+  } catch (_) {
+  } finally {
+    actionInFlight--
+    cleaningTemp.value = false
+  }
+}
+
+const loadFailedQueue = async () => {
+  failedLoading.value = true
+  try {
+    const res = await http.failedDownloadQueue()
+    failedItems.value = Array.isArray(res?.data) ? res.data : []
+  } catch (_) {
+  } finally {
+    failedLoading.value = false
+  }
+}
+
+const clearFailedQueue = async () => {
+  try {
+    await ElMessageBox.confirm('清空全部失败队列条目？', '清空失败队列', {type: 'warning'})
+  } catch (_) {
+    return
+  }
+  failedClearing.value = true
+  try {
+    const res = await http.failedDownloadQueueClear()
+    ElMessage.success(res.message || '已清空')
+    failedItems.value = []
+    await fetchStatus()
+  } catch (_) {
+  } finally {
+    failedClearing.value = false
+  }
+}
+
+const removeFailed = async (row) => {
+  if (!row?.id) return
+  try {
+    const res = await http.failedDownloadQueueRemove(row.id)
+    ElMessage.success(res.message || '已移除')
+    failedItems.value = failedItems.value.filter(i => i.id !== row.id)
+    await fetchStatus()
+  } catch (_) {
+  }
+}
+
+const retryFailed = async (row) => {
+  if (!row?.id) return
+  failedActingId.value = row.id
+  try {
+    const res = await http.failedDownloadQueueRetry(row.id)
+    ElMessage.success(res.message || '已触发重试')
+    failedItems.value = failedItems.value.filter(i => i.id !== row.id)
+    await fetchStatus()
+  } catch (_) {
+  } finally {
+    failedActingId.value = ''
   }
 }
 
@@ -643,6 +850,37 @@ defineExpose({show})
 .task-message {
   margin-bottom: 8px;
   word-break: break-all;
+}
+
+.task-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.task-progress .el-progress {
+  flex: 1;
+}
+
+.eta {
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.failed-queue {
+  margin-top: 14px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--el-fill-color-blank);
+  max-height: 240px;
+  overflow: auto;
+}
+
+.failed-queue-actions {
+  display: flex;
+  gap: 6px;
 }
 
 .task-grid {

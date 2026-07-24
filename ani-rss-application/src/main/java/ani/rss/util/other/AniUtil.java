@@ -113,6 +113,12 @@ public class AniUtil {
         File configFile = getAniFile();
         log.debug("保存订阅 {}", configFile);
         try {
+            // 健康分仅为 API 展示字段，落盘前清空，避免污染 ani.v2.json
+            for (Ani ani : ANI_LIST) {
+                if (ani != null) {
+                    ani.setHealthScore(null).setHealthLevel(null).setHealthReasons(null);
+                }
+            }
             String json = GsonStatic.toJson(ANI_LIST);
             File temp = new File(configFile + ".temp");
             FileUtil.del(temp);

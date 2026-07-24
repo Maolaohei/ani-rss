@@ -248,6 +248,12 @@ public class ConfigController extends BaseController {
         if (login) {
             return Result.success("登录成功");
         }
+        if ("qBittorrent".equalsIgnoreCase(download)) {
+            return Result.error("登录失败：qBittorrent ≥5.2 请填写 ApiKey（Bearer），旧版用户名密码登录已不再支持。");
+        }
+        if ("OpenList".equalsIgnoreCase(download) || "Alist".equalsIgnoreCase(download)) {
+            return Result.error("登录失败：请检查 Host、Token 与保存位置/临时目录配置。");
+        }
         return Result.error("登录失败");
     }
 

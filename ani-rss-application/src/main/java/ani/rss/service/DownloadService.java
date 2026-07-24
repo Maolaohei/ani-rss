@@ -357,11 +357,42 @@ public class DownloadService {
     }
 
     /**
-     * 删除备用rss
-     *
-     * @param ani
-     * @param item
+     * 预览洗版将删除的种子/文件（不实际删除）。
      */
+    public List<WashPreview.Candidate> previewStandbyDeletes(Ani ani, Item item) {
+        Config config = ConfigUtil.CONFIG;
+        Boolean standbyRss = config.getStandbyRss();
+        Boolean coexist = config.getCoexist();
+        Boolean delete = config.getDelete();
+        String reName = item == null ? null : item.getReName();
+        String downloadPath = getDownloadPath(ani);
+
+        List<String> torrentNames = new ArrayList<>();
+        try {
+            for (TorrentsInfo t : TorrentUtil.getTorrentsInfos()) {
+                if (t == null) continue;
+                if (downloadPath != null && downloadPath.equals(t.getDownloadDir())) {
+                    torrentNames.add(t.getName());
+                }
+            }
+        } catch (Exception e) {
+            log.debug("预览洗版读取种子失败: {}", e.getMessage());
+        }
+        List<String> fileNames = new ArrayList<>();
+        try {
+            File[] files = FileUtils.listFiles(downloadPath);
+            if (files != null) {
+                for (File f : files) {
+                    if (f != null) fileNames.add(f.getName());
+                }
+            }
+        } catch (Exception e) {
+            log.debug("预览洗版读取文件失败: {}", e.getMessage());
+        }
+        return WashPreview.preview(reName, torrentNames, fileNames,
+                Boolean.TRUE.equals(standbyRss), Boolean.TRUE.equals(delete), Boolean.TRUE.equals(coexist));
+    }
+
     public void deleteStandbyRss(Ani ani, Item item) {
         Config config = ConfigUtil.CONFIG;
         Boolean standbyRss = config.getStandbyRss();
@@ -520,9 +551,11 @@ public class DownloadService {
                 // OpenList/Alist 返回 false：多为 10008 等待、任务 Failed/取消、离线工具侧失败
                 // 不等于坏种；占用已在 OpenList 内部按 hash 清理/释放
                 if (openListTool) {
-                    log.error("{} 离线下载未完成（OpenList 返回失败，非坏种）", name);
+                    String raw = name + " 离线下载未完成（OpenList 返回失败，非坏种）";
+                    log.error(raw);
+                    recordDownloadFailure(ani, item, raw);
                     NotificationUtil.send(ConfigUtil.CONFIG, ani,
-                            StrFormatter.format("{} 离线下载未完成（非坏种）", name),
+                            TaskFailureHumanizer.formatNotify(name, raw),
                             NotificationStatusEnum.ERROR);
                     return;
                 }
@@ -530,8 +563,9 @@ public class DownloadService {
                 // 超时 != 坏种：不删种子、不报疑似坏种；占用已在 OpenList 内清理
                 String message = ExceptionUtils.getMessage(e);
                 log.error("{} 离线超时失败: {}", name, message);
+                recordDownloadFailure(ani, item, message);
                 NotificationUtil.send(ConfigUtil.CONFIG, ani,
-                        StrFormatter.format("{} 离线超时失败（已清理任务，非坏种）", name),
+                        TaskFailureHumanizer.formatNotify(name, message),
                         NotificationStatusEnum.ERROR);
                 return;
             } catch (Exception e) {
@@ -548,10 +582,26 @@ public class DownloadService {
         // 删除下载失败的种子, 下次轮询仍会重试
         FileUtil.del(torrentFile);
 
-        log.error("{} 添加失败，疑似为坏种", name);
+        String raw = name + " 添加失败，疑似为坏种";
+        log.error(raw);
+        recordDownloadFailure(ani, item, raw);
         NotificationUtil.send(ConfigUtil.CONFIG, ani,
-                StrFormatter.format("{} 添加失败，疑似为坏种", name),
+                TaskFailureHumanizer.formatNotify(name, raw),
                 NotificationStatusEnum.ERROR);
+    }
+
+    private void recordDownloadFailure(Ani ani, Item item, String rawMessage) {
+        try {
+            String hash = item == null ? null : item.getInfoHash();
+            FailedDownloadQueue.record(
+                    ani == null ? null : ani.getId(),
+                    ani == null ? null : ani.getTitle(),
+                    item == null ? null : item.getReName(),
+                    hash,
+                    rawMessage);
+        } catch (Exception e) {
+            log.debug("记录失败队列失败: {}", e.getMessage());
+        }
     }
 
     /**

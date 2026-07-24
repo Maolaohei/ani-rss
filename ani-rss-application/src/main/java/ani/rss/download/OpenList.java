@@ -10,6 +10,7 @@ import ani.rss.enums.StringEnum;
 import ani.rss.util.basic.HttpReq;
 import ani.rss.util.other.NotificationUtil;
 import ani.rss.util.other.RenameUtil;
+import ani.rss.util.other.TempDirResidualPolicy;
 import ani.rss.util.other.TorrentUtil;
 import cn.hutool.core.collection.ListUtil;
 import cn.hutool.core.date.DateTime;
@@ -55,6 +56,8 @@ public class OpenList implements BaseDownload {
     private static final ConcurrentHashMap<String, Object> DOWNLOAD_LOCKS = new ConcurrentHashMap<>();
     /** 当前正在等待的离线 hash（任务管理器展示 / 取消清理） */
     private static final AtomicReference<String> currentInfoHash = new AtomicReference<>();
+    /** 当前离线等待进度（任务管理器） */
+    private static final AtomicReference<OfflineWaitSnapshot> offlineWaitSnapshot = new AtomicReference<>();
     /** 用户取消时置位，打断 sleep 与轮询 */
     private static final AtomicBoolean offlineCancelRequested = new AtomicBoolean(false);
     /** 进程内仅启动回扫一次（login 成功后异步） */
@@ -63,6 +66,11 @@ public class OpenList implements BaseDownload {
     private static final AtomicReference<ResidualSnapshot> residualSnapshot = new AtomicReference<>(ResidualSnapshot.empty());
     /** 清理中互斥，避免并发 purge 打爆 API */
     private static final AtomicBoolean residualCleaning = new AtomicBoolean(false);
+    /** 文件系统临时目录残留（与离线任务残留分离） */
+    private static final AtomicReference<TempDirResidualSnapshot> tempDirResidualSnapshot =
+            new AtomicReference<>(TempDirResidualSnapshot.empty());
+    private static final AtomicBoolean tempDirResidualCleaning = new AtomicBoolean(false);
+    private static final int TEMP_DIR_PREVIEW_LIMIT = 30;
 
     /**
      * 提交成功后的分级轮询间隔：20s -> 1min -> 5min -> 10min
@@ -246,6 +254,9 @@ public class OpenList implements BaseDownload {
             claimedInFlight = true;
             currentInfoHash.set(infoHash);
             offlineCancelRequested.set(false);
+            int waitMinutesInit = Math.max(ObjectUtil.defaultIfNull(config.getAlistDownloadTimeout(), 30), 1);
+            updateOfflineWait(infoHash, reName, null, "Pending",
+                    System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(waitMinutesInit));
 
             mkdir(path);
 
@@ -336,6 +347,8 @@ public class OpenList implements BaseDownload {
                     OpenListTaskInfo taskInfo = taskInfoOpt.get();
                     OpenListTaskInfo.State state = taskInfo.getState();
                     OpenListTaskInfo.RetryPolicy policy = state.getRetryPolicy();
+                    updateOfflineWait(infoHash, reName, taskInfo.getProgress(),
+                            state == null ? null : state.name(), deadlineMs);
 
                     if (policy == OpenListTaskInfo.RetryPolicy.SUCCESS) {
                         clearDuplicateMagnet(infoHash);
@@ -658,6 +671,7 @@ public class OpenList implements BaseDownload {
             if (claimedInFlight) {
                 inFlightTasks.remove(infoHash);
                 currentInfoHash.compareAndSet(infoHash, null);
+                clearOfflineWait(infoHash);
             }
             // 配置要求删除时清理离线任务记录（超时 purge 已处理同 hash）
             if (tid != null && delete) {
@@ -1878,6 +1892,260 @@ public class OpenList implements BaseDownload {
         return snap.setCleaning(residualCleaning.get());
     }
 
+    public TempDirResidualSnapshot getTempDirResidualSnapshot() {
+        TempDirResidualSnapshot snap = tempDirResidualSnapshot.get();
+        if (snap == null) {
+            return TempDirResidualSnapshot.empty();
+        }
+        return snap.setCleaning(tempDirResidualCleaning.get());
+    }
+
+    /**
+     * 扫描各订阅保存路径下的临时目录残留（文件系统，非离线任务记录）。
+     */
+    public TempDirResidualSnapshot scanTempDirResiduals(boolean allowRemote) {
+        if (!allowRemote) {
+            TempDirResidualSnapshot cached = tempDirResidualSnapshot.get();
+            return cached == null ? TempDirResidualSnapshot.empty() : cached;
+        }
+        if (config == null) {
+            throw new IllegalStateException("OpenList 未登录");
+        }
+        Set<String> activeTempDirs = new HashSet<>();
+        OfflineWaitSnapshot wait = offlineWaitSnapshot.get();
+        if (wait != null && StrUtil.isNotBlank(wait.getTitle())) {
+            activeTempDirs.add(wait.getTitle());
+        }
+        // 当前离线 hash 名也可能出现在任务名里；保护 offlineWait 标题即可
+
+        List<TempDirResidualItem> items = new ArrayList<>();
+        List<String> samples = new ArrayList<>();
+        int cleanable = 0;
+        int protectedCount = 0;
+        int keep = 0;
+        Set<String> scannedPaths = new HashSet<>();
+
+        List<Ani> aniList;
+        try {
+            aniList = ani.rss.util.other.AniUtil.getAniList();
+        } catch (Exception e) {
+            aniList = List.of();
+        }
+        ani.rss.service.DownloadService downloadService = null;
+        try {
+            downloadService = cn.hutool.extra.spring.SpringUtil.getBean(ani.rss.service.DownloadService.class);
+        } catch (Exception ignored) {
+        }
+
+        for (Ani ani : aniList) {
+            if (ani == null) {
+                continue;
+            }
+            String savePath;
+            try {
+                if (downloadService != null) {
+                    savePath = downloadService.getDownloadPath(ani);
+                } else {
+                    savePath = StrUtil.blankToDefault(ani.getDownloadPath(), "");
+                }
+            } catch (Exception e) {
+                continue;
+            }
+            if (StrUtil.isBlank(savePath)) {
+                continue;
+            }
+            savePath = ReUtil.replaceAll(savePath, "^[A-z]:", "");
+            while (savePath.endsWith("/")) {
+                savePath = savePath.substring(0, savePath.length() - 1);
+            }
+            if (!scannedPaths.add(savePath.toLowerCase(Locale.ROOT))) {
+                continue;
+            }
+            String seasonKey = null;
+            if (ani.getSeason() != null) {
+                seasonKey = String.format(Locale.ROOT, "S%02d", ani.getSeason());
+            }
+            List<OpenListFileInfo> top;
+            try {
+                top = fsList(savePath, true);
+            } catch (Exception e) {
+                log.debug("扫描临时目录失败 {}: {}", savePath, e.getMessage());
+                continue;
+            }
+            if (top == null || top.isEmpty()) {
+                continue;
+            }
+            Set<String> topVideoEpisodeKeys = new HashSet<>();
+            Set<String> topVideoNames = new HashSet<>();
+            for (OpenListFileInfo f : top) {
+                if (f == null || Boolean.TRUE.equals(f.getIsDir())) {
+                    continue;
+                }
+                String name = f.getName();
+                if (StrUtil.isBlank(name) || !(FileUtils.isVideoFormat(name) || FileUtils.isSubtitleFormat(name))) {
+                    continue;
+                }
+                topVideoNames.add(name);
+                if (ReUtil.contains(StringEnum.SEASON_REG, name)) {
+                    String ep = ReUtil.get(StringEnum.SEASON_REG, name, 0);
+                    if (StrUtil.isNotBlank(ep)) {
+                        topVideoEpisodeKeys.add(ep.toLowerCase(Locale.ROOT));
+                    }
+                }
+            }
+            for (OpenListFileInfo entry : top) {
+                if (entry == null || !Boolean.TRUE.equals(entry.getIsDir()) || StrUtil.isBlank(entry.getName())) {
+                    continue;
+                }
+                String dirName = entry.getName();
+                if (!TempDirResidualPolicy.looksLikeTempEpisodeDir(dirName, seasonKey)
+                        && !ReUtil.contains(StringEnum.SEASON_REG, dirName)) {
+                    // 合集源标题目录：无扩展名长目录名
+                    if (dirName.contains(".") || dirName.length() < 2) {
+                        continue;
+                    }
+                }
+                String tempPath = savePath + "/" + dirName;
+                boolean hasProtectedMedia = false;
+                boolean junkOnly = true;
+                boolean empty = true;
+                try {
+                    List<OpenListFileInfo> inside = listFilesWithRetry(tempPath, 1);
+                    for (OpenListFileInfo f : inside) {
+                        if (f == null) continue;
+                        empty = false;
+                        if (Boolean.TRUE.equals(f.getIsDir())) {
+                            junkOnly = false;
+                            continue;
+                        }
+                        if (isProtectedTempFile(f)) {
+                            hasProtectedMedia = true;
+                            junkOnly = false;
+                        } else if (!isJunkTempFile(f)) {
+                            junkOnly = false;
+                        }
+                    }
+                } catch (Exception e) {
+                    junkOnly = false;
+                }
+                if (empty) {
+                    junkOnly = true;
+                    hasProtectedMedia = false;
+                }
+                boolean hasFinalSibling = false;
+                if (ReUtil.contains(StringEnum.SEASON_REG, dirName)) {
+                    String ep = ReUtil.get(StringEnum.SEASON_REG, dirName, 0);
+                    if (StrUtil.isNotBlank(ep) && topVideoEpisodeKeys.contains(ep.toLowerCase(Locale.ROOT))) {
+                        hasFinalSibling = true;
+                    }
+                } else if (!topVideoNames.isEmpty()) {
+                    // 合集：顶层已有视频且与临时目录名不同，视为可能已落盘
+                    hasFinalSibling = topVideoNames.stream()
+                            .anyMatch(n -> !n.equalsIgnoreCase(dirName) && FileUtils.isVideoFormat(n));
+                }
+                TempDirResidualPolicy.Decision decision = TempDirResidualPolicy.decide(
+                        dirName, hasFinalSibling, hasProtectedMedia, junkOnly, activeTempDirs);
+                String action = switch (decision.action()) {
+                    case FORCE_CLEAN -> "强制删除临时目录（最终成片已在顶层）";
+                    case JUNK_CLEAN -> "删除空壳/垃圾临时目录";
+                    case PROTECT_ACTIVE -> "保护中（当前下载占用）";
+                    case KEEP -> "保留（需人工确认）";
+                };
+                if (decision.action() == TempDirResidualPolicy.Action.FORCE_CLEAN
+                        || decision.action() == TempDirResidualPolicy.Action.JUNK_CLEAN) {
+                    cleanable++;
+                } else if (decision.action() == TempDirResidualPolicy.Action.PROTECT_ACTIVE) {
+                    protectedCount++;
+                } else {
+                    keep++;
+                }
+                if (items.size() < TEMP_DIR_PREVIEW_LIMIT) {
+                    items.add(new TempDirResidualItem()
+                            .setId(savePath + "/" + dirName)
+                            .setName(StrUtil.maxLength(dirName, 160))
+                            .setSavePath(savePath)
+                            .setState(decision.action().name())
+                            .setKind("TEMP_DIR")
+                            .setAction(action)
+                            .setError(decision.reason())
+                            .setProtectedCurrent(decision.action() == TempDirResidualPolicy.Action.PROTECT_ACTIVE)
+                            .setCleanable(decision.action() == TempDirResidualPolicy.Action.FORCE_CLEAN
+                                    || decision.action() == TempDirResidualPolicy.Action.JUNK_CLEAN));
+                }
+                if (samples.size() < 5) {
+                    samples.add(StrUtil.maxLength(dirName, 80));
+                }
+            }
+        }
+
+        int total = cleanable + protectedCount + keep;
+        String message = total == 0
+                ? "无临时目录残留"
+                : StrFormatter.format("可清理 {} / 保护 {} / 保留 {}（预览 {} 条）",
+                cleanable, protectedCount, keep, items.size());
+        TempDirResidualSnapshot snap = new TempDirResidualSnapshot()
+                .setTotalCount(total)
+                .setCleanableCount(cleanable)
+                .setProtectedCount(protectedCount)
+                .setKeepCount(keep)
+                .setScannedAt(System.currentTimeMillis())
+                .setCleaning(tempDirResidualCleaning.get())
+                .setMessage(message)
+                .setSamples(samples)
+                .setItems(items);
+        tempDirResidualSnapshot.set(snap);
+        return snap;
+    }
+
+    /**
+     * 仅清理 FORCE_CLEAN / JUNK_CLEAN 临时目录；保护 PROTECT_ACTIVE；KEEP 不自动删。
+     */
+    public CleanResult cleanTempDirResiduals() {
+        if (config == null) {
+            return new CleanResult().setOk(false).setMessage("OpenList 未登录");
+        }
+        if (!tempDirResidualCleaning.compareAndSet(false, true)) {
+            return new CleanResult().setOk(false).setMessage("临时目录清理正在进行中");
+        }
+        try {
+            TempDirResidualSnapshot before = scanTempDirResiduals(true);
+            int cleaned = 0;
+            int skipped = 0;
+            int failed = 0;
+            if (before.getItems() != null) {
+                for (TempDirResidualItem item : before.getItems()) {
+                    if (item == null || !Boolean.TRUE.equals(item.getCleanable())) {
+                        skipped++;
+                        continue;
+                    }
+                    try {
+                        cleanupTempDownloadDir(item.getSavePath(), item.getName(), true);
+                        cleaned++;
+                    } catch (Exception e) {
+                        failed++;
+                        log.warn("清理临时目录失败 {}/{}: {}", item.getSavePath(), item.getName(), e.getMessage());
+                    }
+                }
+            }
+            TempDirResidualSnapshot after = scanTempDirResiduals(true);
+            String msg = StrFormatter.format("临时目录清理完成 cleaned={} skipped={} failed={} remain={}",
+                    cleaned, skipped, failed, after.getTotalCount());
+            log.info("OpenList {}", msg);
+            return new CleanResult()
+                    .setOk(failed == 0)
+                    .setCleaned(cleaned)
+                    .setSkipped(skipped)
+                    .setFailed(failed)
+                    .setMessage(msg);
+        } finally {
+            tempDirResidualCleaning.set(false);
+            TempDirResidualSnapshot latest = tempDirResidualSnapshot.get();
+            if (latest != null) {
+                tempDirResidualSnapshot.set(latest.setCleaning(false));
+            }
+        }
+    }
+
     private List<OpenListTaskInfo> listAllOfflineTasksStrict() {
         List<OpenListTaskInfo> all = new ArrayList<>();
         List<OpenListTaskInfo> undone = taskUnDoneList();
@@ -1970,6 +2238,77 @@ public class OpenList implements BaseDownload {
 
     public String getCurrentInfoHash() {
         return currentInfoHash.get();
+    }
+
+    public OfflineWaitSnapshot getOfflineWaitSnapshot() {
+        return offlineWaitSnapshot.get();
+    }
+
+    private static void updateOfflineWait(String hash, String title, Integer progress, String state, long deadlineMs) {
+        offlineWaitSnapshot.set(new OfflineWaitSnapshot()
+                .setHash(hash)
+                .setTitle(title)
+                .setProgress(progress)
+                .setState(state)
+                .setDeadlineMs(deadlineMs)
+                .setUpdatedAt(System.currentTimeMillis()));
+    }
+
+    private static void clearOfflineWait(String hash) {
+        OfflineWaitSnapshot snap = offlineWaitSnapshot.get();
+        if (snap != null && (hash == null || hash.equalsIgnoreCase(snap.getHash()))) {
+            offlineWaitSnapshot.compareAndSet(snap, null);
+        }
+    }
+
+    @lombok.Data
+    @lombok.experimental.Accessors(chain = true)
+    public static class OfflineWaitSnapshot implements java.io.Serializable {
+        private String hash;
+        private String title;
+        private Integer progress;
+        private String state;
+        private Long deadlineMs;
+        private Long updatedAt;
+    }
+
+    @lombok.Data
+    @lombok.experimental.Accessors(chain = true)
+    public static class TempDirResidualSnapshot implements java.io.Serializable {
+        private int totalCount;
+        private int cleanableCount;
+        private int protectedCount;
+        private int keepCount;
+        private Long scannedAt;
+        private Boolean cleaning;
+        private String message;
+        private List<String> samples;
+        private List<TempDirResidualItem> items;
+
+        public static TempDirResidualSnapshot empty() {
+            return new TempDirResidualSnapshot()
+                    .setTotalCount(0)
+                    .setCleanableCount(0)
+                    .setProtectedCount(0)
+                    .setKeepCount(0)
+                    .setCleaning(false)
+                    .setSamples(List.of())
+                    .setItems(List.of());
+        }
+    }
+
+    @lombok.Data
+    @lombok.experimental.Accessors(chain = true)
+    public static class TempDirResidualItem implements java.io.Serializable {
+        private String id;
+        private String name;
+        private String savePath;
+        private String state;
+        private String kind;
+        private String action;
+        private String error;
+        private Boolean protectedCurrent;
+        private Boolean cleanable;
     }
 
 

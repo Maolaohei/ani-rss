@@ -12,15 +12,24 @@
     <el-form-item label="地址">
       <el-input v-model:model-value="props.config.downloadToolHost" placeholder="http://192.168.1.x:8080"/>
     </el-form-item>
-    <el-form-item v-if="props.config.downloadToolType === 'qBittorrent'" label="ApiKey">
-      <el-input v-model.trim="props.config.downloadToolPassword" placeholder="qbt_xxxx" show-password>
-        <template #prefix>
-          <el-icon class="el-input__icon">
-            <Key/>
-          </el-icon>
-        </template>
-      </el-input>
-    </el-form-item>
+    <template v-if="props.config.downloadToolType === 'qBittorrent'">
+      <el-form-item label="ApiKey">
+        <el-input v-model.trim="props.config.downloadToolPassword" placeholder="qbt_xxxx" show-password>
+          <template #prefix>
+            <el-icon class="el-input__icon">
+              <Key/>
+            </el-icon>
+          </template>
+        </el-input>
+      </el-form-item>
+      <el-form-item>
+        <el-alert show-icon type="info" :closable="false">
+          <template #title>
+            qBittorrent ≥5.2 使用 Bearer ApiKey（Tools → Options → Web UI → API Key）。旧版用户名密码登录已不再支持。
+          </template>
+        </el-alert>
+      </el-form-item>
+    </template>
     <el-form-item v-else-if="props.config.downloadToolType === 'Aria2'" label="RPC 密钥">
       <el-input v-model.trim="props.config.downloadToolPassword" placeholder="" show-password>
         <template #prefix>

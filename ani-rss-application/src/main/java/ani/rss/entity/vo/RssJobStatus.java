@@ -74,6 +74,24 @@ public class RssJobStatus implements Serializable {
     @Schema(description = "当前 OpenList infoHash（若有）")
     private String currentHash;
 
+    @Schema(description = "当前离线任务标题")
+    private String offlineTitle;
+
+    @Schema(description = "当前离线进度 0-100")
+    private Integer offlineProgress;
+
+    @Schema(description = "当前离线状态")
+    private String offlineState;
+
+    @Schema(description = "离线截止时间戳 ms")
+    private Long offlineDeadlineMs;
+
+    @Schema(description = "离线剩余毫秒")
+    private Long offlineEtaMs;
+
+    @Schema(description = "失败队列条数")
+    private Integer failedQueueCount;
+
     @Schema(description = "任务来源: periodic/manual")
     private String source;
 
@@ -115,6 +133,30 @@ public class RssJobStatus implements Serializable {
 
     @Schema(description = "残留任务预览明细(最多30条)")
     private List<ResidualPreviewItem> residualItems;
+
+    @Schema(description = "临时目录残留总数")
+    private Integer tempDirResidualTotalCount;
+
+    @Schema(description = "临时目录可清理数")
+    private Integer tempDirResidualCleanableCount;
+
+    @Schema(description = "临时目录保护数")
+    private Integer tempDirResidualProtectedCount;
+
+    @Schema(description = "临时目录保留数")
+    private Integer tempDirResidualKeepCount;
+
+    @Schema(description = "临时目录扫描时间戳 ms")
+    private Long tempDirResidualScannedAt;
+
+    @Schema(description = "是否正在清理临时目录")
+    private Boolean tempDirResidualCleaning;
+
+    @Schema(description = "临时目录残留消息")
+    private String tempDirResidualMessage;
+
+    @Schema(description = "临时目录残留预览(最多30条)")
+    private List<ResidualPreviewItem> tempDirResidualItems;
 
     @Schema(description = "可观察任务列表（running/pending/openlist/residual/last-finished）")
     private List<RssJobItem> tasks;

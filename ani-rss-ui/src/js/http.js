@@ -139,6 +139,26 @@ export let rssJobResidualScan = () => api.post('api/rssJobResidualScan')
  */
 export let rssJobResidualClean = () => api.post('api/rssJobResidualClean')
 
+/**
+ * 扫描 OpenList 临时目录残留
+ * @returns {Promise<unknown>}
+ */
+export let rssJobTempDirResidualScan = () => api.post('api/rssJobTempDirResidualScan')
+
+/**
+ * 清理 OpenList 临时目录残留（仅 FORCE/JUNK）
+ * @returns {Promise<unknown>}
+ */
+export let rssJobTempDirResidualClean = () => api.post('api/rssJobTempDirResidualClean')
+
+/**
+ * 失败下载队列
+ */
+export let failedDownloadQueue = () => api.post('api/failedDownloadQueue')
+export let failedDownloadQueueRemove = (id) => api.post('api/failedDownloadQueueRemove', {id})
+export let failedDownloadQueueClear = () => api.post('api/failedDownloadQueueClear')
+export let failedDownloadQueueRetry = (id) => api.post('api/failedDownloadQueueRetry', {id})
+
 
 /**
  * 将RSS转换为订阅

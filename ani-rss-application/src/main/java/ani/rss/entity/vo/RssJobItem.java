@@ -53,4 +53,10 @@ public class RssJobItem implements Serializable {
 
     @Schema(description = "该条目是否可取消")
     private Boolean cancellable;
+
+    @Schema(description = "进度 0-100")
+    private Integer progress;
+
+    @Schema(description = "预计剩余毫秒")
+    private Long etaMs;
 }

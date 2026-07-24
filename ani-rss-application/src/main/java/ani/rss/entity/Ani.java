@@ -205,6 +205,24 @@ public class Ani implements Serializable {
     private Double score;
 
     /**
+     * 运维健康分 0-100（非 BGM，仅 API 展示，保存前清空）
+     */
+    @Schema(description = "运维健康分 0-100")
+    private Integer healthScore;
+
+    /**
+     * 运维健康等级 good/warn/bad/paused/completed
+     */
+    @Schema(description = "运维健康等级")
+    private String healthLevel;
+
+    /**
+     * 运维健康原因
+     */
+    @Schema(description = "运维健康原因")
+    private List<String> healthReasons;
+
+    /**
      * 自定义集数获取规则
      */
     @Schema(description = "自定义集数获取规则")
