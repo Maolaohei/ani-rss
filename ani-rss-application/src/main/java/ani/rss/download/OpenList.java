@@ -71,6 +71,8 @@ public class OpenList implements BaseDownload {
             new AtomicReference<>(TempDirResidualSnapshot.empty());
     private static final AtomicBoolean tempDirResidualCleaning = new AtomicBoolean(false);
     private static final int TEMP_DIR_PREVIEW_LIMIT = 30;
+    /** 单次扫描最多深度检查的候选临时目录数，避免订阅极多时打爆 OpenList */
+    private static final int TEMP_DIR_INSPECT_BUDGET = 120;
 
     /**
      * 提交成功后的分级轮询间隔：20s -> 1min -> 5min -> 10min
@@ -255,7 +257,7 @@ public class OpenList implements BaseDownload {
             currentInfoHash.set(infoHash);
             offlineCancelRequested.set(false);
             int waitMinutesInit = Math.max(ObjectUtil.defaultIfNull(config.getAlistDownloadTimeout(), 30), 1);
-            updateOfflineWait(infoHash, reName, null, "Pending",
+            updateOfflineWait(infoHash, reName, tempDirName, null, "Pending",
                     System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(waitMinutesInit));
 
             mkdir(path);
@@ -347,7 +349,7 @@ public class OpenList implements BaseDownload {
                     OpenListTaskInfo taskInfo = taskInfoOpt.get();
                     OpenListTaskInfo.State state = taskInfo.getState();
                     OpenListTaskInfo.RetryPolicy policy = state.getRetryPolicy();
-                    updateOfflineWait(infoHash, reName, taskInfo.getProgress(),
+                    updateOfflineWait(infoHash, reName, tempDirName, taskInfo.getProgress(),
                             state == null ? null : state.name(), deadlineMs);
 
                     if (policy == OpenListTaskInfo.RetryPolicy.SUCCESS) {
@@ -1902,6 +1904,7 @@ public class OpenList implements BaseDownload {
 
     /**
      * 扫描各订阅保存路径下的临时目录残留（文件系统，非离线任务记录）。
+     * 多订阅优化：路径归一化去重、跳过停用订阅、浅层 list 代替递归 findFiles、候选预算。
      */
     public TempDirResidualSnapshot scanTempDirResiduals(boolean allowRemote) {
         if (!allowRemote) {
@@ -1913,17 +1916,25 @@ public class OpenList implements BaseDownload {
         }
         Set<String> activeTempDirs = new HashSet<>();
         OfflineWaitSnapshot wait = offlineWaitSnapshot.get();
-        if (wait != null && StrUtil.isNotBlank(wait.getTitle())) {
-            activeTempDirs.add(wait.getTitle());
+        if (wait != null) {
+            if (StrUtil.isNotBlank(wait.getTempDirName())) {
+                activeTempDirs.add(wait.getTempDirName());
+            }
+            if (StrUtil.isNotBlank(wait.getTitle())) {
+                activeTempDirs.add(wait.getTitle());
+            }
         }
-        // 当前离线 hash 名也可能出现在任务名里；保护 offlineWait 标题即可
 
         List<TempDirResidualItem> items = new ArrayList<>();
         List<String> samples = new ArrayList<>();
         int cleanable = 0;
         int protectedCount = 0;
         int keep = 0;
-        Set<String> scannedPaths = new HashSet<>();
+        int inspectBudget = TEMP_DIR_INSPECT_BUDGET;
+        int truncatedCandidates = 0;
+
+        // pathKey -> {savePath, seasonKeys}
+        Map<String, PathScanTarget> pathTargets = new LinkedHashMap<>();
 
         List<Ani> aniList;
         try {
@@ -1938,12 +1949,15 @@ public class OpenList implements BaseDownload {
         }
 
         for (Ani ani : aniList) {
-            if (ani == null) {
+            if (ani == null || Boolean.FALSE.equals(ani.getEnable())) {
                 continue;
             }
             String savePath;
             try {
-                if (downloadService != null) {
+                // 优先已落盘的自定义路径，避免 getDownloadPath 触发 jpTitle/BGM 网络
+                if (StrUtil.isNotBlank(ani.getDownloadPath()) && Boolean.TRUE.equals(ani.getCustomDownloadPath())) {
+                    savePath = ani.getDownloadPath();
+                } else if (downloadService != null) {
                     savePath = downloadService.getDownloadPath(ani);
                 } else {
                     savePath = StrUtil.blankToDefault(ani.getDownloadPath(), "");
@@ -1954,20 +1968,27 @@ public class OpenList implements BaseDownload {
             if (StrUtil.isBlank(savePath)) {
                 continue;
             }
-            savePath = ReUtil.replaceAll(savePath, "^[A-z]:", "");
-            while (savePath.endsWith("/")) {
-                savePath = savePath.substring(0, savePath.length() - 1);
-            }
-            if (!scannedPaths.add(savePath.toLowerCase(Locale.ROOT))) {
+            String normalized = normalizeOpenListPath(savePath);
+            if (StrUtil.isBlank(normalized)) {
                 continue;
             }
-            String seasonKey = null;
-            if (ani.getSeason() != null) {
-                seasonKey = String.format(Locale.ROOT, "S%02d", ani.getSeason());
+            String pathKey = normalized.toLowerCase(Locale.ROOT);
+            PathScanTarget target = pathTargets.get(pathKey);
+            if (target == null) {
+                target = new PathScanTarget(normalized);
+                pathTargets.put(pathKey, target);
             }
+            if (ani.getSeason() != null) {
+                target.seasonKeys.add(String.format(Locale.ROOT, "S%02d", ani.getSeason()));
+            }
+        }
+
+        for (PathScanTarget target : pathTargets.values()) {
+            String savePath = target.savePath;
             List<OpenListFileInfo> top;
             try {
-                top = fsList(savePath, true);
+                // 扫描优先用缓存友好 list，避免对每个路径 force refresh
+                top = fsList(savePath, false);
             } catch (Exception e) {
                 log.debug("扫描临时目录失败 {}: {}", savePath, e.getMessage());
                 continue;
@@ -1998,23 +2019,43 @@ public class OpenList implements BaseDownload {
                     continue;
                 }
                 String dirName = entry.getName();
-                if (!TempDirResidualPolicy.looksLikeTempEpisodeDir(dirName, seasonKey)
-                        && !ReUtil.contains(StringEnum.SEASON_REG, dirName)) {
-                    // 合集源标题目录：无扩展名长目录名
+                boolean looksTemp = false;
+                for (String sk : target.seasonKeys) {
+                    if (TempDirResidualPolicy.looksLikeTempEpisodeDir(dirName, sk)) {
+                        looksTemp = true;
+                        break;
+                    }
+                }
+                if (!looksTemp && TempDirResidualPolicy.looksLikeTempEpisodeDir(dirName, null)) {
+                    looksTemp = true;
+                }
+                if (!looksTemp && !ReUtil.contains(StringEnum.SEASON_REG, dirName)) {
                     if (dirName.contains(".") || dirName.length() < 2) {
                         continue;
                     }
                 }
+
+                if (inspectBudget <= 0) {
+                    truncatedCandidates++;
+                    continue;
+                }
+                inspectBudget--;
+
                 String tempPath = savePath + "/" + dirName;
                 boolean hasProtectedMedia = false;
                 boolean junkOnly = true;
                 boolean empty = true;
                 try {
-                    List<OpenListFileInfo> inside = listFilesWithRetry(tempPath, 1);
+                    // 浅层 list：残留分类只需一级信号，避免递归 findFiles 打爆 API
+                    List<OpenListFileInfo> inside = fsList(tempPath, false);
+                    if (inside == null) {
+                        inside = List.of();
+                    }
                     for (OpenListFileInfo f : inside) {
                         if (f == null) continue;
                         empty = false;
                         if (Boolean.TRUE.equals(f.getIsDir())) {
+                            // 有子目录则不是纯垃圾空壳
                             junkOnly = false;
                             continue;
                         }
@@ -2039,7 +2080,6 @@ public class OpenList implements BaseDownload {
                         hasFinalSibling = true;
                     }
                 } else if (!topVideoNames.isEmpty()) {
-                    // 合集：顶层已有视频且与临时目录名不同，视为可能已落盘
                     hasFinalSibling = topVideoNames.stream()
                             .anyMatch(n -> !n.equalsIgnoreCase(dirName) && FileUtils.isVideoFormat(n));
                 }
@@ -2079,10 +2119,16 @@ public class OpenList implements BaseDownload {
         }
 
         int total = cleanable + protectedCount + keep;
-        String message = total == 0
-                ? "无临时目录残留"
-                : StrFormatter.format("可清理 {} / 保护 {} / 保留 {}（预览 {} 条）",
-                cleanable, protectedCount, keep, items.size());
+        String message;
+        if (total == 0) {
+            message = "无临时目录残留";
+        } else {
+            message = StrFormatter.format("可清理 {} / 保护 {} / 保留 {}（预览 {} 条，路径 {}）",
+                    cleanable, protectedCount, keep, items.size(), pathTargets.size());
+            if (truncatedCandidates > 0) {
+                message = message + StrFormatter.format("，另有 {} 个候选未深检（预算用尽，请再扫）", truncatedCandidates);
+            }
+        }
         TempDirResidualSnapshot snap = new TempDirResidualSnapshot()
                 .setTotalCount(total)
                 .setCleanableCount(cleanable)
@@ -2095,6 +2141,30 @@ public class OpenList implements BaseDownload {
                 .setItems(items);
         tempDirResidualSnapshot.set(snap);
         return snap;
+    }
+
+    private static String normalizeOpenListPath(String savePath) {
+        if (StrUtil.isBlank(savePath)) {
+            return "";
+        }
+        String p = savePath.replace('\\', '/');
+        p = ReUtil.replaceAll(p, "^[A-z]:", "");
+        while (p.contains("//")) {
+            p = p.replace("//", "/");
+        }
+        while (p.endsWith("/") && p.length() > 1) {
+            p = p.substring(0, p.length() - 1);
+        }
+        return p;
+    }
+
+    private static final class PathScanTarget {
+        final String savePath;
+        final Set<String> seasonKeys = new HashSet<>();
+
+        PathScanTarget(String savePath) {
+            this.savePath = savePath;
+        }
     }
 
     /**
@@ -2244,10 +2314,12 @@ public class OpenList implements BaseDownload {
         return offlineWaitSnapshot.get();
     }
 
-    private static void updateOfflineWait(String hash, String title, Integer progress, String state, long deadlineMs) {
+    private static void updateOfflineWait(String hash, String title, String tempDirName,
+                                          Integer progress, String state, long deadlineMs) {
         offlineWaitSnapshot.set(new OfflineWaitSnapshot()
                 .setHash(hash)
                 .setTitle(title)
+                .setTempDirName(StrUtil.blankToDefault(tempDirName, title))
                 .setProgress(progress)
                 .setState(state)
                 .setDeadlineMs(deadlineMs)
@@ -2266,6 +2338,8 @@ public class OpenList implements BaseDownload {
     public static class OfflineWaitSnapshot implements java.io.Serializable {
         private String hash;
         private String title;
+        /** 实际临时目录名（合集可能与 reName/title 不同） */
+        private String tempDirName;
         private Integer progress;
         private String state;
         private Long deadlineMs;

@@ -119,4 +119,53 @@ class UxEnhancementPolicyTest {
         assertTrue(FailedDownloadQueue.remove(FailedDownloadQueue.list().get(0).getId()));
         assertEquals(0, FailedDownloadQueue.list().size());
     }
+
+    @Test
+    void health_uses_cached_omit_count() {
+        Ani ani = new Ani().setEnable(true).setCurrentEpisodeNumber(3).setTotalEpisodeNumber(12)
+                .setOmit(true).setOva(false)
+                .setOmitCount(2).setOmitCheckedAt(System.currentTimeMillis())
+                .setLastDownloadTime(System.currentTimeMillis());
+        int omit = SubscriptionHealth.cachedOmitCount(ani, true);
+        assertEquals(2, omit);
+        var s = SubscriptionHealth.compute(ani, omit, System.currentTimeMillis());
+        assertTrue(s.reasons().stream().anyMatch(r -> r.contains("漏集")));
+        assertTrue(s.score() <= 80);
+    }
+
+    @Test
+    void health_cached_omit_respects_flags() {
+        Ani ani = new Ani().setEnable(true).setOmit(false).setOmitCount(5);
+        assertEquals(0, SubscriptionHealth.cachedOmitCount(ani, true));
+        ani.setOmit(true).setOva(true);
+        assertEquals(0, SubscriptionHealth.cachedOmitCount(ani, true));
+        ani.setOva(false);
+        assertEquals(0, SubscriptionHealth.cachedOmitCount(ani, false));
+        assertEquals(5, SubscriptionHealth.cachedOmitCount(ani, true));
+    }
+
+    @Test
+    void remember_omit_writes_fields() {
+        Ani ani = new Ani();
+        long now = 1_700_000_000_000L;
+        SubscriptionHealth.rememberOmit(ani, 3, now);
+        assertEquals(3, ani.getOmitCount());
+        assertEquals(now, ani.getOmitCheckedAt());
+        SubscriptionHealth.rememberOmit(ani, -1, now + 1);
+        assertEquals(0, ani.getOmitCount());
+    }
+
+    @Test
+    void tempDir_protect_collection_name_differs_from_rename() {
+        // 合集临时目录用源标题，与 reName 不同时仍应保护
+        var d = TempDirResidualPolicy.decide("Collection Source Title", false, true, false,
+                Set.of("Collection Source Title"));
+        assertEquals(TempDirResidualPolicy.Action.PROTECT_ACTIVE, d.action());
+    }
+
+    @Test
+    void failed_queue_key_prefers_hash() {
+        assertEquals("a1:abcdef", FailedDownloadQueue.keyOf("a1", "ABCDEF", "Show S01E01"));
+        assertEquals("a1:Show S01E01", FailedDownloadQueue.keyOf("a1", "", "Show S01E01"));
+    }
 }

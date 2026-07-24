@@ -88,6 +88,11 @@ public class DownloadService {
         int currentDownloadCount = 0;
         List<Item> items = ItemsUtil.getItems(ani);
 
+        List<Integer> omitGaps = ItemsUtil.omitList(ani, items);
+        int omitN = omitGaps == null ? 0 : omitGaps.size();
+        Integer prevOmit = ani.getOmitCount();
+        boolean omitChanged = prevOmit == null || prevOmit != omitN;
+        SubscriptionHealth.rememberOmit(ani, omitN, System.currentTimeMillis());
         ItemsUtil.omit(ani, items);
         log.debug("{} 共 {} 个", title, items.size());
 
@@ -332,12 +337,13 @@ public class DownloadService {
             count++;
         }
 
-        if (sync) {
-            int size = ItemsUtil.currentEpisodeNumber(ani, items);
-            // 更新当前集数
-            ani.setCurrentEpisodeNumber(size);
-            // 更新下载时间
-            ani.setLastDownloadTime(System.currentTimeMillis());
+        // 有新下载，或漏集数量变化时落盘（避免每轮无意义写 ani.v2.json）
+        if (sync || omitChanged) {
+            if (sync) {
+                int size = ItemsUtil.currentEpisodeNumber(ani, items);
+                ani.setCurrentEpisodeNumber(size);
+                ani.setLastDownloadTime(System.currentTimeMillis());
+            }
             AniUtil.sync();
         }
 
@@ -602,6 +608,101 @@ public class DownloadService {
         } catch (Exception e) {
             log.debug("记录失败队列失败: {}", e.getMessage());
         }
+    }
+
+    /**
+     * 失败队列：精确重下单条（不触发整订 RSS 刷新）。
+     *
+     * @return 给人看的结果文案
+     */
+    public String retryFailedItem(FailedDownloadQueue.FailedItem failed) {
+        if (failed == null || StrUtil.isBlank(failed.getAniId())) {
+            throw new IllegalArgumentException("失败条目无效");
+        }
+        Ani ani = AniUtil.getAniList().stream()
+                .filter(a -> Objects.equals(a.getId(), failed.getAniId()))
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("关联订阅不存在"));
+
+        Object lock = lockForAni(ani);
+        synchronized (lock) {
+            List<Item> items = ItemsUtil.getItems(ani);
+            Item match = matchFailedItem(items, failed);
+            if (match == null) {
+                throw new IllegalStateException("RSS 中已找不到该条目（可能已过期），无法精确重下");
+            }
+
+            // 清掉成功标记（种子缓存），否则 saveTorrent/download 会被跳过
+            File marker = TorrentUtil.getTorrent(ani, match);
+            if (marker != null && marker.exists()) {
+                FileUtil.del(marker);
+            }
+            // 兼容旧逻辑：目录内按 hash 子串再扫一遍
+            if (StrUtil.isNotBlank(failed.getInfoHash())) {
+                File torrentDir = TorrentUtil.getTorrentDir(ani);
+                File[] files = torrentDir.listFiles();
+                if (files != null) {
+                    String h = failed.getInfoHash().toLowerCase(Locale.ROOT);
+                    for (File f : files) {
+                        if (f != null && f.getName().toLowerCase(Locale.ROOT).contains(h)) {
+                            FileUtil.del(f);
+                        }
+                    }
+                }
+            }
+
+            File saved = TorrentUtil.saveTorrent(ani, match);
+            if (saved == null || !saved.exists()) {
+                String raw = StrUtil.blankToDefault(match.getReName(), failed.getReName()) + " 种子下载失败，无法重试";
+                recordDownloadFailure(ani, match, raw);
+                throw new IllegalStateException(raw);
+            }
+
+            long failedAtBefore = failed.getFailedAt() == null ? 0L : failed.getFailedAt();
+            String savePath = getDownloadPath(ani);
+            // 失败路径会 record 并刷新 failedAt；成功则队列条目时间戳不变
+            download(ani, match, savePath, saved);
+
+            String key = FailedDownloadQueue.keyOf(failed.getAniId(), match.getInfoHash(), match.getReName());
+            Optional<FailedDownloadQueue.FailedItem> after = FailedDownloadQueue.list().stream()
+                    .filter(i -> Objects.equals(i.getId(), failed.getId()) || Objects.equals(i.getId(), key))
+                    .findFirst();
+            if (after.isPresent()) {
+                Long at = after.get().getFailedAt();
+                if (at != null && at > failedAtBefore) {
+                    throw new IllegalStateException(StrUtil.blankToDefault(after.get().getMessage(),
+                            "推送下载未成功，条目仍在失败队列"));
+                }
+            }
+            FailedDownloadQueue.remove(failed.getId());
+            FailedDownloadQueue.remove(key);
+            return "已精确重下：" + StrUtil.blankToDefault(match.getReName(), failed.getReName());
+        }
+    }
+
+    private static Item matchFailedItem(List<Item> items, FailedDownloadQueue.FailedItem failed) {
+        if (items == null || items.isEmpty() || failed == null) {
+            return null;
+        }
+        String hash = StrUtil.blankToDefault(failed.getInfoHash(), "").trim().toLowerCase(Locale.ROOT);
+        if (StrUtil.isNotBlank(hash)) {
+            for (Item it : items) {
+                if (it == null) continue;
+                String ih = StrUtil.blankToDefault(it.getInfoHash(), "").trim().toLowerCase(Locale.ROOT);
+                if (hash.equals(ih)) {
+                    return it;
+                }
+            }
+        }
+        String reName = StrUtil.blankToDefault(failed.getReName(), "");
+        if (StrUtil.isNotBlank(reName)) {
+            for (Item it : items) {
+                if (it != null && reName.equals(it.getReName())) {
+                    return it;
+                }
+            }
+        }
+        return null;
     }
 
     /**

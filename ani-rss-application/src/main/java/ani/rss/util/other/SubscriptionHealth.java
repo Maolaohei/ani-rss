@@ -34,10 +34,20 @@ public final class SubscriptionHealth {
             return new Score(100, "completed", List.of("已追完"));
         }
 
-        if (omitCount > 0) {
-            int pen = Math.min(40, omitCount * 10);
+        int effectiveOmit = Math.max(0, omitCount);
+        if (effectiveOmit > 0) {
+            int pen = Math.min(40, effectiveOmit * 10);
             score -= pen;
-            reasons.add("疑似漏集 " + omitCount + " 处");
+            reasons.add("疑似漏集 " + effectiveOmit + " 处");
+        }
+
+        // 列表阶段用缓存漏集：过期提示不改分数，避免再打 RSS
+        Long checkedAt = ani.getOmitCheckedAt();
+        if (effectiveOmit > 0 && checkedAt != null && checkedAt > 0) {
+            long ageDays = TimeUnit.MILLISECONDS.toDays(Math.max(0, nowMs - checkedAt));
+            if (ageDays >= 3) {
+                reasons.add("漏集信息可能过期（" + ageDays + " 天前）");
+            }
         }
 
         Long last = ani.getLastDownloadTime();
@@ -92,5 +102,31 @@ public final class SubscriptionHealth {
         if ("paused".equals(level)) return "停用";
         if ("completed".equals(level)) return "完结";
         return StrUtil.blankToDefault(level, "未知");
+    }
+
+    /**
+     * 列表页用：读取 Ani 上缓存的漏集数量，不访问网络。
+     * 全局/订阅关闭漏集或 OVA 时返回 0。
+     */
+    public static int cachedOmitCount(Ani ani, boolean globalOmitEnabled) {
+        if (ani == null || !globalOmitEnabled) {
+            return 0;
+        }
+        if (!Boolean.TRUE.equals(ani.getOmit()) || Boolean.TRUE.equals(ani.getOva())) {
+            return 0;
+        }
+        Integer n = ani.getOmitCount();
+        return n == null || n < 0 ? 0 : n;
+    }
+
+    /**
+     * 将 omitList 结果写回 Ani（下载/预览等已付出 RSS 成本的路径调用）。
+     */
+    public static void rememberOmit(Ani ani, int omitCount, long nowMs) {
+        if (ani == null) {
+            return;
+        }
+        ani.setOmitCount(Math.max(0, omitCount));
+        ani.setOmitCheckedAt(nowMs);
     }
 }

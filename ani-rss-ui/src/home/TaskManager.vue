@@ -748,8 +748,8 @@ const retryFailed = async (row) => {
   failedActingId.value = row.id
   try {
     const res = await http.failedDownloadQueueRetry(row.id)
-    ElMessage.success(res.message || '已触发重试')
-    failedItems.value = failedItems.value.filter(i => i.id !== row.id)
+    ElMessage.success(res.message || '已提交精确重下')
+    // 后台成功后才会从队列移除；失败仍保留，刷新列表即可
     await fetchStatus()
   } catch (_) {
   } finally {

@@ -223,6 +223,18 @@ public class Ani implements Serializable {
     private List<String> healthReasons;
 
     /**
+     * 最近一次 RSS 周期探测到的漏集数量（列表健康分用，预览仍实时算）
+     */
+    @Schema(description = "最近漏集数量")
+    private Integer omitCount;
+
+    /**
+     * 漏集数量刷新时间（epoch ms）
+     */
+    @Schema(description = "漏集探测时间")
+    private Long omitCheckedAt;
+
+    /**
      * 自定义集数获取规则
      */
     @Schema(description = "自定义集数获取规则")

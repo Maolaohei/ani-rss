@@ -335,9 +335,11 @@ public class AniController extends BaseController {
             int week = DateUtil.dayOfWeek(releaseDate) - 1;
             String weekLabel = weeks.get(week);
 
-            // 运维健康分（不落盘）；列表阶段不做 RSS 漏集探测，omit=0
+            // 运维健康分（不落盘）；列表用 RSS 周期缓存的漏集，避免 N 次拉源
             try {
-                SubscriptionHealth.Score health = SubscriptionHealth.compute(ani, 0, now);
+                boolean omitOn = Boolean.TRUE.equals(config.getOmit());
+                int omitCount = SubscriptionHealth.cachedOmitCount(ani, omitOn);
+                SubscriptionHealth.Score health = SubscriptionHealth.compute(ani, omitCount, now);
                 ani.setHealthScore(health.score())
                         .setHealthLevel(health.level())
                         .setHealthReasons(health.reasons());
@@ -464,6 +466,19 @@ public class AniController extends BaseController {
         }
 
         List<Integer> omitList = ItemsUtil.omitList(ani, items);
+        // 预览已拉 RSS：回写漏集缓存，供列表健康分使用
+        try {
+            Optional<Ani> live = AniUtil.getAniList().stream()
+                    .filter(a -> Objects.equals(a.getId(), ani.getId()))
+                    .findFirst();
+            Ani target = live.orElse(ani);
+            SubscriptionHealth.rememberOmit(target, omitList == null ? 0 : omitList.size(), System.currentTimeMillis());
+            if (live.isPresent()) {
+                AniUtil.sync();
+            }
+        } catch (Exception e) {
+            log.debug("回写漏集缓存失败: {}", e.getMessage());
+        }
 
         // 预览专用：合集折叠聚合
         items = ItemsUtil.groupCollectionForPreview(items);
@@ -533,7 +548,7 @@ public class AniController extends BaseController {
     }
 
     @Auth
-    @Operation(summary = "重试失败队列条目（触发对应订阅刷新）")
+    @Operation(summary = "重试失败队列条目（精确重下单条，不整订刷新）")
     @PostMapping("/failedDownloadQueueRetry")
     public Result<Void> failedDownloadQueueRetry(@RequestBody Map<String, Object> body) {
         String id = body == null || body.get("id") == null ? null : String.valueOf(body.get("id"));
@@ -547,29 +562,17 @@ public class AniController extends BaseController {
             return Result.error("条目不存在");
         }
         FailedDownloadQueue.FailedItem failed = hit.get();
-        Optional<Ani> aniOpt = AniUtil.getAniList().stream()
-                .filter(a -> Objects.equals(a.getId(), failed.getAniId()))
-                .findFirst();
-        if (aniOpt.isEmpty()) {
-            return Result.error("关联订阅不存在");
-        }
-        // 删除本地失败标记对应的种子缓存后触发订阅刷新，让 RSS 重新拉取
         try {
-            Ani ani = aniOpt.get();
-            if (StrUtil.isNotBlank(failed.getInfoHash())) {
-                File torrentDir = TorrentUtil.getTorrentDir(ani);
-                File[] files = torrentDir.listFiles();
-                if (files != null) {
-                    for (File f : files) {
-                        if (f.getName().toLowerCase(Locale.ROOT).contains(failed.getInfoHash().toLowerCase(Locale.ROOT))) {
-                            FileUtil.del(f);
-                        }
-                    }
+            // OpenList 可能长时间等待；后台执行，成功才 remove；失败保留/刷新队列
+            FailedDownloadQueue.FailedItem snapshot = failed;
+            ThreadUtil.execute(() -> {
+                try {
+                    downloadService.retryFailedItem(snapshot);
+                } catch (Exception e) {
+                    log.warn("精确重下失败 {}: {}", snapshot.getReName(), ExceptionUtils.getMessage(e));
                 }
-            }
-            FailedDownloadQueue.remove(id);
-            String msg = RssTask.submitManualRefresh(List.of(ani));
-            return Result.success(StrUtil.blankToDefault(msg, "已触发重试刷新"));
+            });
+            return Result.success("已提交精确重下");
         } catch (Exception e) {
             return Result.error("重试失败: " + ExceptionUtils.getMessage(e));
         }
