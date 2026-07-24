@@ -183,8 +183,33 @@ class OpenListResidualPolicyTest {
         assertTrue(empty.getSamples().isEmpty());
     }
 
+    @Test
+    void junk_and_protected_temp_file_classifier() {
+        assertTrue(OpenList.isJunkTempFile(new OpenListFileInfo().setName("a.aria2").setIsDir(false)));
+        assertTrue(OpenList.isJunkTempFile(new OpenListFileInfo().setName("x.tmp").setIsDir(false)));
+        assertFalse(OpenList.isJunkTempFile(new OpenListFileInfo().setName("a.mp4").setIsDir(false)));
+        assertFalse(OpenList.isJunkTempFile(new OpenListFileInfo().setName("notes.txt").setIsDir(false)));
 
-        @Test
+        assertTrue(OpenList.isProtectedTempFile(new OpenListFileInfo().setName("a.mp4").setIsDir(false)));
+        assertTrue(OpenList.isProtectedTempFile(new OpenListFileInfo().setName("a.ass").setIsDir(false)));
+        assertTrue(OpenList.isProtectedTempFile(new OpenListFileInfo().setName("notes.txt").setIsDir(false)));
+        assertFalse(OpenList.isProtectedTempFile(new OpenListFileInfo().setName("a.aria2").setIsDir(false)));
+        assertFalse(OpenList.isProtectedTempFile(new OpenListFileInfo().setName("dir").setIsDir(true)));
+    }
+
+    @Test
+    void isUnderPath_matches_temp_prefix() {
+        OpenListFileInfo nested = new OpenListFileInfo()
+                .setPath("/media/Show/Season 1/[ANi] 盗墓王 - 03")
+                .setName("ep.mp4");
+        assertTrue(OpenList.isUnderPath(nested, "/media/Show/Season 1/[ANi] 盗墓王 - 03"));
+        assertTrue(OpenList.isUnderPath(nested, "/media/Show/Season 1"));
+        assertFalse(OpenList.isUnderPath(nested, "/media/Show/Season 1/Show S01E03.mp4"));
+        assertFalse(OpenList.isUnderPath(nested, null));
+        assertFalse(OpenList.isUnderPath(null, "/media"));
+    }
+
+    @Test
     void collection_uses_subscription_template_instead_of_source_title() {
         OpenList openList = new OpenList();
 

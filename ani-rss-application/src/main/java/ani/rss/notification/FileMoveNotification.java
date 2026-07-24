@@ -110,6 +110,8 @@ public class FileMoveNotification implements BaseNotification {
             // 复制后再删除 确保不会中途失败
             FileUtil.del(file);
         }
+
+        cleanEmptyDirs(new File(src));
     }
 
     public void startMove(String src, String target) {
@@ -155,6 +157,32 @@ public class FileMoveNotification implements BaseNotification {
 
             // 复制后再删除 确保不会中途失败
             FileUtil.del(file);
+        }
+
+        // 移动后清理源侧空文件夹（合集种子常见嵌套目录残留）
+        cleanEmptyDirs(new File(src));
+    }
+
+    /**
+     * 自底向上删除空目录（保留 src 根本身）。
+     */
+    private void cleanEmptyDirs(File dir) {
+        if (dir == null || !dir.isDirectory()) {
+            return;
+        }
+        File[] children = dir.listFiles();
+        if (children == null) {
+            return;
+        }
+        for (File child : children) {
+            if (child.isDirectory()) {
+                cleanEmptyDirs(child);
+                File[] left = child.listFiles();
+                if (left != null && left.length == 0) {
+                    log.info("清理空文件夹: {}", child);
+                    FileUtil.del(child);
+                }
+            }
         }
     }
 

@@ -454,7 +454,10 @@ public class OpenList implements BaseDownload {
 
             if (videoList.isEmpty()) {
                 // 可能已在 savePath 落盘（历史完成/被其它路径移动）
-                List<OpenListFileInfo> saveFiles = findEpisodeFiles(savePath, finalRenameBase);
+                // 必须排除临时目录内的文件，否则「还在临时目录」会被误判为已完成并跳过移动
+                List<OpenListFileInfo> saveFiles = findEpisodeFiles(savePath, finalRenameBase).stream()
+                        .filter(f -> !isUnderPath(f, tempDownloadDir != null ? tempDownloadDir : null))
+                        .toList();
                 videoList = saveFiles.stream()
                         .filter(f -> FileUtils.isVideoFormat(f.getName()))
                         .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
@@ -464,8 +467,12 @@ public class OpenList implements BaseDownload {
                         .toList();
                 openListFileInfos = saveFiles;
                 if (!videoList.isEmpty()) {
-                    // 已在最终目录：不要再 rename/move 到自己，直接成功
+                    // 已在最终目录：不要再 rename/move 到自己，直接成功；
+                    // 视频/字幕已确认落盘，强制清掉临时目录（含嵌套残留）
                     log.info("本集文件已在最终目录，视为下载完成 {}", reName);
+                    if (tempDownloadDir != null) {
+                        cleanupTempDownloadDir(savePath, tempDirName, true);
+                    }
                     clearDuplicateMagnet(infoHash);
                     NotificationUtil.send(config, ani,
                             StrFormatter.format("{} 下载完成", item.getReName()),
@@ -603,22 +610,22 @@ public class OpenList implements BaseDownload {
                 allMovedNames.addAll(names);
             }
 
-            // 验证文件是否全部移动成功
-            List<OpenListFileInfo> movedFiles = findFiles(savePath).stream()
-                    .filter(f -> allMovedNames.contains(f.getName()))
-                    .toList();
+            // 验证必须落在最终目录顶层；findFiles(savePath) 会递归进临时目录，
+            // 若仍用它判定，未真正移出的文件也会被当成「已移动」，随后清理失败留下空壳。
+            Set<String> topLevelNames = fsList(savePath, true).stream()
+                    .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
+                    .map(OpenListFileInfo::getName)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toSet());
             List<String> missingNames = allMovedNames.stream()
-                    .filter(name -> movedFiles.stream().noneMatch(f -> f.getName().equals(name)))
+                    .filter(name -> !topLevelNames.contains(name))
                     .toList();
 
             if (!missingNames.isEmpty()) {
-                log.warn("部分文件移动失败，保留临时目录: {}", missingNames);
-            } else {
-                // 清理临时下载目录（仅在验证通过后）
-                if (tempDownloadDir != null) {
-                    fsRemove(savePath, List.of(tempDirName));
-                    log.info("已删除临时目录 {}/{}", savePath, tempDirName);
-                }
+                log.warn("部分文件未出现在最终目录顶层，保留临时目录: {}", missingNames);
+            } else if (tempDownloadDir != null) {
+                // 需要移动的视频/字幕已确认在最终目录顶层 → 强制删除临时目录
+                cleanupTempDownloadDir(savePath, tempDirName, true);
             }
 
             // 缺集校验：扫描整季目录，但日志只报告本次声明范围的命中情况。
@@ -830,6 +837,233 @@ public class OpenList implements BaseDownload {
                         "dir", dir,
                         "names", names
                 ))).then(res -> assertOpenListOk(res, "fs/remove " + dir));
+    }
+
+    /**
+     * 文件是否位于 prefix 目录下（含其自身路径）。
+     */
+    static boolean isUnderPath(OpenListFileInfo file, String prefix) {
+        if (file == null || StrUtil.isBlank(prefix)) {
+            return false;
+        }
+        String p = StrUtil.blankToDefault(file.getPath(), "").replace('\\', '/');
+        String n = StrUtil.blankToDefault(file.getName(), "").replace('\\', '/');
+        String full = p.endsWith("/" + n) || p.equals(n) ? p : (p.isEmpty() ? n : p + "/" + n);
+        String pref = prefix.replace('\\', '/');
+        while (pref.endsWith("/")) {
+            pref = pref.substring(0, pref.length() - 1);
+        }
+        return full.equalsIgnoreCase(pref)
+                || full.toLowerCase(Locale.ROOT).startsWith(pref.toLowerCase(Locale.ROOT) + "/");
+    }
+
+    /**
+     * 清理临时下载目录。
+     * <p>
+     * 前置条件由调用方保证：需要的视频/字幕已在最终目录顶层确认完成。
+     * 此时临时目录内无论还有嵌套媒体、垃圾还是空壳，一律删除（115 对非空目录
+     * 的 fs/remove 可整树删除）。force=false 仅用于谨慎场景，仍要求无受保护媒体。
+     */
+    void cleanupTempDownloadDir(String savePath, String tempDirName, boolean force) {
+        if (StrUtil.isBlank(savePath) || StrUtil.isBlank(tempDirName)) {
+            return;
+        }
+        String tempPath = savePath + "/" + tempDirName;
+        try {
+            // 目录不存在则无需清理
+            List<OpenListFileInfo> top = fsList(tempPath, true);
+            // OpenList 对不存在路径可能返回空列表或抛错；空也继续尝试 remove 幂等
+
+            if (!force) {
+                List<OpenListFileInfo> remaining = listFilesWithRetry(tempPath, 2);
+                List<OpenListFileInfo> mediaLeft = remaining.stream()
+                        .filter(OpenList::isProtectedTempFile)
+                        .toList();
+                if (!mediaLeft.isEmpty()) {
+                    log.warn("未强制清理且临时目录仍有媒体，跳过 {}: {}",
+                            tempPath, mediaLeft.stream().map(OpenListFileInfo::getName).toList());
+                    return;
+                }
+                // 非强制：先清垃圾/空壳，再删顶层
+                remaining.stream()
+                        .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
+                        .filter(OpenList::isJunkTempFile)
+                        .sorted(Comparator.comparingInt((OpenListFileInfo f) ->
+                                StrUtil.count(StrUtil.blankToDefault(f.getPath(), ""), "/")).reversed())
+                        .forEach(f -> {
+                            try {
+                                String dir = StrUtil.blankToDefault(f.getPath(), tempPath);
+                                log.info("删除临时残留文件 {}/{}", dir, f.getName());
+                                fsRemove(dir, List.of(f.getName()));
+                            } catch (Exception e) {
+                                log.warn("删除临时残留失败 {}/{}: {}", f.getPath(), f.getName(), e.getMessage());
+                            }
+                        });
+                removeEmptyDirsBottomUp(tempPath);
+            } else if (!top.isEmpty()) {
+                log.info("最终文件已确认，强制删除临时目录 {} (entries={})",
+                        tempPath, top.stream().map(OpenListFileInfo::getName).toList());
+            }
+
+            try {
+                // 115/OpenList：对非空目录直接 remove 顶层即可整树删除
+                fsRemove(savePath, List.of(tempDirName));
+                log.info("已删除临时目录 {}/{}", savePath, tempDirName);
+            } catch (Exception e) {
+                // 若顶层 remove 失败（部分实现拒绝非空），自底向上再试一次
+                log.warn("直接删除临时目录失败，尝试逐层清理 {}: {}", tempPath, e.getMessage());
+                try {
+                    forceRemoveTree(tempPath);
+                    fsRemove(savePath, List.of(tempDirName));
+                    log.info("逐层清理后已删除临时目录 {}/{}", savePath, tempDirName);
+                } catch (Exception e2) {
+                    log.warn("删除临时目录失败 {}: {}", tempPath, e2.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            log.warn("清理临时目录失败 {}: {}", tempPath, e.getMessage());
+        }
+    }
+
+    /**
+     * 自底向上强制删除 path 下所有文件与子目录（不含 path 自身）。
+     */
+    private void forceRemoveTree(String path) {
+        if (StrUtil.isBlank(path)) {
+            return;
+        }
+        invalidateFindFilesCache();
+        List<OpenListFileInfo> entries = fsList(path, true);
+        // 先递归子目录
+        for (OpenListFileInfo entry : entries) {
+            if (Boolean.TRUE.equals(entry.getIsDir())) {
+                String childPath = path + "/" + entry.getName();
+                forceRemoveTree(childPath);
+            }
+        }
+        // 再删当前层全部条目
+        List<String> names = entries.stream()
+                .map(OpenListFileInfo::getName)
+                .filter(StrUtil::isNotBlank)
+                .toList();
+        if (!names.isEmpty()) {
+            try {
+                fsRemove(path, names);
+            } catch (Exception e) {
+                // 逐个再试
+                for (String name : names) {
+                    try {
+                        fsRemove(path, List.of(name));
+                    } catch (Exception e2) {
+                        log.debug("强制删除失败 {}/{}: {}", path, name, e2.getMessage());
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 临时目录内应保留的文件：视频/字幕，或非垃圾的正文文件。
+     * 仅在 force=false 的谨慎清理路径使用。
+     */
+    static boolean isProtectedTempFile(OpenListFileInfo f) {
+        if (f == null || Boolean.TRUE.equals(f.getIsDir())) {
+            return false;
+        }
+        String name = f.getName();
+        if (StrUtil.isBlank(name)) {
+            return false;
+        }
+        if (FileUtils.isVideoFormat(name) || FileUtils.isSubtitleFormat(name)) {
+            return true;
+        }
+        return !isJunkTempFile(f);
+    }
+
+    static boolean isJunkTempFile(OpenListFileInfo f) {
+        if (f == null || Boolean.TRUE.equals(f.getIsDir())) {
+            return false;
+        }
+        String name = StrUtil.blankToDefault(f.getName(), "").toLowerCase(Locale.ROOT);
+        return name.endsWith(".aria2")
+                || name.endsWith(".tmp")
+                || name.endsWith(".temp")
+                || name.endsWith(".!qb")
+                || name.endsWith(".part")
+                || name.endsWith(".bc!")
+                || name.equals("thumbs.db")
+                || name.equals(".ds_store");
+    }
+
+    private List<OpenListFileInfo> listFilesWithRetry(String path, int attempts) {
+        List<OpenListFileInfo> last = List.of();
+        int n = Math.max(1, attempts);
+        for (int i = 0; i < n; i++) {
+            invalidateFindFilesCache();
+            last = findFiles(path);
+            if (!last.isEmpty() || i == n - 1) {
+                return last;
+            }
+            ThreadUtil.sleep(500L * (i + 1));
+        }
+        return last;
+    }
+
+    /**
+     * 自底向上删除 path 下的空子目录，并清理其中的垃圾残留。
+     * 不删除 path 自身（顶层临时目录由调用方 fsRemove）。
+     */
+    private void removeEmptyDirsBottomUp(String path) {
+        if (StrUtil.isBlank(path)) {
+            return;
+        }
+        List<OpenListFileInfo> entries = fsList(path, true);
+        for (OpenListFileInfo entry : entries) {
+            if (!Boolean.TRUE.equals(entry.getIsDir())) {
+                continue;
+            }
+            String childPath = path + "/" + entry.getName();
+            removeEmptyDirsBottomUp(childPath);
+
+            for (OpenListFileInfo child : fsList(childPath, true)) {
+                if (Boolean.TRUE.equals(child.getIsDir())) {
+                    continue;
+                }
+                if (!isJunkTempFile(child)) {
+                    continue;
+                }
+                try {
+                    fsRemove(childPath, List.of(child.getName()));
+                } catch (Exception e) {
+                    log.debug("删除空子目录残留失败 {}/{}: {}", childPath, child.getName(), e.getMessage());
+                }
+            }
+
+            List<OpenListFileInfo> after = fsList(childPath, true);
+            boolean hasProtected = after.stream().anyMatch(f ->
+                    Boolean.TRUE.equals(f.getIsDir()) || isProtectedTempFile(f));
+            if (!hasProtected && after.stream().allMatch(f -> Boolean.TRUE.equals(f.getIsDir()) || isJunkTempFile(f))) {
+                for (OpenListFileInfo junk : after) {
+                    if (Boolean.TRUE.equals(junk.getIsDir())) {
+                        continue;
+                    }
+                    try {
+                        fsRemove(childPath, List.of(junk.getName()));
+                    } catch (Exception e) {
+                        log.debug("删除垃圾失败 {}/{}: {}", childPath, junk.getName(), e.getMessage());
+                    }
+                }
+                after = fsList(childPath, true);
+            }
+            if (after.isEmpty()) {
+                try {
+                    fsRemove(path, List.of(entry.getName()));
+                    log.info("删除空子目录 {}/{}", path, entry.getName());
+                } catch (Exception e) {
+                    log.debug("删除空子目录失败 {}/{}: {}", path, entry.getName(), e.getMessage());
+                }
+            }
+        }
     }
 
     /**
