@@ -72,6 +72,7 @@ export let configData = {
     "downloadNew": false,
     "innerIP": false,
     "renameTemplate": "[${subgroup}] ${title} S${seasonFormat}.E${episodeFormat} ${episodeTitle}",
+    "ovaRenameTemplate": "${title} (${year}) [${subgroup}]",
     "renameDelYear": false,
     "renameDelTmdbId": false,
     "maxFileNameLength": 0,

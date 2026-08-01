@@ -20,6 +20,7 @@ export let aniData = {
     ],
     "globalExclude": true,
     "ova": false,
+    "mediaType": "",
     "pinyin": "",
     "enable": true,
     "currentEpisodeNumber": 10,

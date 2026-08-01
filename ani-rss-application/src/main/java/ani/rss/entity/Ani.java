@@ -148,6 +148,13 @@ public class Ani implements Serializable {
     private Boolean ova;
 
     /**
+     * 媒体类型: movie=剧场版(电影式命名), ova=OVA(特典式命名)
+     * 仅 ova=true 时有效; 为空时按剧场版(电影式)处理
+     */
+    @Schema(description = "媒体类型: movie=剧场版(电影式命名), ova=OVA(特典式命名)")
+    private String mediaType;
+
+    /**
      * 拼音
      */
     @Schema(description = "拼音")

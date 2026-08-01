@@ -89,8 +89,12 @@
               <el-form-item label="全局排除">
                 <el-switch v-model:model-value="data.ani['globalExclude']"/>
               </el-form-item>
-              <el-form-item label="剧场版">
-                <el-switch v-model:model-value="data.ani.ova"/>
+              <el-form-item label="类型">
+                <el-radio-group v-model:model-value="aniType">
+                  <el-radio :value="0">普通番剧</el-radio>
+                  <el-radio :value="1">剧场版(电影)</el-radio>
+                  <el-radio :value="2">OVA(特典)</el-radio>
+                </el-radio-group>
               </el-form-item>
               <el-form-item label="自定义集数规则">
                 <div class="flex full-width">
@@ -192,7 +196,7 @@
 </template>
 
 <script setup>
-import {ref} from "vue";
+import {computed, ref} from "vue";
 import {UploadFilled} from "@element-plus/icons-vue";
 import {ElMessage, ElMessageBox} from "element-plus";
 import Bgm from "./Bgm.vue";
@@ -284,6 +288,17 @@ let data = ref({
   torrent: '',
   ani: aniData,
   show: false,
+})
+
+// 媒体类型: 普通番剧(0) / 剧场版电影(1) / OVA特典(2)
+let aniType = computed({
+  get: () => data.value.ani.ova
+      ? (data.value.ani.mediaType === 'ova' ? 2 : 1)
+      : 0,
+  set: v => {
+    data.value.ani.ova = v > 0
+    data.value.ani.mediaType = v === 1 ? 'movie' : (v === 2 ? 'ova' : '')
+  }
 })
 
 let beforeAvatarUpload = (rawFile) => {

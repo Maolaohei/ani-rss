@@ -45,6 +45,20 @@
         </el-text>
       </div>
     </el-form-item>
+    <el-form-item label="剧场版重命名模版(电影式)">
+      <div class="full-width">
+        <div>
+          <el-input v-model:model-value="props.config.ovaRenameTemplate"
+                    placeholder="${title} (${year}) [${subgroup}]"/>
+        </div>
+        <el-text class="mx-1" size="small">
+          仅对剧场版生效（媒体类型选"剧场版"），不包含 S/E 占位符，便于 Emby/Jellyfin 识别为电影。
+          多部（上/中/下、Part N）会自动追加 Part N，可用 ${part} 占位符自定义位置。
+          留空使用内置默认 ${title} (${year}) [${subgroup}]。OVA 特典不受此模板影响。
+          注意：开启上方"剔除年份"会把 ${year} 生成的年份一并移除。
+        </el-text>
+      </div>
+    </el-form-item>
     <el-form-item label="剔除年份">
       <div>
         <el-switch v-model:model-value="props.config.renameDelYear"/>

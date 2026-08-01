@@ -130,8 +130,12 @@
             <el-form-item label="全局排除">
               <el-switch v-model:model-value="props.ani['globalExclude']"/>
             </el-form-item>
-            <el-form-item label="剧场版">
-              <el-switch v-model:model-value="props.ani.ova"/>
+            <el-form-item label="类型">
+              <el-radio-group v-model:model-value="aniType">
+                <el-radio :value="0">普通番剧</el-radio>
+                <el-radio :value="1">剧场版(电影)</el-radio>
+                <el-radio :value="2">OVA(特典)</el-radio>
+              </el-radio-group>
             </el-form-item>
             <el-form-item label="新版命名">
               <el-switch v-model:model-value="props.ani['namingVersion']"
@@ -314,7 +318,7 @@
 import Exclude from "@/config/Exclude.vue";
 import PrioKeys from "@/config/PrioKeys.vue";
 import Preview from "./Preview.vue";
-import {onMounted, ref} from "vue";
+import {computed, onMounted, ref} from "vue";
 import {ElMessage, ElMessageBox, ElText} from "element-plus";
 import StandbyRss from "./StandbyRss.vue";
 import Mikan from "./Mikan.vue";
@@ -475,6 +479,17 @@ let aniBTShow = () => {
 }
 
 let props = defineProps(['ani'])
+
+// 媒体类型: 普通番剧(0) / 剧场版电影(1) / OVA特典(2)
+let aniType = computed({
+  get: () => props.ani.ova
+      ? (props.ani.mediaType === 'ova' ? 2 : 1)
+      : 0,
+  set: v => {
+    props.ani.ova = v > 0
+    props.ani.mediaType = v === 1 ? 'movie' : (v === 2 ? 'ova' : '')
+  }
+})
 const emit = defineEmits(['callback'])
 </script>
 

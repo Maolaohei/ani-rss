@@ -442,6 +442,12 @@ public class Config implements Serializable {
     private String renameTemplate;
 
     /**
+     * 剧场版重命名模版
+     */
+    @Schema(description = "剧场版重命名模版, 留空时跟随普通重命名模版")
+    private String ovaRenameTemplate;
+
+    /**
      * 重命名时剔除 年份 如 (2024)
      */
     @Schema(description = "重命名剔除年份")

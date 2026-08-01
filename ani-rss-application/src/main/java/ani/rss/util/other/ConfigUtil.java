@@ -183,6 +183,7 @@ public class ConfigUtil {
                 .setDownloadNew(false)
                 .setInnerIP(false)
                 .setRenameTemplate("[${subgroup}] ${title} S${seasonFormat}.E${episodeFormat} ${episodeTitle}")
+                .setOvaRenameTemplate("${title} (${year}) [${subgroup}]")
                 .setRenameDelYear(false)
                 .setRenameDelTmdbId(false)
                 .setPriorityKeywordsEnable(false)

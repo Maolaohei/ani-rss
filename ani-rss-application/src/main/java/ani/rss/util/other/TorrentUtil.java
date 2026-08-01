@@ -120,28 +120,119 @@ public class TorrentUtil {
     }
 
     /**
+     * 获取待完成标记(OpenList 离线提交时写入, 完成前不算已下载)
+     *
+     * @param ani
+     * @param item
+     * @return
+     */
+    public static File getPendingTorrentDir(Ani ani) {
+        String title = ani.getTitle();
+        Boolean ova = ani.getOva();
+        Integer season = ani.getSeason();
+        File configDir = ConfigUtil.getConfigDir();
+
+        File dir;
+        if (Boolean.TRUE.equals(ova)) {
+            dir = new File(StrFormatter.format("{}/torrents/.pending/{}", configDir, title));
+        } else {
+            dir = new File(StrFormatter.format("{}/torrents/.pending/{}/Season {}", configDir, title, season));
+        }
+        FileUtil.mkdir(dir);
+        return dir;
+    }
+
+    /**
+     * 获取待完成标记文件
+     *
+     * @param ani
+     * @param item
+     * @return
+     */
+    public static File getPendingTorrent(Ani ani, Item item) {
+        String infoHash = item.getInfoHash();
+        File pendingDir = getPendingTorrentDir(ani);
+        String torrent = item.getTorrent();
+        if (ReUtil.contains(StringEnum.MAGNET_REG, torrent)
+                || ReUtil.contains(StringEnum.ED2K_REG, torrent)) {
+            return new File(pendingDir, infoHash + ".txt");
+        }
+        return new File(pendingDir, infoHash + ".torrent");
+    }
+
+    /**
      * 下载种子文件
      *
      * @param item
      */
     public static File saveTorrent(Ani ani, Item item) {
+        log.info("下载种子 {}", item.getReName());
+        return writeTorrentFile(getTorrent(ani, item), item);
+    }
+
+    /**
+     * 下载种子文件到待完成标记位置(OpenList 提交时使用, 完成前不算已下载)
+     *
+     * @param ani
+     * @param item
+     */
+    public static File saveTorrentPending(Ani ani, Item item) {
+        log.info("下载种子(待完成标记) {}", item.getReName());
+        return writeTorrentFile(getPendingTorrent(ani, item), item);
+    }
+
+    /**
+     * OpenList 离线完成后, 将待完成标记提升为正式种子记录。
+     * 无待完成标记时(已完成提升/进程重启等)不新建正式记录, 避免误判已下载。
+     *
+     * @param ani
+     * @param item
+     */
+    public static void promoteTorrent(Ani ani, Item item) {
+        File pending = getPendingTorrent(ani, item);
+        if (!pending.exists()) {
+            log.debug("无待完成标记, 跳过提升 {}", item.getReName());
+            return;
+        }
+        File target = getTorrent(ani, item);
+        if (target.exists()) {
+            // 正式记录已存在(如提升过), 清理 pending 即可
+            FileUtil.del(pending);
+            return;
+        }
+        FileUtil.move(pending, target, true);
+        log.info("离线任务完成, 种子记录落盘 {}", item.getReName());
+    }
+
+    /**
+     * 删除待完成标记(OpenList 离线失败/超时), 预览将不再显示已下载。
+     * 仅删标记文件, 不清理目录: 多订阅并行时可能误删他订阅刚创建的空目录,
+     * 残留空目录无害, 交由 getPendingTorrentDir 幂等 mkdir。
+     *
+     * @param ani
+     * @param item
+     */
+    public static void deletePendingTorrent(Ani ani, Item item) {
+        File pending = getPendingTorrent(ani, item);
+        if (pending.exists()) {
+            FileUtil.del(pending);
+            log.info("离线任务未完成, 清除待完成标记 {}", item.getReName());
+        }
+    }
+
+    /**
+     * 下载种子内容并写入目标文件(幂等: 已存在直接返回)
+     */
+    private static File writeTorrentFile(File saveTorrentFile, Item item) {
         String torrent = item.getTorrent();
         String reName = item.getReName();
-
-        log.info("下载种子 {}", reName);
-        File saveTorrentFile = getTorrent(ani, item);
         if (saveTorrentFile.exists()) {
             return saveTorrentFile;
         }
 
         try {
-            if (ReUtil.contains(StringEnum.MAGNET_REG, torrent)) {
-                FileUtil.writeUtf8String(torrent, saveTorrentFile);
-                log.info("种子下载完成 {}", reName);
-                return saveTorrentFile;
-            }
-
-            if (ReUtil.contains(StringEnum.ED2K_REG, torrent)) {
+            if (ReUtil.contains(StringEnum.MAGNET_REG, torrent)
+                    || ReUtil.contains(StringEnum.ED2K_REG, torrent)) {
                 FileUtil.writeUtf8String(torrent, saveTorrentFile);
                 log.info("种子下载完成 {}", reName);
                 return saveTorrentFile;

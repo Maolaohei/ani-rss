@@ -47,9 +47,9 @@ public class RenameUtil {
     // 中文范围: 第1-6话, 第1～12集
     public static final String CN_RANGE_REG = "第(\\d+)[~～-](\\d+)[话話集]";
 
-    // 分割部分: 上篇/下篇/Part 1/P1/上/下 等
-    // 裸 上/下 需边界，避免「下载」「上场」等误识别；上篇/下篇 等更长词仍优先
-    public static final String PART_REG = "(上篇|下篇|前篇|後篇|前编|后编|前編|後編|第一部|第二部|第三部|Part\\s?[1-9](?![0-9])|P[1-9](?![0-9])|(?<![\\p{L}\\p{N}])(?:上|下)(?![\\p{L}\\p{N}篇部编編]))";
+    // 分割部分: 上篇/中篇/下篇/Part 1/P1/上/下 等
+    // 裸 上/下 需边界，避免「下载」「上场」等误识别；上篇/中篇/下篇 等更长词仍优先
+    public static final String PART_REG = "(上篇|中篇|下篇|前篇|後篇|前编|后编|前編|後編|第一部|第二部|第三部|Part\\s?[1-9](?![0-9])|P[1-9](?![0-9])|(?<![\\p{L}\\p{N}])(?:上|下)(?![\\p{L}\\p{N}篇部编編]))";
 
     // 分数格式: (1/2), (2/3)
     public static final String FRACTION_REG = "\\((\\d+)/(\\d+)\\)";
@@ -82,6 +82,23 @@ public class RenameUtil {
     public static boolean isNamingV2(Ani ani) {
         Integer v = ani.getNamingVersion();
         return v != null && v == 2;
+    }
+
+    /**
+     * 是否为剧场版(电影式命名)。
+     * ova=true 且 mediaType=movie 时视为剧场版; mediaType 为空(旧数据)时默认按剧场版处理。
+     * OVA(mediaType=ova)保持特典式命名。
+     */
+    public static boolean isMovie(Ani ani) {
+        if (ani == null || !Boolean.TRUE.equals(ani.getOva())) {
+            return false;
+        }
+        String mediaType = ani.getMediaType();
+        if (StrUtil.isBlank(mediaType)) {
+            // 兼容旧数据: 无法区分来源时默认按剧场版(电影式)处理
+            return true;
+        }
+        return "movie".equalsIgnoreCase(mediaType);
     }
 
     /**
@@ -184,8 +201,8 @@ public class RenameUtil {
     public static int mapPartToEpisode(String part) {
         return switch (part) {
             case "上篇", "前篇", "前编", "前編", "第一部", "Part 1", "P1", "Part1", "上" -> 1;
-            case "下篇", "後篇", "后编", "後編", "第二部", "Part 2", "P2", "Part2", "下" -> 2;
-            case "Part 3", "P3", "第三部", "Part3" -> 3;
+            case "中篇", "後篇", "后编", "後編", "第二部", "Part 2", "P2", "Part2" -> 2;
+            case "下篇", "第三部", "Part 3", "P3", "Part3", "下" -> 3;
             default -> 0;
         };
     }
@@ -237,24 +254,41 @@ public class RenameUtil {
         itemTitle = itemTitle.replace("\t", " ").trim();
         itemTitle = itemTitle.replaceAll("\\[([A-Z]|\\d){8}]$", "").trim();
 
-        // OVA v2: 尝试解析集数，失败则保持 episode=1.0
+        // OVA v2: 区分剧场版(电影式)与 OVA(特典式)
+        int moviePart = 0;
         if (ova && v2) {
-            String e = tryExtractEpisode(itemTitle, ani);
-            if (StrUtil.isNotBlank(e)) {
-                String episodeStr = ReUtil.get("\\d+(\\.5)?", e, 0);
-                if (StrUtil.isNotBlank(episodeStr)) {
-                    double episode = Double.parseDouble(episodeStr) + offset;
-                    item.setEpisode(episode);
+            if (isMovie(ani)) {
+                // 剧场版: 电影式命名(Emby Movies 库), 不按剧集解析
+                title = renameDel(title);
+                // 防御：标题为空时从 RSS 标题中提取番剧名（支持中英文括号）
+                if (StrUtil.isBlank(title)) {
+                    Matcher bracketM = Pattern.compile("(?:\\[|【)(.+?)(?:\\]|】)").matcher(itemTitle);
+                    if (bracketM.find() && bracketM.find()) {
+                        title = bracketM.group(1).trim();
+                    }
                 }
-            }
-            // OVA 使用 S00 命名
-            season = 0;
-            title = renameDel(title);
-            // 防御：标题为空时从 RSS 标题中提取番剧名（支持中英文括号）
-            if (StrUtil.isBlank(title)) {
-                Matcher bracketM = Pattern.compile("(?:\\[|【)(.+?)(?:\\]|】)").matcher(itemTitle);
-                if (bracketM.find() && bracketM.find()) {
-                    title = bracketM.group(1).trim();
+                // 多部(上/下/Part N): 解析部序号作为 episode(去重与 Part 后缀用)
+                moviePart = extractPartEpisode(itemTitle);
+                item.setEpisode(moviePart > 0 ? (double) moviePart : 1.0);
+            } else {
+                // OVA: 特典式命名, 尝试解析集数, 失败则保持 episode=1.0
+                String e = tryExtractEpisode(itemTitle, ani);
+                if (StrUtil.isNotBlank(e)) {
+                    String episodeStr = ReUtil.get("\\d+(\\.5)?", e, 0);
+                    if (StrUtil.isNotBlank(episodeStr)) {
+                        double episode = Double.parseDouble(episodeStr) + offset;
+                        item.setEpisode(episode);
+                    }
+                }
+                // OVA 使用 S00 命名
+                season = 0;
+                title = renameDel(title);
+                // 防御：标题为空时从 RSS 标题中提取番剧名（支持中英文括号）
+                if (StrUtil.isBlank(title)) {
+                    Matcher bracketM = Pattern.compile("(?:\\[|【)(.+?)(?:\\]|】)").matcher(itemTitle);
+                    if (bracketM.find() && bracketM.find()) {
+                        title = bracketM.group(1).trim();
+                    }
                 }
             }
         }
@@ -339,6 +373,16 @@ public class RenameUtil {
         renameTemplate = renameTemplate.replace("${resolution}", resolution);
         renameTemplate = renameTemplate.replace("${tmdbid}", tmdbId);
         renameTemplate = renameTemplate.replace("${title}", title);
+
+        // 剧场版多部: Part N 序号(仅电影式命名使用; 单部时 ${part} 替换为空)
+        if (isMovie(ani)) {
+            if (renameTemplate.contains("${part}")) {
+                renameTemplate = renameTemplate.replace("${part}",
+                        moviePart > 0 ? "Part " + moviePart : "");
+            } else if (moviePart > 0) {
+                renameTemplate = renameTemplate + " Part " + moviePart;
+            }
+        }
 
         renameTemplate = replaceEpisodeTitle(renameTemplate, episode, ani);
 
@@ -478,6 +522,15 @@ public class RenameUtil {
     public static String getRenameTemplate(Ani ani) {
         Config config = ConfigUtil.CONFIG;
         String renameTemplate = config.getRenameTemplate();
+
+        // 剧场版(电影式命名): 使用独立电影模板, 未配置时使用内置电影式默认
+        // OVA(特典式)继续使用普通模板, 由 rename() 固定 season=0 产生 S00Exx
+        if (isMovie(ani)) {
+            String movieTemplate = config.getOvaRenameTemplate();
+            renameTemplate = StrUtil.isNotBlank(movieTemplate)
+                    ? movieTemplate
+                    : "${title} (${year}) [${subgroup}]";
+        }
 
         Boolean customRenameTemplateEnable = ani.getCustomRenameTemplateEnable();
         String customRenameTemplate = ani.getCustomRenameTemplate();

@@ -306,7 +306,11 @@ public class DownloadService {
                 }
             }
 
-            File saveTorrent = TorrentUtil.saveTorrent(ani, item);
+            // OpenList 提交 != 完成：先写待完成标记，离线完成后才提升为正式种子记录
+            // 其余下载方式保持原行为：提交即写正式记录（预览视为已下载）
+            File saveTorrent = isOpenListTool()
+                    ? TorrentUtil.saveTorrentPending(ani, item)
+                    : TorrentUtil.saveTorrent(ani, item);
 
             if (!saveTorrent.exists()) {
                 // 种子下载失败
@@ -504,6 +508,14 @@ public class DownloadService {
      * @param savePath
      * @param torrentFile
      */
+    /**
+     * 是否 OpenList/Alist 下载方式(离线下载, 提交 != 完成, 需 pending 标记)
+     */
+    private static boolean isOpenListTool() {
+        String toolType = StrUtil.blankToDefault(ConfigUtil.CONFIG.getDownloadToolType(), "");
+        return StrUtil.equalsAnyIgnoreCase(toolType, "OpenList", "Alist");
+    }
+
     public void download(Ani ani, Item item, String savePath, File torrentFile) {
         ani = ObjectUtil.clone(ani);
 
@@ -532,8 +544,7 @@ public class DownloadService {
 
         Integer downloadRetry = config.getDownloadRetry();
         // OpenList/Alist 内部会长时间等待离线完成，不能持有全局下载器锁，否则会把 3 路并行订阅串成 1 路
-        String toolType = StrUtil.blankToDefault(config.getDownloadToolType(), "");
-        boolean openListTool = StrUtil.equalsAnyIgnoreCase(toolType, "OpenList", "Alist");
+        boolean openListTool = isOpenListTool();
         boolean holdToolLock = !openListTool;
         // OpenList 已在内部按【离线超时】硬等待，外层再乘 downloadRetry 会把总等待放大成 N 倍
         int maxAttempts = openListTool ? 1 : ObjectUtil.defaultIfNull(downloadRetry, 1);
@@ -551,6 +562,11 @@ public class DownloadService {
                     ok = TorrentUtil.DOWNLOAD.download(ani, item, savePath, torrentFile);
                 }
                 if (ok) {
+                    // OpenList: 离线真正完成才把 pending 标记提升为正式种子记录,
+                    // 提交/进行中/失败均不产生正式记录, 预览不会误判"已下载"
+                    if (openListTool) {
+                        TorrentUtil.promoteTorrent(ani, item);
+                    }
                     TorrentUtil.refreshTorrentsCache();
                     return;
                 }
@@ -563,6 +579,7 @@ public class DownloadService {
                     NotificationUtil.send(ConfigUtil.CONFIG, ani,
                             TaskFailureHumanizer.formatNotify(name, raw),
                             NotificationStatusEnum.ERROR);
+                    TorrentUtil.deletePendingTorrent(ani, item);
                     return;
                 }
             } catch (ani.rss.download.OfflineTimeoutException e) {
@@ -573,6 +590,7 @@ public class DownloadService {
                 NotificationUtil.send(ConfigUtil.CONFIG, ani,
                         TaskFailureHumanizer.formatNotify(name, message),
                         NotificationStatusEnum.ERROR);
+                TorrentUtil.deletePendingTorrent(ani, item);
                 return;
             } catch (Exception e) {
                 String message = ExceptionUtils.getMessage(e);
@@ -583,6 +601,18 @@ public class DownloadService {
                 // 失败退避：1s、2s、3s...
                 ThreadUtil.sleep(Math.min(1000L * i, 3000L));
             }
+        }
+
+        if (openListTool) {
+            // OpenList 普通异常:按离线未完成处理, 清 pending, 不报坏种
+            String raw = name + " 离线下载未完成（OpenList 异常，非坏种）";
+            log.error(raw);
+            recordDownloadFailure(ani, item, raw);
+            NotificationUtil.send(ConfigUtil.CONFIG, ani,
+                    TaskFailureHumanizer.formatNotify(name, raw),
+                    NotificationStatusEnum.ERROR);
+            TorrentUtil.deletePendingTorrent(ani, item);
+            return;
         }
 
         // 删除下载失败的种子, 下次轮询仍会重试
@@ -651,7 +681,9 @@ public class DownloadService {
                 }
             }
 
-            File saved = TorrentUtil.saveTorrent(ani, match);
+            File saved = isOpenListTool()
+                    ? TorrentUtil.saveTorrentPending(ani, match)
+                    : TorrentUtil.saveTorrent(ani, match);
             if (saved == null || !saved.exists()) {
                 String raw = StrUtil.blankToDefault(match.getReName(), failed.getReName()) + " 种子下载失败，无法重试";
                 recordDownloadFailure(ani, match, raw);
@@ -919,6 +951,8 @@ public class DownloadService {
     private Set<String> buildLocalEpisodeIndex(Ani ani, String downloadPath) {
         Set<String> index = new HashSet<>();
         boolean ovaLegacy = Boolean.TRUE.equals(ani.getOva()) && !RenameUtil.isNamingV2(ani);
+        // 剧场版(电影式)文件名不含 SxxExx, 按文件名主名索引
+        boolean movieStyle = RenameUtil.isMovie(ani);
         List<File> files = FileUtils.listFileList(downloadPath);
         for (File file : files) {
             if (file.isFile()) {
@@ -936,6 +970,10 @@ public class DownloadService {
                 continue;
             }
             mainName = mainName.trim().toUpperCase();
+            if (movieStyle) {
+                index.add("M:" + mainName);
+                continue;
+            }
             if (!ReUtil.contains(StringEnum.SEASON_REG, mainName)) {
                 continue;
             }
@@ -1023,9 +1061,14 @@ public class DownloadService {
         }
 
         boolean ovaLegacy = Boolean.TRUE.equals(ova) && !RenameUtil.isNamingV2(ani);
+        // 剧场版(电影式): 按文件名主名匹配(M: 前缀)
+        boolean movieStyle = RenameUtil.isMovie(ani);
         boolean exists;
         if (ovaLegacy) {
             exists = localEpisodeIndex.contains("*");
+        } else if (movieStyle) {
+            exists = StrUtil.isNotBlank(reName)
+                    && localEpisodeIndex.contains("M:" + reName.trim().toUpperCase());
         } else if (episode == null) {
             exists = false;
         } else {

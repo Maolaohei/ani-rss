@@ -858,6 +858,13 @@ public class BgmUtil {
                 // 本地图片地址
                 .setCover(AniUtil.saveCover(image));
 
+        // 媒体类型: 仅来源明确时设置, 避免覆盖用户手动选择的剧场版/OVA
+        if ("剧场版".equals(platform)) {
+            ani.setMediaType("movie");
+        } else if ("OVA".equals(platform)) {
+            ani.setMediaType("ova");
+        }
+
         // 获取tmdb标题
         String themoviedbName = TmdbUtils.getFinalName(ani);
 
