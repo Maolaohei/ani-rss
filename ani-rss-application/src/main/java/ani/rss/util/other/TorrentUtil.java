@@ -221,6 +221,34 @@ public class TorrentUtil {
     }
 
     /**
+     * 启动时清理 .pending 残留: 仅删除"对应正式种子记录已存在"的标记
+     * (promote 后遗留或历史崩溃残留)。正式记录不存在的不动——可能是进行中的离线任务,
+     * 由同 hash 提交时的 adopt/复用逻辑处理。
+     */
+    public static void cleanupOrphanPending() {
+        try {
+            File configDir = ConfigUtil.getConfigDir();
+            File pendingRoot = new File(configDir, "torrents/.pending");
+            if (!pendingRoot.isDirectory()) {
+                return;
+            }
+            FileUtil.walkFiles(pendingRoot, f -> {
+                if (!f.isFile()) {
+                    return;
+                }
+                String rel = pendingRoot.toPath().relativize(f.toPath()).toString();
+                File formal = new File(new File(configDir, "torrents"), rel);
+                if (formal.exists()) {
+                    FileUtil.del(f);
+                    log.info("清理已完成任务的 pending 残留: {}", rel);
+                }
+            });
+        } catch (Exception e) {
+            log.warn("清理 pending 残留失败: {}", ExceptionUtils.getMessage(e));
+        }
+    }
+
+    /**
      * 下载种子内容并写入目标文件(幂等: 已存在直接返回)
      */
     private static File writeTorrentFile(File saveTorrentFile, Item item) {

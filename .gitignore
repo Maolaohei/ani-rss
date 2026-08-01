@@ -56,4 +56,4 @@ ani-rss-update.exe
 build.info
 *.versionsBackup
 .pnpm-store
-test/
+/test/

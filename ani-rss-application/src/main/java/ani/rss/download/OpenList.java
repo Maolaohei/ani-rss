@@ -250,6 +250,9 @@ public class OpenList implements BaseDownload {
                     throw new OfflineTimeoutException(reName + " 等待同 hash 任务超过离线超时 " + waitMinutes + " 分钟");
                 } else {
                     log.info("同 hash 任务已结束 {}", reName);
+                    // 等待方未实际提交下载: 清除本订阅的 pending 标记,
+                    // 避免 DownloadService 收到 true 后将其提升为正式记录(假完成, 导致永久漏下)
+                    TorrentUtil.deletePendingTorrent(ani, item);
                 }
                 return true;
             }
@@ -529,15 +532,25 @@ public class OpenList implements BaseDownload {
                         videoReName = collectionEpisodeReName(videoName, finalRenameBase, ani.getSeason());
                     } else {
                         String episode = extractEpisodeFromFileName(videoName);
-                        if (episode != null && finalRenameBase.contains(".E")) {
+                        if (episode == null) {
+                            // 特典/无集数文件([Character PV 01]、[CM]、[Menu]、SPs 等): 保留原名, 避免与正片重命名冲突
+                            videoReName = videoBase;
+                        } else if (finalRenameBase.contains(".E")) {
                             videoReName = finalRenameBase.replaceAll("\\.E\\d+(\\.5)?", ".E" + episode);
-                        } else if (episode != null && finalRenameBase.matches(".*[Ss]\\d+.*E\\d+.*")) {
+                        } else if (finalRenameBase.matches(".*[Ss]\\d+.*E\\d+.*")) {
                             videoReName = finalRenameBase.replaceAll("E\\d+(\\.5)?", "E" + episode);
                         } else {
                             videoReName = finalRenameBase;
                         }
                     }
-                    renameMap.put(videoName, videoReName + "." + videoExt);
+                    String videoTarget = videoReName + "." + videoExt;
+                    // 同集多版本/多语言(如柯南同集 CHT/CHS/MKV): 目标名冲突时保留原名, 避免互相覆盖
+                    if (!renameMap.containsValue(videoTarget)) {
+                        renameMap.put(videoName, videoTarget);
+                    } else {
+                        log.info("同集多版本, 保留原名: {}", videoName);
+                        renameMap.put(videoName, videoBase + "." + videoExt);
+                    }
 
                     for (OpenListFileInfo sub : subtitleList) {
                         String subName = sub.getName();
@@ -697,7 +710,8 @@ public class OpenList implements BaseDownload {
 
         String episode = extractEpisodeFromFileName(originalName);
         if (StrUtil.isBlank(episode)) {
-            return reName;
+            // 特典/无集数文件([Character PV 01]、[CM]、[Menu]、SPs 等): 保留原名, 避免与正片重命名冲突
+            return FileUtil.mainName(originalName);
         }
         if (reName.contains(".E")) {
             return reName.replaceAll("\\.E\\d+(\\.5)?", ".E" + episode);

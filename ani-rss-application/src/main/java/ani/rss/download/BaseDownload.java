@@ -172,20 +172,50 @@ public interface BaseDownload {
     }
 
     /**
-     * 从文件名中提取集数 (EP01, - 01, [01] 等格式)
+     * 从文件名中提取集数 (EP01, - 01, [01] 等格式), 过滤年份/日期
      */
     default String extractEpisodeFromFileName(String name) {
         String mainName = FileUtil.mainName(name);
+        // 特典/菜单/CM/PV/OP/ED 等不参与集数提取
+        String upper = mainName.toUpperCase();
+        if (upper.contains("[MENU") || upper.contains("[CM]") || upper.contains("[PV")
+                || upper.contains("NCOP") || upper.contains("NCED")
+                || upper.contains("[SP") || upper.contains("[OP") || upper.contains("[ED")
+                || upper.contains("AUDIO GUIDE") || upper.contains("/SPS/")) {
+            return null;
+        }
         // EP01, EP 01, e01
         java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?:[Ee][Pp]?)\\s*(\\d+(?:\\.5)?)").matcher(mainName);
-        if (m.find()) return m.group(1);
-        // - 01, -01
-        m = java.util.regex.Pattern.compile("-\\s*(\\d+(?:\\.5)?)").matcher(mainName);
-        if (m.find()) return m.group(1);
-        // [01], 【01】
-        m = java.util.regex.Pattern.compile("[\\[【](\\d+(?:\\.5)?)[\\]】]").matcher(mainName);
-        if (m.find()) return m.group(1);
+        if (m.find()) return filterNonEpisodeNumber(m.group(1));
+        // - 01, -01 (排除日期 2015-05-30 中的 -05/-30)
+        m = java.util.regex.Pattern.compile("(?<!\\d)-\\s*(\\d+(?:\\.5)?)").matcher(mainName);
+        if (m.find()) return filterNonEpisodeNumber(m.group(1));
+        // _710, _01 (排除 _1080p/_720x480 分辨率)
+        m = java.util.regex.Pattern.compile("_(\\d+(?:\\.5)?)(?![PpXx\\d])").matcher(mainName);
+        if (m.find()) return filterNonEpisodeNumber(m.group(1));
+        // [01], 【01】, [710-711], [01-02] (排除 [160226] 日期、[20221208] 日期、[1080P] 分辨率)
+        m = java.util.regex.Pattern.compile("[\\[【](\\d+(?:\\.5)?)(?:-\\d+)?[\\]】]").matcher(mainName);
+        if (m.find()) return filterNonEpisodeNumber(m.group(1));
         return null;
+    }
+
+    /**
+     * 过滤年份(1900-2100)与日期(yyMMdd / yyyyMMdd), 避免 [160226] 等被当集数
+     */
+    default String filterNonEpisodeNumber(String num) {
+        if (num == null) return null;
+        if (num.length() == 4) {
+            try {
+                int v = Integer.parseInt(num);
+                if (v >= 1900 && v <= 2100) return null;
+            } catch (NumberFormatException ignored) {
+            }
+        } else if (num.length() == 6 && num.matches("\\d{6}")) {
+            return null; // yyMMdd
+        } else if (num.length() == 8 && num.matches("\\d{8}")) {
+            return null; // yyyyMMdd
+        }
+        return num;
     }
 
     /**

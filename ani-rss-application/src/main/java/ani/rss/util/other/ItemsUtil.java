@@ -598,9 +598,32 @@ public class ItemsUtil {
     }
 
     /**
+     * 合集展开子集时更新 reName 中的集数。
+     * 已含 SxxExx/Sxx.Exx 结构则替换集数; 模板不含该结构时, 仅 OVA 特典式追加集数序号避免子集同名。
+     */
+    private static String updateEpisodeInReName(String reName, double episode, Ani ani) {
+        String epFormat = String.format("%02d", (int) episode);
+        String suffix = ItemsUtil.is5(episode) ? ".5" : "";
+        if (reName.matches(".*S\\d{2}\\.?E\\d+.*")) {
+            // ${1} 显式分组引用, 避免 $ 后紧跟数字被解析为组号(如 $102)
+            return reName.replaceAll("(S\\d{2}\\.?E)\\d+(\\.5)?", "${1}" + epFormat + suffix);
+        }
+        // OVA 特典式兜底: 模板不含 SxxExx 时按集数追加, 避免子集同名
+        if (Boolean.TRUE.equals(ani.getOva()) && !RenameUtil.isMovie(ani)) {
+            return reName + " E" + epFormat + suffix;
+        }
+        return reName;
+    }
+
+    /**
      * 展开范围/列表/分割类种子为多个独立 Item
      */
     public static List<Item> expandMultiEpisode(Ani ani, List<Item> items) {
+        // 剧场版(电影式)不按集数范围/列表展开: 多部已由 rename 的 part 逻辑处理,
+        // 展开会破坏电影语义(合集折叠/去重/本地匹配全按剧集走)
+        if (RenameUtil.isMovie(ani)) {
+            return items;
+        }
         List<Item> expanded = new ArrayList<>();
         int offset = ani.getOffset();
 
@@ -621,10 +644,11 @@ public class ItemsUtil {
                     double newEp = ep + offset;
                     clone.setEpisode(newEp);
                     clone.setEpisodeRange(shiftedRange);
-                    // 同步更新 reName 中的集数（S00E01 → S00E02 等），只匹配 SxxExx 结构
+                    // 同步更新 reName 中的集数（S00E01 → S00E02、S00.E01 → S00.E02 等）
+                    // 模板不含 SxxExx 时, 仅 OVA 特典式兜底追加集数序号避免子集同名
                     String rn = clone.getReName();
                     if (rn != null) {
-                        clone.setReName(rn.replaceAll("(S\\d{2})E\\d+", "$1" + String.format("E%02d", (int) newEp)));
+                        clone.setReName(updateEpisodeInReName(rn, newEp, ani));
                     }
                     clone.setFormatSize("合集");
                     expanded.add(clone);
@@ -643,7 +667,7 @@ public class ItemsUtil {
                     clone.setEpisodeRange(shiftedList);
                     String rn = clone.getReName();
                     if (rn != null) {
-                        clone.setReName(rn.replaceAll("(S\\d{2})E\\d+", "$1" + String.format("E%02d", (int) newEp)));
+                        clone.setReName(updateEpisodeInReName(rn, newEp, ani));
                     }
                     clone.setFormatSize("合集");
                     expanded.add(clone);

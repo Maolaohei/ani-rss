@@ -5,6 +5,7 @@ import ani.rss.commons.MavenUtils;
 import ani.rss.service.TaskService;
 import ani.rss.util.other.AniUtil;
 import ani.rss.util.other.ConfigUtil;
+import ani.rss.util.other.TorrentUtil;
 import cn.hutool.core.net.NetUtil;
 import cn.hutool.core.util.RuntimeUtil;
 import jakarta.annotation.Resource;
@@ -34,6 +35,8 @@ public class Runner implements ApplicationRunner {
             ConfigUtil.backup();
 
             AniUtil.load();
+            // 清理 OpenList 离线标记残留(正式记录已存在的 pending)
+            TorrentUtil.cleanupOrphanPending();
             taskService.start();
             String version = MavenUtils.getVersion();
             log.info("version {}", version);

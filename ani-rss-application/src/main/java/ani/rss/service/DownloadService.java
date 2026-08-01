@@ -154,14 +154,23 @@ public class DownloadService {
                     log.info("检测到高版本 {} v{}, 准备洗版", reName, item.getVersion());
                     // 不跳过，继续下载流程
                 } else {
-                    log.debug("种子记录已存在 {}", reName);
-                    if (master && !is5) {
-                        currentDownloadCount++;
+                    // 记录有效性校验: 下载器有对应任务 或 本地有对应文件 才视为已下载;
+                    // 记录存在但任务/文件均无 → 过期记录, 清理后重新下载
+                    boolean recordValid = Boolean.TRUE.equals(config.getRename())
+                            ? itemDownloaded(ani, item, true, localEpisodeIndex)
+                            : true;
+                    if (recordValid) {
+                        log.debug("种子记录已存在 {}", reName);
+                        if (master && !is5) {
+                            currentDownloadCount++;
+                        }
+                        if (v2 && downloadedEpisodes != null) {
+                            downloadedEpisodes.add(episode);
+                        }
+                        continue;
                     }
-                    if (v2 && downloadedEpisodes != null) {
-                        downloadedEpisodes.add(episode);
-                    }
-                    continue;
+                    log.warn("清理过期种子记录(无对应任务/文件) {}", reName);
+                    FileUtil.del(torrent);
                 }
             }
 
@@ -289,8 +298,9 @@ public class DownloadService {
                 continue;
             }
 
-            // 未开启rename不进行检测
-            if (itemDownloaded(ani, item, true, localEpisodeIndex)) {
+            // 未开启rename不进行检测; 洗版(高版本)不受本地已下载判断拦截
+            boolean washing = v2 && item.getVersion() != null && item.getVersion() > 1;
+            if (!washing && itemDownloaded(ani, item, true, localEpisodeIndex)) {
                 log.info("本地文件已存在 {}", reName);
                 if (master && !is5) {
                     currentDownloadCount++;
@@ -308,7 +318,13 @@ public class DownloadService {
 
             // OpenList 提交 != 完成：先写待完成标记，离线完成后才提升为正式种子记录
             // 其余下载方式保持原行为：提交即写正式记录（预览视为已下载）
-            File saveTorrent = isOpenListTool()
+            boolean openListTool = isOpenListTool();
+            // OpenList: pending 标记存在表示离线进行中, 本轮跳过, 避免重复提交与通知轰炸
+            if (openListTool && TorrentUtil.getPendingTorrent(ani, item).exists()) {
+                log.debug("离线任务进行中, 跳过本轮 {}", reName);
+                continue;
+            }
+            File saveTorrent = openListTool
                     ? TorrentUtil.saveTorrentPending(ani, item)
                     : TorrentUtil.saveTorrent(ani, item);
 
@@ -565,7 +581,17 @@ public class DownloadService {
                     // OpenList: 离线真正完成才把 pending 标记提升为正式种子记录,
                     // 提交/进行中/失败均不产生正式记录, 预览不会误判"已下载"
                     if (openListTool) {
-                        TorrentUtil.promoteTorrent(ani, item);
+                        try {
+                            TorrentUtil.promoteTorrent(ani, item);
+                        } catch (Exception e) {
+                            // 文件可能已落盘, 下轮 itemDownloaded 会恢复记录
+                            log.error("提升种子记录失败(文件可能已落盘) {}: {}", name, ExceptionUtils.getMessage(e));
+                            // 清除 pending, 避免残留被"pending 存在即跳过"逻辑永久跳过
+                            try {
+                                TorrentUtil.deletePendingTorrent(ani, item);
+                            } catch (Exception ignored) {
+                            }
+                        }
                     }
                     TorrentUtil.refreshTorrentsCache();
                     return;
@@ -951,19 +977,19 @@ public class DownloadService {
     private Set<String> buildLocalEpisodeIndex(Ani ani, String downloadPath) {
         Set<String> index = new HashSet<>();
         boolean ovaLegacy = Boolean.TRUE.equals(ani.getOva()) && !RenameUtil.isNamingV2(ani);
-        // 剧场版(电影式)文件名不含 SxxExx, 按文件名主名索引
-        boolean movieStyle = RenameUtil.isMovie(ani);
+        // 剧场版(电影式)/旧版 OVA: 文件名不含 SxxExx, 按文件名主名索引
+        boolean movieStyle = RenameUtil.isMovie(ani) || ovaLegacy;
         List<File> files = FileUtils.listFileList(downloadPath);
         for (File file : files) {
+            if (file.isDirectory()) {
+                // 目录不参与索引, 避免同名目录误判已下载
+                continue;
+            }
             if (file.isFile()) {
                 String extName = FileUtil.extName(file);
                 if (StrUtil.isBlank(extName) || !FileUtils.isVideoFormat(extName)) {
                     continue;
                 }
-            }
-            if (ovaLegacy) {
-                index.add("*");
-                break;
             }
             String mainName = FileUtil.mainName(file);
             if (StrUtil.isBlank(mainName)) {
@@ -1061,14 +1087,26 @@ public class DownloadService {
         }
 
         boolean ovaLegacy = Boolean.TRUE.equals(ova) && !RenameUtil.isNamingV2(ani);
-        // 剧场版(电影式): 按文件名主名匹配(M: 前缀)
-        boolean movieStyle = RenameUtil.isMovie(ani);
+        // 剧场版(电影式)/旧版 OVA: 按文件名主名匹配(M: 前缀)
+        boolean movieStyle = RenameUtil.isMovie(ani) || ovaLegacy;
+        // OVA 特典式(v2): 落盘为 S00Exx(season=0), 用 0 参与匹配
+        boolean ovaSpecial = Boolean.TRUE.equals(ova) && RenameUtil.isNamingV2(ani) && !RenameUtil.isMovie(ani);
         boolean exists;
-        if (ovaLegacy) {
-            exists = localEpisodeIndex.contains("*");
-        } else if (movieStyle) {
+        if (movieStyle) {
             exists = StrUtil.isNotBlank(reName)
                     && localEpisodeIndex.contains("M:" + reName.trim().toUpperCase());
+            if (!exists && StrUtil.isNotBlank(ani.getTitle())) {
+                // qB 等对无 SxxExx 的任务不重命名文件, 文件名可能是种子原始名,
+                // 精确 reName 匹配失败时按订阅标题主名放宽匹配, 避免已下载被误判未下载导致重下循环
+                String titleUp = RenameUtil.getName(ani.getTitle()).trim().toUpperCase();
+                if (StrUtil.isNotBlank(titleUp) && titleUp.length() >= 2) {
+                    final String t = titleUp;
+                    exists = localEpisodeIndex.stream()
+                            .anyMatch(k -> k.startsWith("M:") && k.contains(t));
+                }
+            }
+        } else if (ovaSpecial) {
+            exists = episode != null && localEpisodeIndex.contains("0:" + episode);
         } else if (episode == null) {
             exists = false;
         } else {

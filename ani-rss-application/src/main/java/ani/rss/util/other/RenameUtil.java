@@ -22,21 +22,31 @@ import java.util.regex.Pattern;
 
 @Slf4j
 public class RenameUtil {
-    public static final String REG_STR = "(.*|\\[.*])(( - |Vol |[Ee][Pp]?)\\d+(\\.5)?( ?\\(\\d+\\))?|【\\d+(\\.5)?】|\\[\\d+(\\.5)?( ?\\(\\d+\\))?( ?[vV]\\d)?( ?END)?( ?完)?( ?FIN)?]|第\\d+(\\.5)?[话話集]( - END)?|^\\[TOC].* \\d+|^六四位元字幕组.*★\\d+(\\.5)?★)";
+    public static final String REG_STR = "(.*|\\[.*])(( - |Vol |[Ee][Pp]?)\\d+(\\.5)?( ?\\(\\d+\\))?|【\\d+(\\.5)?】|\\[\\d+(\\.5)?( ?\\(\\d+\\))?( ?[vV]\\d)?( ?END)?( ?完)?( ?FIN)?]|（\\d+(\\.5)?）|第\\d+(\\.5)?[话話集]( - END)?|^\\[TOC].* \\d+|^六四位元字幕组.*★\\d+(\\.5)?)";
 
     // 宽松正则：覆盖老番不规范命名
     public static final String REG_LOOSE =
-            "(Vol\\.?\\s*\\d+(?:\\.5)?)" +
-            "|([Ee][Pp]?\\s*\\d+(?:\\.5)?)" +
-            "|((?:^|\\s)(?:SP|OVA|OAD|NCOP|NCED)\\s*\\d+(?:\\.5)?)" +
-            "|(\\s[-~～]\\s*\\d+(?:\\.5)?)" +
-            "|(【\\d+(?:\\.5)?】|\\[\\d+(?:\\.5)?(?:\\s*v\\d)?])" +
+            "(Vol\\.?\\s*\\d{1,3}(?!\\d)(?:\\.5)?)" +
+            "|([Ee][Pp]?\\s*\\d{1,3}(?!\\d)(?:\\.5)?)" +
+            "|((?:^|\\s)(?:SP|OVA|OAD|NCOP|NCED)\\s*\\d{1,3}(?!\\d)(?:\\.5)?)" +
+            "|(\\s[-~～]\\s*\\d{1,3}(?!\\d)(?:\\.5)?)" +
+            "|(【\\d+(?:\\.5)?】|\\[\\d+(?:\\.5)?(?:\\s*v\\d)?]|（\\d+(?:\\.5)?）)" +
             "|(第\\d+(?:\\.5)?[话話集])" +
-            "|(BD[- ]?\\d+)" +
-            "|(#\\d+)" +
-            "|(_\\d+(?:\\.5)?)" +
+            "|(BD[- ]?\\d{1,3}(?!\\d))" +
+            "|(#\\d{1,3}(?!\\d))" +
+            "|(_\\d{1,3}(?!\\d)(?:\\.5)?)" +
             "|(★\\d+(?:\\.5)?★)" +
-            "|(\\s\\d{2}(?:\\.5)?(?:\\s|\\]|\\[|$))";
+            "|(\\s\\d{2}(?:\\.5)?(?:\\s|\\]|\\[|$))" +
+            // 游戏王等裸数字格式: " 151 720P" / " 151 END" / " 139.5 720P"
+            "|(\\s\\d{1,3}(?:\\.5)?(?=\\s*(?:720|1080|2160)[Pp]|\\s*END\\b))" +
+            // OAD 数字: [OAD2] [OAD02] [OAD1&2]
+            "|(\\[OAD\\d+(?:&\\d+)?\\])" +
+            // Erai-raws 双语标题: "ました03|暴怒千金" / "04|最强"
+            "|((?<!\\d)\\d{1,3}(?:\\.5)?\\|)" +
+            // 冒号集数: "。44:CLOUDY BEACH"
+            "|((?<!\\d)\\d{1,3}:)" +
+            // 柯南等超长番裸数字格式: [名侦探柯南 1049 目标毛利小五郎] / 1047&1048
+            "|((?<=[\\u4e00-\\u9fff])\\s\\d{3,4}(?:&\\d{3,4})?(?=\\s[\\u4e00-\\u9fff]))";
 
     // 集数范围: 01-06, 01~06, 01～06
     public static final String EP_RANGE_REG = "(\\d+(?:\\.5)?)[\\s]*[-~～][\\s]*(\\d+(?:\\.5)?)";
@@ -47,9 +57,9 @@ public class RenameUtil {
     // 中文范围: 第1-6话, 第1～12集
     public static final String CN_RANGE_REG = "第(\\d+)[~～-](\\d+)[话話集]";
 
-    // 分割部分: 上篇/中篇/下篇/Part 1/P1/上/下 等
+    // 分割部分: 上篇/中篇/下篇/Part 1/P1/上/下/Part II/第四部 等
     // 裸 上/下 需边界，避免「下载」「上场」等误识别；上篇/中篇/下篇 等更长词仍优先
-    public static final String PART_REG = "(上篇|中篇|下篇|前篇|後篇|前编|后编|前編|後編|第一部|第二部|第三部|Part\\s?[1-9](?![0-9])|P[1-9](?![0-9])|(?<![\\p{L}\\p{N}])(?:上|下)(?![\\p{L}\\p{N}篇部编編]))";
+    public static final String PART_REG = "(上篇|中篇|下篇|前篇|後篇|前编|后编|前編|後編|第一部|第二部|第三部|第[一二三四五六七八九十]+部|Part\\s?[1-9](?![0-9])|Part\\s?[IVX]+(?![IVX])|(?<![\\p{L}\\p{N}])P[1-9](?![0-9])|(?<![\\p{L}\\p{N}])(?:上|下)(?![\\p{L}\\p{N}篇部编編]))";
 
     // 分数格式: (1/2), (2/3)
     public static final String FRACTION_REG = "\\((\\d+)/(\\d+)\\)";
@@ -60,8 +70,8 @@ public class RenameUtil {
     // 合集标题: [01-12 合集], [01-02], 01～24 精校合集 等
     public static final Pattern COLLECTION_TITLE_REG = Pattern.compile("\\d+\\s*[-~～]\\s*\\d+");
 
-    // 版本号: v2, v3, V2 等（位于集数之后）
-    public static final String VERSION_REG = "[vV](\\d+)(?:[^\\d]|$)";
+    // 版本号: v2, v3, V2 等（位于集数之后）; 限 1-2 位, 避免 v2024 等长数字被当版本号
+    public static final String VERSION_REG = "[vV](\\d{1,2})(?:[^\\d]|$)";
 
     /**
      * 提取版本号，默认 v1
@@ -201,10 +211,91 @@ public class RenameUtil {
     public static int mapPartToEpisode(String part) {
         return switch (part) {
             case "上篇", "前篇", "前编", "前編", "第一部", "Part 1", "P1", "Part1", "上" -> 1;
-            case "中篇", "後篇", "后编", "後編", "第二部", "Part 2", "P2", "Part2" -> 2;
-            case "下篇", "第三部", "Part 3", "P3", "Part3", "下" -> 3;
+            case "中篇", "下篇", "後篇", "后编", "後編", "第二部", "Part 2", "P2", "Part2", "下" -> 2;
+            case "第三部", "Part 3", "P3", "Part3" -> 3;
+            default -> parsePartNumber(part);
+        };
+    }
+
+    /**
+     * 解析 Part 4-9 / P4 / Part4 / Part II / 第四部 等
+     */
+    private static int parsePartNumber(String part) {
+        Matcher m = Pattern.compile("(?i)(?:Part|P)\\s*?([1-9])(?![0-9])").matcher(part);
+        if (m.find()) {
+            return Integer.parseInt(m.group(1));
+        }
+        Matcher rm = Pattern.compile("(?i)(?:Part|P)\\s*([IVX]+)").matcher(part);
+        if (rm.find()) {
+            return romanToInt(rm.group(1).toUpperCase());
+        }
+        Matcher cn = Pattern.compile("第([一二三四五六七八九十]+)部").matcher(part);
+        if (cn.find()) {
+            return chineseToInt(cn.group(1));
+        }
+        return 0;
+    }
+
+    private static int romanToInt(String s) {
+        int total = 0;
+        int prev = 0;
+        for (int i = s.length() - 1; i >= 0; i--) {
+            int v = switch (s.charAt(i)) {
+                case 'I' -> 1;
+                case 'V' -> 5;
+                case 'X' -> 10;
+                default -> 0;
+            };
+            total += v < prev ? -v : v;
+            prev = v;
+        }
+        return total;
+    }
+
+    private static int chineseToInt(String s) {
+        if ("十".equals(s)) {
+            return 10;
+        }
+        int idx = s.indexOf('十');
+        if (idx >= 0) {
+            int tens = idx == 0 ? 1 : cnDigit(s.charAt(idx - 1));
+            int ones = idx == s.length() - 1 ? 0 : cnDigit(s.charAt(idx + 1));
+            return tens * 10 + ones;
+        }
+        return cnDigit(s.charAt(0));
+    }
+
+    private static int cnDigit(char c) {
+        return switch (c) {
+            case '一' -> 1;
+            case '二' -> 2;
+            case '三' -> 3;
+            case '四' -> 4;
+            case '五' -> 5;
+            case '六' -> 6;
+            case '七' -> 7;
+            case '八' -> 8;
+            case '九' -> 9;
             default -> 0;
         };
+    }
+
+    /**
+     * 从 RSS 标题括号中提取番剧名: 跳过常见标签(分辨率/合集/字幕等), 取最长的中文字段
+     */
+    private static String extractTitleFromBrackets(String itemTitle) {
+        Matcher m = Pattern.compile("(?:\\[|【)([^\\]】]+?)(?:\\]|】)").matcher(itemTitle);
+        String best = null;
+        while (m.find()) {
+            String g = m.group(1).trim();
+            if (g.matches("(?i).*(1080|720|2160|4k|合集|字幕|END|Fin|BDRip|WEB).*")) {
+                continue;
+            }
+            if (best == null || g.length() > best.length()) {
+                best = g;
+            }
+        }
+        return best;
     }
 
     /**
@@ -262,14 +353,14 @@ public class RenameUtil {
                 title = renameDel(title);
                 // 防御：标题为空时从 RSS 标题中提取番剧名（支持中英文括号）
                 if (StrUtil.isBlank(title)) {
-                    Matcher bracketM = Pattern.compile("(?:\\[|【)(.+?)(?:\\]|】)").matcher(itemTitle);
-                    if (bracketM.find() && bracketM.find()) {
-                        title = bracketM.group(1).trim();
+                    String bracket = extractTitleFromBrackets(itemTitle);
+                    if (StrUtil.isNotBlank(bracket)) {
+                        title = bracket;
                     }
                 }
                 // 多部(上/下/Part N): 解析部序号作为 episode(去重与 Part 后缀用)
                 moviePart = extractPartEpisode(itemTitle);
-                item.setEpisode(moviePart > 0 ? (double) moviePart : 1.0);
+                item.setEpisode(moviePart > 0 ? (double) moviePart + offset : 1.0);
             } else {
                 // OVA: 特典式命名, 尝试解析集数, 失败则保持 episode=1.0
                 String e = tryExtractEpisode(itemTitle, ani);
@@ -285,9 +376,9 @@ public class RenameUtil {
                 title = renameDel(title);
                 // 防御：标题为空时从 RSS 标题中提取番剧名（支持中英文括号）
                 if (StrUtil.isBlank(title)) {
-                    Matcher bracketM = Pattern.compile("(?:\\[|【)(.+?)(?:\\]|】)").matcher(itemTitle);
-                    if (bracketM.find() && bracketM.find()) {
-                        title = bracketM.group(1).trim();
+                    String bracket = extractTitleFromBrackets(itemTitle);
+                    if (StrUtil.isNotBlank(bracket)) {
+                        title = bracket;
                     }
                 }
             }
@@ -305,7 +396,7 @@ public class RenameUtil {
         if (ova && v2) {
             // OVA v2 已在上面解析过，这里跳过
             e = null;
-        } else if (customEpisode) {
+        } else if (Boolean.TRUE.equals(customEpisode)) {
             e = ReUtil.get(customEpisodeStr, itemTitle, customEpisodeGroupIndex);
         } else {
             e = ReUtil.get(REG_STR, itemTitle, 2);
@@ -322,6 +413,17 @@ public class RenameUtil {
         if (!ova && StrUtil.isBlank(e)) {
             // v2: 合集种子不依赖单集 episode 提取，交给 expandMultiEpisode 展开
             if (v2 && COLLECTION_TITLE_REG.matcher(itemTitle).find()) {
+                e = "1";
+            } else if (isSeasonPack(itemTitle)) {
+                // VCBD 等整季 BDRip 压制包: 无单集集数, [S1 Fin]/[S2-S4 + OADs]/[Reseed Fin] 标记
+                // 季号取自标题, episode 置 1(合集由下载端按文件结构处理)
+                Matcher sm = Pattern.compile("\\[(S)(\\d+)(?:-S?\\d+)?[^\\]]*\\]").matcher(itemTitle);
+                if (sm.find()) {
+                    try {
+                        season = Integer.parseInt(sm.group(2));
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
                 e = "1";
             } else {
                 return false;
@@ -380,8 +482,19 @@ public class RenameUtil {
                 renameTemplate = renameTemplate.replace("${part}",
                         moviePart > 0 ? "Part " + moviePart : "");
             } else if (moviePart > 0) {
-                renameTemplate = renameTemplate + " Part " + moviePart;
+                // 紧跟标题插入 Part N(而非追加在模板末尾)
+                int idx = StrUtil.isNotBlank(title) ? renameTemplate.indexOf(title) : -1;
+                if (idx >= 0) {
+                    renameTemplate = renameTemplate.substring(0, idx + title.length())
+                            + " Part " + moviePart
+                            + renameTemplate.substring(idx + title.length());
+                } else {
+                    renameTemplate = renameTemplate + " Part " + moviePart;
+                }
             }
+        } else {
+            // 非剧场版模板中的 ${part} 占位符无意义, 替换为空避免字面残留
+            renameTemplate = renameTemplate.replace("${part}", "");
         }
 
         renameTemplate = replaceEpisodeTitle(renameTemplate, episode, ani);
@@ -392,17 +505,6 @@ public class RenameUtil {
         if (renameTemplate.contains("${jpTitle}")) {
             String jpTitle = getJpTitle(ani);
             renameTemplate = renameTemplate.replace("${jpTitle}", jpTitle);
-        }
-
-        // 年份占位符
-        if (renameTemplate.contains("${year}")) {
-            Date releaseDate = ani.getReleaseDate();
-            if (releaseDate != null) {
-                String year = String.valueOf(releaseDate.getYear() + 1900);
-                renameTemplate = renameTemplate.replace("${year}", year);
-            } else {
-                renameTemplate = renameTemplate.replace("${year}", "");
-            }
         }
 
         List<Func1<Ani, Object>> list = List.of(
@@ -421,6 +523,19 @@ public class RenameUtil {
         }
 
         renameTemplate = renameDel(renameTemplate);
+
+        // 年份占位符(在 renameDel 之后替换, 避免"剔除年份"把补回的年份一并删掉)
+        if (renameTemplate.contains("${year}")) {
+            Date releaseDate = ani.getReleaseDate();
+            if (releaseDate != null) {
+                String year = String.valueOf(releaseDate.getYear() + 1900);
+                renameTemplate = renameTemplate.replace("${year}", year);
+            } else {
+                // releaseDate 为空: 连占位符外层的空括号一起移除
+                renameTemplate = renameTemplate.replace("(${year})", "")
+                        .replace("${year}", "");
+            }
+        }
 
         String reName = getName(renameTemplate);
 
@@ -447,19 +562,16 @@ public class RenameUtil {
         String customEpisodeStr = ani.getCustomEpisodeStr();
         Integer customEpisodeGroupIndex = ani.getCustomEpisodeGroupIndex();
 
-        if (customEpisode) {
+        // null 保护: 老 JSON 数据可能缺该字段
+        if (Boolean.TRUE.equals(customEpisode)) {
             return ReUtil.get(customEpisodeStr, itemTitle, customEpisodeGroupIndex);
         }
 
         String e = ReUtil.get(REG_STR, itemTitle, 2);
         if (StrUtil.isNotBlank(e)) {
-            // 排除年份: - 2024, - 1999 等
-            String num = extractEpisodeNumber(e);
-            if (num != null && num.length() == 4) {
-                int val = Integer.parseInt(num);
-                if (val >= 1900 && val <= 2100) {
-                    e = null;
-                }
+            // 排除年份/日期: - 2024, [1996], 20221208 等
+            if (isYearOrDate(extractEpisodeNumber(e))) {
+                e = null;
             }
             // 排除 周年/年/bit 等非集数上下文
             if (e != null && StrUtil.isNotBlank(e)) {
@@ -479,9 +591,40 @@ public class RenameUtil {
         // 宽松正则 fallback
         Matcher m = Pattern.compile(REG_LOOSE, Pattern.CASE_INSENSITIVE).matcher(itemTitle);
         if (m.find()) {
-            return m.group();
+            String loose = m.group();
+            // 排除年份/日期: [1996]、[2015]、[20221208] 等标签不应被当集数
+            if (isYearOrDate(extractEpisodeNumber(loose))) {
+                return null;
+            }
+            return loose;
         }
         return null;
+    }
+
+    /**
+     * 判断是否为整季 BDRip/DVDRip 压制包(VCBD 等压制组):
+     * 标题含 [S1 Fin]/[Reseed Fin]/[S2-S4 + OADs]/[LIVE] 季/完结标记且无单集集数。
+     * 不强制 BDRip 质量标记(部分种子不带)。
+     */
+    private static boolean isSeasonPack(String itemTitle) {
+        return itemTitle.matches(".*\\[[^\\]]*(S\\d{1,2}|Fin|Reseed|LIVE)[^\\]]*\\].*");
+    }
+
+    /**
+     * 判断数字是否为年份(1900-2100)或日期(yyyyMMdd)
+     */
+    private static boolean isYearOrDate(String num) {
+        if (num == null) {
+            return false;
+        }
+        if (num.length() == 4) {
+            int v = Integer.parseInt(num);
+            return v >= 1900 && v <= 2100;
+        }
+        if (num.length() == 8) {
+            return num.matches("(19|20)\\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\\d|3[01])");
+        }
+        return false;
     }
 
     private static String extractEpisodeNumber(String episodePart) {
@@ -535,7 +678,8 @@ public class RenameUtil {
         Boolean customRenameTemplateEnable = ani.getCustomRenameTemplateEnable();
         String customRenameTemplate = ani.getCustomRenameTemplate();
 
-        if (customRenameTemplateEnable) {
+        // null 保护: 老 JSON 数据可能缺该字段
+        if (Boolean.TRUE.equals(customRenameTemplateEnable)) {
             renameTemplate = customRenameTemplate;
         }
 
