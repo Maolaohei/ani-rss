@@ -26,6 +26,8 @@ import org.w3c.dom.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Function;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 
@@ -605,8 +607,14 @@ public class ItemsUtil {
         String epFormat = String.format("%02d", (int) episode);
         String suffix = ItemsUtil.is5(episode) ? ".5" : "";
         if (reName.matches(".*S\\d{2}\\.?E\\d+.*")) {
-            // ${1} 显式分组引用, 避免 $ 后紧跟数字被解析为组号(如 $102)
-            return reName.replaceAll("(S\\d{2}\\.?E)\\d+(\\.5)?", "${1}" + epFormat + suffix);
+            // 用 Matcher 手动替换: $1 + 数字会被解析为组号(如 $102), ${1} 数字组名 Java 8 非法
+            Matcher mm = Pattern.compile("(S\\d{2}\\.?E)\\d+(\\.5)?").matcher(reName);
+            StringBuffer sb = new StringBuffer();
+            while (mm.find()) {
+                mm.appendReplacement(sb, Matcher.quoteReplacement(mm.group(1) + epFormat + suffix));
+            }
+            mm.appendTail(sb);
+            return sb.toString();
         }
         // OVA 特典式兜底: 模板不含 SxxExx 时按集数追加, 避免子集同名
         if (Boolean.TRUE.equals(ani.getOva()) && !RenameUtil.isMovie(ani)) {
