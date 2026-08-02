@@ -424,14 +424,20 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 if (StrUtil.isNotBlank(s)) {
                     String finalSavePath = savePath;
                     String seasonKey = s;
-                    fsList(savePath, true)
-                            .stream()
-                            .map(OpenListFileInfo::getName)
-                            .filter(name -> name != null && name.contains(seasonKey))
-                            .forEach(name -> {
-                                fsRemove(finalSavePath, List.of(name));
-                                log.info("已开启备用RSS, 自动删除 {}/{}", finalSavePath, name);
-                            });
+                    try {
+                        fsList(savePath, true)
+                                .stream()
+                                .map(OpenListFileInfo::getName)
+                                .filter(name -> name != null && name.contains(seasonKey))
+                                .forEach(name -> {
+                                    fsRemove(finalSavePath, List.of(name));
+                                    log.info("已开启备用RSS, 自动删除 {}/{}", finalSavePath, name);
+                                });
+                    } catch (Exception e) {
+                        // 洗版是辅助操作：删除失败（115 异步 990009/超时等）仅告警，不得中断本次下载
+                        log.warn("洗版删除旧文件失败(不影响本次下载) {}/{}: {}",
+                                finalSavePath, seasonKey, ExceptionUtils.getMessage(e));
+                    }
                 }
             }
 

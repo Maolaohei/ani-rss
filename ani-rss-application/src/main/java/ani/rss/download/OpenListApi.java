@@ -160,15 +160,18 @@ public class OpenListApi {
      */
     public void fsMove(String srcDir, String dstDir, List<String> names) {
         invalidateFindFilesCache();
-        postApi("fs/move")
-                .body(GsonStatic.toJson(Map.of(
-                        "src_dir", srcDir,
-                        "dst_dir", dstDir,
-                        "names", names
-                ))).then(res -> {
-                    log.info(res.body());
-                    assertOpenListOk(res, "fs/move " + srcDir + " -> " + dstDir);
-                });
+        retryIdempotent("fs/move " + srcDir + " -> " + dstDir, () -> {
+            postApi("fs/move")
+                    .body(GsonStatic.toJson(Map.of(
+                            "src_dir", srcDir,
+                            "dst_dir", dstDir,
+                            "names", names
+                    ))).then(res -> {
+                        log.info(res.body());
+                        assertOpenListOk(res, "fs/move " + srcDir + " -> " + dstDir);
+                    });
+            return null;
+        });
     }
 
     /**
@@ -179,11 +182,14 @@ public class OpenListApi {
      */
     public void fsRemove(String dir, List<String> names) {
         invalidateFindFilesCache();
-        postApi("fs/remove")
-                .body(GsonStatic.toJson(Map.of(
-                        "dir", dir,
-                        "names", names
-                ))).then(res -> assertOpenListOk(res, "fs/remove " + dir));
+        retryIdempotent("fs/remove " + dir, () -> {
+            postApi("fs/remove")
+                    .body(GsonStatic.toJson(Map.of(
+                            "dir", dir,
+                            "names", names
+                    ))).then(res -> assertOpenListOk(res, "fs/remove " + dir));
+            return null;
+        });
     }
 
     /**
@@ -194,14 +200,17 @@ public class OpenListApi {
      */
     public void fsBatchRename(List<Map<String, String>> mapList, String srcDir) {
         invalidateFindFilesCache();
-        postApi("fs/batch_rename")
-                .body(GsonStatic.toJson(Map.of(
-                        "src_dir", srcDir,
-                        "rename_objects", mapList
-                ))).then(res -> {
-                    log.info(res.body());
-                    assertOpenListOk(res, "fs/batch_rename " + srcDir);
-                });
+        retryIdempotent("fs/batch_rename " + srcDir, () -> {
+            postApi("fs/batch_rename")
+                    .body(GsonStatic.toJson(Map.of(
+                            "src_dir", srcDir,
+                            "rename_objects", mapList
+                    ))).then(res -> {
+                        log.info(res.body());
+                        assertOpenListOk(res, "fs/batch_rename " + srcDir);
+                    });
+            return null;
+        });
     }
 
     /**
@@ -480,10 +489,26 @@ public class OpenListApi {
      */
     private void assertOpenListOk(HttpResponse res, String action) {
         HttpReq.assertStatus(res);
-        JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
+        String body = res.body();
+        if (StrUtil.isBlank(body)) {
+            // 少数实现只回 HTTP 200 空 body：视为成功
+            return;
+        }
+        JsonObject jsonObject = GsonStatic.fromJson(body, JsonObject.class);
+        if (jsonObject == null || !jsonObject.has("code")) {
+            // 少数实现只回 HTTP 200 无 code：视为成功
+            return;
+        }
         int code = jsonObject.get("code").getAsInt();
         if (code != 200) {
             String message = jsonObject.has("message") ? jsonObject.get("message").getAsString() : "";
+            // 115/OpenList 异步操作：errno 990009/"操作尚未执行完成"表示删除/移动正在异步处理中，
+            // 容忍而非抛异常，避免并发操作冲突（如洗版连续删除）导致整流程失败
+            if (code == 990009 || message.contains("990009")
+                    || message.contains("尚未执行完成") || message.contains("操作尚未执行完成")) {
+                log.debug("OpenList 异步操作进行中(990009) {}: {}", action, message);
+                return;
+            }
             throw new IllegalStateException(action + " 失败 code=" + code + " " + message);
         }
     }
