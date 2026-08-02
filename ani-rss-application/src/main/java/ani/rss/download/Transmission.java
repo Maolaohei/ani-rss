@@ -170,10 +170,18 @@ public class Transmission implements BaseDownload {
                 .body(body)
                 .thenFunction(res -> {
                     JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                    return jsonObject.getAsJsonObject("arguments")
-                            .getAsJsonObject("torrent-added")
+                    JsonObject arguments = jsonObject.getAsJsonObject("arguments");
+                    if (arguments == null || !arguments.has("torrent-added")) {
+                        log.error("Transmission 添加任务失败: {}", res.body());
+                        return null;
+                    }
+                    return arguments.getAsJsonObject("torrent-added")
                             .get("id").getAsString();
                 });
+
+        if (StrUtil.isBlank(id)) {
+            return false;
+        }
 
         log.info("tr 添加下载 => name: {} id: {}", name, id);
 
@@ -183,20 +191,8 @@ public class Transmission implements BaseDownload {
             RenameCacheUtil.put(id, name);
         }
 
-        for (int i = 0; i < 3; i++) {
-            ThreadUtil.sleep(1000 * 10);
-            List<TorrentsInfo> torrentsInfos = getTorrentsInfos();
-            Optional<TorrentsInfo> optionalTorrentsInfo = torrentsInfos
-                    .stream()
-                    .filter(torrentsInfo -> torrentsInfo.getId().equals(id))
-                    .findFirst();
-            if (optionalTorrentsInfo.isEmpty()) {
-                continue;
-            }
-            return true;
-        }
-
-        return false;
+        // torrent-added 返回 id 即已入队，无需 3×10s 轮询确认；状态由 RenameTask 周期性兜底
+        return true;
     }
 
     @Override

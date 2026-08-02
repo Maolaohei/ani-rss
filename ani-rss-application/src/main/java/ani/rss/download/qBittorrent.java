@@ -33,6 +33,7 @@ import org.springframework.stereotype.Service;
 
 import java.io.File;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * qBittorrent
@@ -45,6 +46,12 @@ public class qBittorrent implements BaseDownload {
     private final DownloadService downloadService;
 
     private Config config;
+
+    /**
+     * 旧版 qBittorrent（≤5.1）用户名密码登录会话（host → SID cookie 映射，
+     * 多 host/测试登录互不干扰；ApiKey 模式清空）
+     */
+    private static final Map<String, String> SESSION_COOKIES = new ConcurrentHashMap<>();
 
     /**
      * 获取对应任务的文件列表
@@ -94,15 +101,80 @@ public class qBittorrent implements BaseDownload {
             return false;
         }
 
+        // 优先 ApiKey 授权（qBittorrent 5.2.0+）
+        // 注意：探测端点必须需要认证（/app/version 历史版本可匿名访问，会误判）
         try {
-            // ApiKey 授权（qBittorrent 5.2.0+）
-            return HttpReq.post(host + "/api/v2/app/version")
+            boolean bearerOk = HttpReq.get(host + "/api/v2/app/preferences")
                     .header(Header.AUTHORIZATION, "Bearer " + password)
                     .thenFunction(HttpResponse::isOk);
+            if (bearerOk) {
+                // ApiKey 模式：仅清除当前 host 的 cookie 会话，不影响其它 host
+                SESSION_COOKIES.remove(host);
+                log.info("qBittorrent ApiKey 授权成功");
+                return true;
+            }
+            log.debug("qBittorrent ApiKey 授权失败(HTTP 非 2xx)，回退用户名密码登录");
+        } catch (Exception e) {
+            String message = ExceptionUtils.getMessage(e);
+            log.debug("qBittorrent ApiKey 授权异常，回退用户名密码登录: {}", message);
+        }
+
+        // 回退：传统用户名密码登录（qBittorrent ≤5.1 / 未启用 ApiKey）
+        return loginWithUsernamePassword(config);
+    }
+
+    /**
+     * 传统用户名密码登录（qBittorrent ≤5.1 兼容），成功后保存 SID cookie
+     */
+    private static boolean loginWithUsernamePassword(Config config) {
+        String host = config.getDownloadToolHost();
+        String username = config.getDownloadToolUsername();
+        String password = config.getDownloadToolPassword();
+
+        if (StrUtil.isBlank(username)) {
+            log.error("qBittorrent 登录失败：ApiKey 无效且未配置用户名");
+            return false;
+        }
+
+        try {
+            HttpResponse loginRes = HttpReq.post(host + "/api/v2/auth/login")
+                    .form("username", username)
+                    .form("password", password)
+                    .thenFunction(res -> {
+                        HttpReq.assertStatus(res);
+                        return res;
+                    });
+            String body = loginRes.body();
+            if (!body.contains("Ok.")) {
+                log.error("qBittorrent 用户名密码登录失败: {}", body);
+                return false;
+            }
+            String cookieHeader = loginRes.header("Set-Cookie");
+            String sid = ReUtil.get("(?i)SID=([^;]+)", StrUtil.nullToEmpty(cookieHeader), 1);
+            if (StrUtil.isBlank(sid)) {
+                log.error("qBittorrent 用户名密码登录成功但未获取到 SID cookie");
+                return false;
+            }
+            SESSION_COOKIES.put(host, sid);
+            log.info("qBittorrent 用户名密码登录成功");
+            return true;
         } catch (Exception e) {
             String message = ExceptionUtils.getMessage(e);
             log.error(message, e);
             return false;
+        }
+    }
+
+    /**
+     * 为 API 请求附加认证：优先 SID cookie 会话（旧版 qB），否则 Bearer ApiKey
+     */
+    private static void applyAuth(HttpRequest req, Config cfg) {
+        String host = cfg.getDownloadToolHost();
+        String sid = SESSION_COOKIES.get(host);
+        if (StrUtil.isNotBlank(sid)) {
+            req.header(Header.COOKIE, "SID=" + sid);
+        } else {
+            req.header(Header.AUTHORIZATION, "Bearer " + cfg.getDownloadToolPassword());
         }
     }
 
@@ -159,25 +231,21 @@ public class qBittorrent implements BaseDownload {
                         .form("urls", "magnet:?xt=urn:btih:" + FileUtil.mainName(torrentFile));
             }
         }
-        httpRequest.thenFunction(HttpResponse::isOk);
-
-        String hash = FileUtil.mainName(torrentFile);
-
-        for (int i = 0; i < 3; i++) {
-            ThreadUtil.sleep(1000 * 10);
-            List<TorrentsInfo> torrentsInfos = getTorrentsInfos();
-            Optional<TorrentsInfo> optionalTorrentsInfo = torrentsInfos
-                    .stream()
-                    .filter(torrentsInfo ->
-                            torrentsInfo.getHash().equals(hash) ||
-                                    torrentsInfo.getName().equals(name)
-                    )
-                    .findFirst();
-            if (optionalTorrentsInfo.isPresent()) {
-                return true;
+        // 提交响应校验：qB 成功返回 "Ok."，失败返回 "Fails."（重复/坏种），空 body 视为成功
+        boolean ok = httpRequest.thenFunction(res -> {
+            if (!res.isOk()) {
+                return false;
             }
+            String body = res.body();
+            return StrUtil.isBlank(body) || body.contains("Ok.");
+        });
+        if (!ok) {
+            log.error("qBittorrent 添加任务失败 {}", name);
+            return false;
         }
-        return false;
+        // 不再持锁 3×10s 轮询确认：提交成功即视为已入队，重命名/状态由 RenameTask 周期性兜底
+        log.info("qBittorrent 添加任务成功 {}", name);
+        return true;
     }
 
     /**
@@ -529,14 +597,16 @@ public class qBittorrent implements BaseDownload {
 
     public static HttpRequest postApi(String path) {
         Config cfg = ConfigUtil.CONFIG;
-        return HttpReq.post(cfg.getDownloadToolHost() + path)
-                .header(Header.AUTHORIZATION, "Bearer " + cfg.getDownloadToolPassword());
+        HttpRequest req = HttpReq.post(cfg.getDownloadToolHost() + path);
+        applyAuth(req, cfg);
+        return req;
     }
 
     public static HttpRequest getApi(String path) {
         Config cfg = ConfigUtil.CONFIG;
-        return HttpReq.get(cfg.getDownloadToolHost() + path)
-                .header(Header.AUTHORIZATION, "Bearer " + cfg.getDownloadToolPassword());
+        HttpRequest req = HttpReq.get(cfg.getDownloadToolHost() + path);
+        applyAuth(req, cfg);
+        return req;
     }
 
     @Data

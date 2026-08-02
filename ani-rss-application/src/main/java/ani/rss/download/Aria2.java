@@ -159,17 +159,8 @@ public class Aria2 implements BaseDownload {
             RenameCacheUtil.put(id, name);
         }
 
-        for (int i = 0; i < 3; i++) {
-            ThreadUtil.sleep(1000 * 10);
-            List<TorrentsInfo> torrentsInfos = getTorrentsInfos();
-            for (TorrentsInfo torrentsInfo : torrentsInfos) {
-                if (!torrentsInfo.getId().equals(id)) {
-                    continue;
-                }
-                return true;
-            }
-        }
-        return false;
+        // addTorrent 返回 gid 即已入队，无需 3×10s 轮询确认；状态由 RenameTask 周期性兜底
+        return StrUtil.isNotBlank(id);
     }
 
     @Override

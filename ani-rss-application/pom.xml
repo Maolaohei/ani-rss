@@ -261,9 +261,11 @@
                                         <opts>
                                             <opt>-Xms64m -Xmx512m -Xss256k -XX:+UseG1GC</opt>
                                             <opt>-XX:+UseStringDeduplication</opt>
-                                            <opt>-XX:+UseCompactObjectHeaders</opt>
                                             <opt>-XX:TieredStopAtLevel=1</opt>
+                                            <!-- IgnoreUnrecognizedVMOptions 必须位于所有非 17 专属选项之前，
+                                                 否则 UseCompactObjectHeaders(JDK24+) 在 JDK 17~23 上会导致启动失败 -->
                                             <opt>-XX:+IgnoreUnrecognizedVMOptions</opt>
+                                            <opt>-XX:+UseCompactObjectHeaders</opt>
                                             <opt>--enable-native-access=ALL-UNNAMED</opt>
                                             <opt>--add-opens=java.base/java.net=ALL-UNNAMED</opt>
                                             <opt>--add-opens=java.base/sun.net.www.protocol.https=ALL-UNNAMED</opt>

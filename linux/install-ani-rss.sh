@@ -110,11 +110,21 @@ install_jdk() {
         return
     fi
 
-    echo -e "${YELLOW}正在安装OpenJDK 25...${NC}"
+    echo -e "${YELLOW}正在安装OpenJDK...${NC}"
     if command -v apt >/dev/null 2>&1; then
-        apt update -qq && apt install -y openjdk-25-jdk
+        apt update -qq
+        # 优先安装 LTS 版本，逐包尝试（不同发行版源可用包不同）
+        for pkg in openjdk-21-jdk openjdk-17-jdk openjdk-25-jdk; do
+            if apt install -y "$pkg" >/dev/null 2>&1; then
+                break
+            fi
+        done
     elif command -v yum >/dev/null 2>&1; then
-        yum install -y java-25-openjdk-devel
+        for pkg in java-21-openjdk-devel java-17-openjdk-devel java-25-openjdk-devel; do
+            if yum install -y "$pkg" >/dev/null 2>&1; then
+                break
+            fi
+        done
     else
         echo -e "${RED}不支持的Linux发行版${NC}"
         exit 1
@@ -254,7 +264,8 @@ Restart=on-failure
 RestartSec=30
 LimitNOFILE=65535
 Environment="TZ=Asia/Shanghai"
-Environment="SERVER_ADDRESS=0.0.0.0"
+# 默认仅本机监听；需要局域网/公网访问时改为 0.0.0.0
+Environment="SERVER_ADDRESS=127.0.0.1"
 Environment="SERVER_PORT=$SERVER_PORT"
 Environment="CONFIG=$INSTALL_DIR/config"
 Environment="SWAGGER_ENABLED=false"

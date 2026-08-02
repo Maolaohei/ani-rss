@@ -26,7 +26,6 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -73,7 +72,8 @@ public class TorrentUtil {
      * @return
      */
     public static File getTorrentDir(Ani ani) {
-        String title = ani.getTitle();
+        // 标题拼入种子缓存目录，先做路径段清洗防穿越
+        String title = RenameUtil.getName(ani.getTitle());
         Boolean ova = ani.getOva();
         Integer season = ani.getSeason();
 
@@ -482,6 +482,20 @@ public class TorrentUtil {
 
         DOWNLOAD = SpringUtil.getBean(ClassUtil.loadClass("ani.rss.download." + download));
         log.info("下载工具 {}", download);
+    }
+
+    /**
+     * 当前激活的下载器是否为离线长等待型（OpenList/Alist 网盘离线工具）。
+     * 能力查询优先于配置字符串比较，新增离线型下载器无需再改各处分支判断。
+     */
+    public static boolean isOfflineTool() {
+        BaseDownload download = DOWNLOAD;
+        if (download != null) {
+            return download.isOffline();
+        }
+        // DOWNLOAD 未初始化（启动早期/加载失败）：回退配置字符串判断，保持原语义
+        String tool = ConfigUtil.CONFIG.getDownloadToolType();
+        return tool != null && ("OpenList".equalsIgnoreCase(tool) || "Alist".equalsIgnoreCase(tool));
     }
 
     /**

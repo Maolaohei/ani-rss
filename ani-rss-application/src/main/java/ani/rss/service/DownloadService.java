@@ -4,6 +4,7 @@ import ani.rss.commons.ExceptionUtils;
 import ani.rss.commons.FileUtils;
 import ani.rss.commons.GsonStatic;
 import ani.rss.commons.PinyinUtils;
+import ani.rss.download.OfflineDownloader;
 import ani.rss.download.OpenList;
 import ani.rss.entity.*;
 import ani.rss.enums.NotificationStatusEnum;
@@ -533,11 +534,11 @@ public class DownloadService {
      * @param torrentFile
      */
     /**
-     * 是否 OpenList/Alist 下载方式(离线下载, 提交 != 完成, 需 pending 标记)
+     * 是否离线下载方式(提交 != 完成, 需 pending 标记)：基于当前下载器实例能力判断，
+     * 新增离线型下载器无需再改此处
      */
     private static boolean isOpenListTool() {
-        String toolType = StrUtil.blankToDefault(ConfigUtil.CONFIG.getDownloadToolType(), "");
-        return StrUtil.equalsAnyIgnoreCase(toolType, "OpenList", "Alist");
+        return TorrentUtil.isOfflineTool();
     }
 
     public void download(Ani ani, Item item, String savePath, File torrentFile) {
@@ -586,20 +587,10 @@ public class DownloadService {
                     ok = TorrentUtil.DOWNLOAD.download(ani, item, savePath, torrentFile);
                 }
                 if (ok) {
-                    // OpenList: 离线真正完成才把 pending 标记提升为正式种子记录,
-                    // 提交/进行中/失败均不产生正式记录, 预览不会误判"已下载"
+                    // OpenList: 提交即受理——等待/提升/失败处理已移交 OpenList 独立长任务池，
+                    // pending 标记保持到离线真正完成，预览不会误判"已下载"
                     if (openListTool) {
-                        try {
-                            TorrentUtil.promoteTorrent(ani, item);
-                        } catch (Exception e) {
-                            // 文件可能已落盘, 下轮 itemDownloaded 会恢复记录
-                            log.error("提升种子记录失败(文件可能已落盘) {}: {}", name, ExceptionUtils.getMessage(e));
-                            // 清除 pending, 避免残留被"pending 存在即跳过"逻辑永久跳过
-                            try {
-                                TorrentUtil.deletePendingTorrent(ani, item);
-                            } catch (Exception ignored) {
-                            }
-                        }
+                        return;
                     }
                     TorrentUtil.refreshTorrentsCache();
                     return;
@@ -765,10 +756,10 @@ public class DownloadService {
             }
             TorrentUtil.deletePendingTorrent(ani, item);
 
-            // 2. 删除已有文件: OpenList 用 API 删网盘文件, 本地直接删文件
+            // 2. 删除已有文件: 离线网盘用 API 删文件, 本地直接删文件
             String downloadPath = getDownloadPath(ani);
-            if (isOpenListTool() && TorrentUtil.DOWNLOAD instanceof OpenList openList) {
-                openList.forceDeleteFiles(downloadPath, item.getReName());
+            if (TorrentUtil.DOWNLOAD instanceof OfflineDownloader offline) {
+                offline.forceDeleteFiles(downloadPath, item.getReName());
             } else {
                 deleteLocalFilesByReName(downloadPath, item.getReName());
             }
@@ -1050,9 +1041,9 @@ public class DownloadService {
         // 剧场版(电影式)/旧版 OVA: 文件名不含 SxxExx, 按文件名主名索引
         boolean movieStyle = RenameUtil.isMovie(ani) || ovaLegacy;
 
-        if (isOpenListTool() && TorrentUtil.DOWNLOAD instanceof OpenList openList) {
-            // 网盘虚拟路径, 本地文件系统不可见, 用 OpenList API 列出文件
-            for (String name : openList.listFileNames(downloadPath)) {
+        if (TorrentUtil.DOWNLOAD instanceof OfflineDownloader offline) {
+            // 网盘虚拟路径, 本地文件系统不可见, 用离线网盘 API 列出文件
+            for (String name : offline.listFileNames(downloadPath)) {
                 addFileToIndex(index, name, movieStyle);
             }
             return index;
@@ -1209,21 +1200,67 @@ public class DownloadService {
     }
 
     /**
+     * 下载路径 → 订阅 反向索引。
+     * getDownloadPath 含 Pinyin/季度/占位符等重计算，避免 RenameTask 每轮对每个任务全量重算。
+     * 订阅或配置变更（AniUtil.sync / ConfigUtil.sync）时置空失效，miss 时自动重建自愈。
+     */
+    private static volatile Map<String, Ani> DOWNLOAD_PATH_INDEX;
+
+    private static final Object INDEX_LOCK = new Object();
+
+    public static void invalidateDownloadPathIndex() {
+        DOWNLOAD_PATH_INDEX = null;
+    }
+
+    private Map<String, Ani> buildDownloadPathIndex() {
+        Map<String, Ani> index = new HashMap<>();
+        for (Ani ani : AniUtil.getAniList()) {
+            if (ani == null) {
+                continue;
+            }
+            try {
+                index.put(getDownloadPath(ani), ani);
+            } catch (Exception e) {
+                log.debug("构建下载路径索引失败: {} {}", ani.getTitle(), ExceptionUtils.getMessage(e));
+            }
+        }
+        return index;
+    }
+
+    /**
      * 根据任务反查订阅
      *
      * @param torrentsInfo
      * @return
      */
-    public synchronized Optional<Ani> findAniByDownloadPath(TorrentsInfo torrentsInfo) {
+    public Optional<Ani> findAniByDownloadPath(TorrentsInfo torrentsInfo) {
         String downloadDir = torrentsInfo.getDownloadDir();
-        return AniUtil.getAniList()
-                .stream()
-                .filter(ani -> {
-                    String path = getDownloadPath(ani);
-                    return path.equals(downloadDir);
-                })
-                .map(ObjectUtil::clone)
-                .findFirst();
+        if (StrUtil.isBlank(downloadDir)) {
+            return Optional.empty();
+        }
+
+        Map<String, Ani> index = DOWNLOAD_PATH_INDEX;
+        if (index == null) {
+            synchronized (INDEX_LOCK) {
+                index = DOWNLOAD_PATH_INDEX;
+                if (index == null) {
+                    index = buildDownloadPathIndex();
+                    DOWNLOAD_PATH_INDEX = index;
+                }
+            }
+        }
+
+        Ani ani = index.get(downloadDir);
+        if (ani == null) {
+            // 缓存可能过期（BGM/JP 标题等外部数据变化）：重建后重查一次，避免误判未下载
+            synchronized (INDEX_LOCK) {
+                index = buildDownloadPathIndex();
+                DOWNLOAD_PATH_INDEX = index;
+            }
+            ani = index.get(downloadDir);
+        }
+
+        return ani == null ? Optional.empty() : Optional.of(ObjectUtil.clone(ani));
     }
 
 }

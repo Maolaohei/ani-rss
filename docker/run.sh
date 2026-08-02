@@ -43,11 +43,12 @@ echo "JAVA_OPTS=$JAVA_OPTS"
 
 while :
 do
+    # IgnoreUnrecognizedVMOptions 必须位于 UseCompactObjectHeaders(JDK24+) 之前，否则 JDK 17~23 启动失败
     java $JAVA_OPTS \
       -XX:+UseStringDeduplication \
-      -XX:+UseCompactObjectHeaders \
       -XX:TieredStopAtLevel=1 \
       -XX:+IgnoreUnrecognizedVMOptions \
+      -XX:+UseCompactObjectHeaders \
       --enable-native-access=ALL-UNNAMED \
       --add-opens=java.base/java.net=ALL-UNNAMED \
       --add-opens=java.base/sun.net.www.protocol.https=ALL-UNNAMED \
