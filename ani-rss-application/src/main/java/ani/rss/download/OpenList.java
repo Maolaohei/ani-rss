@@ -4,15 +4,16 @@ import ani.rss.commons.ExceptionUtils;
 import ani.rss.commons.FileUtils;
 import ani.rss.commons.GsonStatic;
 import ani.rss.entity.*;
-import ani.rss.entity.web.Header;
 import ani.rss.enums.NotificationStatusEnum;
 import ani.rss.enums.StringEnum;
-import ani.rss.util.basic.HttpReq;
+import ani.rss.task.RssTask;
+import ani.rss.util.other.ConfigUtil;
+import ani.rss.util.other.FailedDownloadQueue;
 import ani.rss.util.other.NotificationUtil;
 import ani.rss.util.other.RenameUtil;
+import ani.rss.util.other.TaskFailureHumanizer;
 import ani.rss.util.other.TempDirResidualPolicy;
 import ani.rss.util.other.TorrentUtil;
-import cn.hutool.core.collection.ListUtil;
 import cn.hutool.core.date.DateTime;
 import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.io.FileUtil;
@@ -23,39 +24,55 @@ import cn.hutool.core.util.ObjectUtil;
 import cn.hutool.core.util.ReUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.http.HttpRequest;
-import cn.hutool.http.HttpResponse;
 import cn.hutool.http.Method;
-import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.io.File;
-import java.nio.file.Path;
 import java.util.*;
 import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
-public class OpenList implements BaseDownload {
+public class OpenList implements BaseDownload, OfflineDownloader {
     private Config config;
 
-    // 提交中去重：防止同一 infoHash 被重复提交到 OpenList
+    /**
+     * 网盘 API 客户端（认证/限流/fs/task 接口），从本类拆出
+     */
+    private final OpenListApi api = new OpenListApi();
+
+    /**
+     * 独立长任务池：OpenList 离线等待（最长 60 分钟）在此执行，不再占用 RSS 主线程池。
+     * daemon 线程：JVM 退出不阻塞；并发离线任务数 2~4。
+     */
+    private static final ExecutorService OFFLINE_WAIT_POOL = Executors.newFixedThreadPool(
+            Math.max(2, Math.min(4, Runtime.getRuntime().availableProcessors() / 2)),
+            runnable -> {
+                Thread thread = new Thread(runnable, "openlist-offline-wait");
+                thread.setDaemon(true);
+                return thread;
+            });
+
+    /**
+     * 提交中去重：防止同一 infoHash 被重复提交到 OpenList
+     */
     private static final Set<String> inFlightTasks = ConcurrentHashMap.newKeySet();
     // 按 infoHash 串行，不同 hash 可并行
     private static final ConcurrentHashMap<String, Object> DOWNLOAD_LOCKS = new ConcurrentHashMap<>();
-    /** 当前正在等待的离线 hash（任务管理器展示 / 取消清理） */
-    private static final AtomicReference<String> currentInfoHash = new AtomicReference<>();
+    /** 当前正在等待的离线 hash 集合（任务管理器展示 / 取消清理 / 残留保护）；多 hash 并行时需记录全部 */
+    private static final Set<String> currentInfoHashes = ConcurrentHashMap.newKeySet();
     /** 当前离线等待进度（任务管理器） */
     private static final AtomicReference<OfflineWaitSnapshot> offlineWaitSnapshot = new AtomicReference<>();
     /** 用户取消时置位，打断 sleep 与轮询 */
@@ -83,54 +100,14 @@ public class OpenList implements BaseDownload {
     private static final long POLL_INTERVAL_5M_MS = TimeUnit.MINUTES.toMillis(5);
     private static final long POLL_INTERVAL_10M_MS = TimeUnit.MINUTES.toMillis(10);
 
-    // API 最小间隔限流（替代每次固定 sleep 2s）
-    private static final long API_MIN_INTERVAL_MS = 300L;
-    private static final Object API_RATE_LOCK = new Object();
-    private static volatile long lastApiCallAt = 0L;
-
-    // findFiles 短缓存，轮询期间减少递归 list
-    private static final long FIND_FILES_TTL_MS = 3000L;
-    private static final Map<String, CachedFileList> findFilesCache = new ConcurrentHashMap<>();
-
-    // listFileNames 长缓存: "本地已下载"判断用, 文件列表变化不频繁
-    private static final long LIST_NAMES_TTL_MS = TimeUnit.SECONDS.toMillis(60);
-    private static final Map<String, List<String>> listNamesCache = new ConcurrentHashMap<>();
-    private static final Map<String, Long> listNamesExpire = new ConcurrentHashMap<>();
-
     /**
      * 列出网盘目录下文件路径(递归, 60s 缓存), 供"本地已下载"判断使用。
      * 下载目录是网盘虚拟路径(本地文件系统不可见), 需通过 API 检查文件真实存在。
      */
     public List<String> listFileNames(String dirPath) {
-        Long expire = listNamesExpire.get(dirPath);
-        if (expire != null && expire > System.currentTimeMillis()) {
-            List<String> cached = listNamesCache.get(dirPath);
-            if (cached != null) {
-                return cached;
-            }
-        }
-        List<String> names;
-        try {
-            names = findFiles(dirPath).stream()
-                    .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
-                    .map(f -> {
-                        String dir = f.getPath();
-                        String name = f.getName();
-                        return StrUtil.isBlank(dir) ? name : dir + "/" + name;
-                    })
-                    .collect(Collectors.toList());
-        } catch (Exception e) {
-            // API 故障: 不缓存, 下次重试; 记日志避免静默误判"目录无文件"
-            log.warn("列出网盘目录失败 {}: {}", dirPath, ExceptionUtils.getMessage(e));
-            return List.of();
-        }
-        listNamesCache.put(dirPath, names);
-        listNamesExpire.put(dirPath, System.currentTimeMillis() + LIST_NAMES_TTL_MS);
-        return names;
+        return api.listFileNames(dirPath);
     }
 
-    private static final int IDEMPOTENT_API_MAX_ATTEMPTS = 3;
-    private static final long[] IDEMPOTENT_API_RETRY_DELAYS_MS = {500L, 1500L};
     private static final long TIMEOUT_FILE_STABILITY_WAIT_MS = 2000L;
 
     /**
@@ -140,19 +117,15 @@ public class OpenList implements BaseDownload {
     private static final long DUPLICATE_MAGNET_COOLDOWN_MS = TimeUnit.MINUTES.toMillis(30);
     private static final ConcurrentHashMap<String, Long> DUPLICATE_MAGNET_UNTIL = new ConcurrentHashMap<>();
 
-    private static final class CachedFileList {
-        final long expireAt;
-        final List<OpenListFileInfo> files;
-
-        CachedFileList(List<OpenListFileInfo> files, long ttlMs) {
-            this.files = files;
-            this.expireAt = System.currentTimeMillis() + ttlMs;
-        }
+    @Override
+    public boolean isOffline() {
+        return true;
     }
 
     @Override
     public Boolean login(Boolean test, Config config) {
         this.config = config;
+        api.setConfig(config);
         String host = config.getDownloadToolHost();
         String password = config.getDownloadToolPassword();
         if (StrUtil.isBlank(host) || StrUtil.isBlank(password)) {
@@ -216,12 +189,141 @@ public class OpenList implements BaseDownload {
         Object lock = DOWNLOAD_LOCKS.computeIfAbsent(hashKey, k -> new Object());
         // 不回收锁对象：避免等待线程与新线程拿到不同 lock 导致同 hash 并行
         synchronized (lock) {
-            return downloadLocked(ani, item, savePath, torrentFile, magnet, hashKey);
+            OfflineDownloadContext ctx = submitOffline(ani, item, savePath, magnet, hashKey);
+            if (ctx.shortCircuit) {
+                return ctx.shortCircuitResult;
+            }
+            // 提交即受理：等待+提升+失败处理移交独立长任务池，不再占用 RSS 主线程池；
+            // pending 标记保持到离线真正完成，预览不会误判"已下载"；
+            // 取消经 offlineCancelRequested/RssTask.isCancelRequested 由后台任务自行响应
+            final String finalSavePath = savePath;
+            try {
+                OFFLINE_WAIT_POOL.submit(() -> finalizeOfflineDownload(ctx, ani, item, finalSavePath));
+            } catch (Exception e) {
+                // 池关闭/拒绝（极低概率）：释放占位，避免同 hash 死等
+                log.error("提交离线等待任务失败 {}: {}", item.getReName(), ExceptionUtils.getMessage(e));
+                releaseOfflinePlaceholder(hashKey, ctx.tid, ctx.claimedInFlight,
+                        config.getDelete(), ctx.newlySubmittedTid);
+                return false;
+            }
+            return true;
         }
     }
 
-    private Boolean downloadLocked(Ani ani, Item item, String savePath, File torrentFile,
-                                   String magnet, String infoHash) {
+    /**
+     * 后台完成离线下载：等待结束后提升 pending / 记录失败（原 DownloadService 同步流程迁移）。
+     * 在独立长任务池执行，最长等待至离线超时。
+     */
+    private void finalizeOfflineDownload(OfflineDownloadContext ctx, Ani ani, Item item, String savePath) {
+        try {
+            Boolean ok = awaitAndFinalize(ctx, ani, item, savePath);
+            if (Boolean.TRUE.equals(ok)) {
+                try {
+                    TorrentUtil.promoteTorrent(ani, item);
+                } catch (Exception e) {
+                    // 文件可能已落盘, 下轮 itemDownloaded 会恢复记录
+                    log.error("提升种子记录失败(文件可能已落盘) {}: {}", ctx.reName, ExceptionUtils.getMessage(e));
+                    try {
+                        TorrentUtil.deletePendingTorrent(ani, item);
+                    } catch (Exception ignored) {
+                    }
+                }
+                TorrentUtil.refreshTorrentsCache();
+                return;
+            }
+            if (offlineCancelRequested.get() || RssTask.isCancelRequested()) {
+                // 用户取消：仅清 pending，不误发"下载失败"通知/不记失败队列
+                log.info("离线下载被用户取消，清理 pending {}", ctx.reName);
+                try {
+                    TorrentUtil.deletePendingTorrent(ani, item);
+                } catch (Exception ignored) {
+                }
+                return;
+            }
+            handleOfflineFailure(ani, item, ctx.reName, "离线下载未完成（OpenList 返回失败，非坏种）");
+        } catch (ani.rss.download.OfflineTimeoutException e) {
+            handleOfflineFailure(ani, item, ctx.reName, ExceptionUtils.getMessage(e));
+        } catch (Exception e) {
+            log.error(e.getMessage(), e);
+            handleOfflineFailure(ani, item, ctx.reName, "离线下载异常: " + ExceptionUtils.getMessage(e));
+        }
+    }
+
+    /**
+     * 离线失败收尾：失败队列 + 错误通知 + 清除 pending（与 DownloadService 同步流程一致）
+     */
+    private void handleOfflineFailure(Ani ani, Item item, String name, String reason) {
+        String raw = name + " " + reason;
+        log.error(raw);
+        try {
+            FailedDownloadQueue.record(
+                    ani == null ? null : ani.getId(),
+                    ani == null ? null : ani.getTitle(),
+                    item == null ? null : item.getReName(),
+                    item == null ? null : item.getInfoHash(),
+                    raw);
+        } catch (Exception e) {
+            log.debug("记录失败队列失败: {}", e.getMessage());
+        }
+        try {
+            NotificationUtil.send(ConfigUtil.CONFIG, ani,
+                    TaskFailureHumanizer.formatNotify(name, raw),
+                    NotificationStatusEnum.ERROR);
+        } catch (Exception e) {
+            log.debug("发送失败通知异常: {}", e.getMessage());
+        }
+        try {
+            TorrentUtil.deletePendingTorrent(ani, item);
+        } catch (Exception ignored) {
+        }
+    }
+
+    /**
+     * 离线下载上下文：submitOffline 与 awaitAndFinalize 之间的共享状态。
+     * 拆分的目的是为「提交即返回 + 独立长任务池等待」提供接缝（离线等待不应占满 RSS 主线程池）。
+     */
+    private static final class OfflineDownloadContext {
+        final String infoHash;
+        final String reName;
+        final String finalRenameBase;
+        final String tempDirName;
+        final String path;
+        final String tempDownloadDir;
+        final boolean isCollection;
+        final boolean skipNewSubmit;
+        final int waitMinutes;
+        final long deadlineMs;
+
+        String tid;            // 可变：10008 时切换/清空
+        long retry;
+        boolean claimedInFlight;
+        /** 本次是否新提交的离线任务：delete=true 收尾时仅删除新提交任务，复用任务不远程删除（避免中断他人/历史任务） */
+        boolean newlySubmittedTid;
+        boolean shortCircuit;          // 提交阶段已决定结果（无需进入等待）
+        Boolean shortCircuitResult;
+
+        OfflineDownloadContext(String infoHash, String reName, String finalRenameBase, String tempDirName,
+                               String path, String tempDownloadDir, boolean isCollection, boolean skipNewSubmit,
+                               int waitMinutes, long deadlineMs) {
+            this.infoHash = infoHash;
+            this.reName = reName;
+            this.finalRenameBase = finalRenameBase;
+            this.tempDirName = tempDirName;
+            this.path = path;
+            this.tempDownloadDir = tempDownloadDir;
+            this.isCollection = isCollection;
+            this.skipNewSubmit = skipNewSubmit;
+            this.waitMinutes = waitMinutes;
+            this.deadlineMs = deadlineMs;
+        }
+    }
+
+    /**
+     * 提交阶段：目录准备、残留复用、离线任务提交（不等待）。
+     * 返回上下文；若提交阶段已能确定结果（同 hash 等待/失败），置 shortCircuit。
+     */
+    private OfflineDownloadContext submitOffline(Ani ani, Item item, String savePath,
+                                                 String magnet, String infoHash) {
         // 最终重命名始终使用订阅模板结果；合集临时目录可单独使用源标题
         String finalRenameBase = item.getReName();
         String reName = finalRenameBase;
@@ -251,6 +353,7 @@ public class OpenList implements BaseDownload {
 
         String tid = null;
         boolean claimedInFlight = false;
+        boolean newlySubmittedTid = false;
         try {
             // 提交中去重：防止同一 infoHash 被重复提交
             if (!inFlightTasks.add(infoHash)) {
@@ -264,7 +367,7 @@ public class OpenList implements BaseDownload {
                         && System.currentTimeMillis() < deadline) {
                     if (shouldAbortWait()) {
                         log.warn("等待同 hash 任务被用户取消 {}", reName);
-                        return false;
+                        return shortCircuitResult(false);
                     }
                     long remain = deadline - System.currentTimeMillis();
                     if (remain <= 0) {
@@ -275,7 +378,7 @@ public class OpenList implements BaseDownload {
                     while (System.currentTimeMillis() < end) {
                         if (shouldAbortWait()) {
                             log.warn("等待同 hash 任务被用户取消 {}", reName);
-                            return false;
+                            return shortCircuitResult(false);
                         }
                         long slice = Math.min(1000L, end - System.currentTimeMillis());
                         if (slice <= 0) break;
@@ -291,10 +394,10 @@ public class OpenList implements BaseDownload {
                     // 避免 DownloadService 收到 true 后将其提升为正式记录(假完成, 导致永久漏下)
                     TorrentUtil.deletePendingTorrent(ani, item);
                 }
-                return true;
+                return shortCircuitResult(true);
             }
             claimedInFlight = true;
-            currentInfoHash.set(infoHash);
+            currentInfoHashes.add(infoHash);
             offlineCancelRequested.set(false);
             int waitMinutesInit = Math.max(ObjectUtil.defaultIfNull(config.getAlistDownloadTimeout(), 30), 1);
             updateOfflineWait(infoHash, reName, tempDirName, null, "Pending",
@@ -335,6 +438,9 @@ public class OpenList implements BaseDownload {
             // 无进行中任务时才提交离线
             if (StrUtil.isBlank(tid) && !skipNewSubmit) {
                 tid = fsAddOfflineDownload(magnet, path);
+                if (StrUtil.isNotBlank(tid)) {
+                    newlySubmittedTid = true;
+                }
             }
 
             // API 级 10008：tid==null；任务级 10008 在轮询中识别
@@ -357,16 +463,92 @@ public class OpenList implements BaseDownload {
             Integer alistDownloadTimeout = config.getAlistDownloadTimeout();
             Long alistDownloadRetryNumber = config.getAlistDownloadRetryNumber();
             DateTime startTime = DateTime.now();
-            long retry = 0;
             // 唯一截止：用户配置的【离线超时】
             int waitMinutes = ObjectUtil.defaultIfNull(alistDownloadTimeout, 30);
             waitMinutes = Math.max(waitMinutes, 1);
             long deadlineMs = DateUtil.offsetMinute(startTime, waitMinutes).getTime();
-            int pollIndex = 0;
             if (skipNewSubmit) {
                 log.info("10008 冷却期内不重复提交，按离线超时 {} 分钟等待文件/任务 {}", waitMinutes, reName);
             }
 
+            OfflineDownloadContext ctx = new OfflineDownloadContext(
+                    infoHash, reName, finalRenameBase, tempDirName,
+                    path, tempDownloadDir, isCollection, skipNewSubmit,
+                    waitMinutes, deadlineMs);
+            ctx.tid = tid;
+            ctx.claimedInFlight = claimedInFlight;
+            ctx.newlySubmittedTid = newlySubmittedTid;
+            ctx.retry = 0;
+            return ctx;
+        } catch (OfflineTimeoutException e) {
+            // 超时必须向上抛给 finalizeOfflineDownload（后台任务），避免被当成普通 false/坏种
+            throw e;
+        } catch (Exception e) {
+            log.error(e.getMessage(), e);
+            releaseOfflinePlaceholder(infoHash, tid, claimedInFlight, delete, newlySubmittedTid);
+            return shortCircuitResult(false);
+        }
+    }
+
+    /**
+     * 收尾时是否远程删除离线任务（纯函数，便于单测）：
+     * 仅当 delete=true 且 tid 是本次新提交时才删除；复用/10008 切换的任务保留（可能属他人/历史轮次）。
+     */
+    static boolean shouldDeleteTidOnRelease(String tid, boolean newlySubmittedTid, Boolean delete) {
+        return tid != null && newlySubmittedTid && Boolean.TRUE.equals(delete);
+    }
+
+    /**
+     * 释放 inFlight 占位与离线等待快照（提交阶段异常 / 等待阶段收尾共用）
+     */
+    private void releaseOfflinePlaceholder(String infoHash, String tid, boolean claimedInFlight,
+                                           Boolean delete, boolean newlySubmittedTid) {
+        // 仅清理本线程占用的 inFlight，避免误删其它线程标记
+        if (claimedInFlight) {
+            inFlightTasks.remove(infoHash);
+            currentInfoHashes.remove(infoHash);
+            clearOfflineWait(infoHash);
+        }
+        // 配置要求删除时清理离线任务记录（超时 purge 已处理同 hash）；
+        // 仅删除本次新提交的任务；复用的既有任务保留（可能属其它会话/历史轮次，避免中断对方下载）
+        if (shouldDeleteTidOnRelease(tid, newlySubmittedTid, delete)) {
+            try {
+                taskDelete(tid);
+            } catch (Exception e) {
+                log.warn("删除离线任务失败 {}: {}", tid, e.getMessage());
+            }
+        }
+    }
+
+    private OfflineDownloadContext shortCircuitResult(Boolean result) {
+        OfflineDownloadContext ctx = new OfflineDownloadContext("", "", "", "", "", "", false, false, 1, 0);
+        ctx.shortCircuit = true;
+        ctx.shortCircuitResult = result;
+        return ctx;
+    }
+
+    /**
+     * 等待阶段 + 后处理：等待离线完成（可取消/超时/重试），完成后重命名/移动/校验。
+     * 与 submitOffline 分离，为「提交即返回 + 独立长任务池等待」提供接缝。
+     */
+    private Boolean awaitAndFinalize(OfflineDownloadContext ctx, Ani ani, Item item, String savePath) {
+        String reName = ctx.reName;
+        String finalRenameBase = ctx.finalRenameBase;
+        String tempDirName = ctx.tempDirName;
+        String path = ctx.path;
+        String tempDownloadDir = ctx.tempDownloadDir;
+        boolean isCollection = ctx.isCollection;
+        String infoHash = ctx.infoHash;
+        long deadlineMs = ctx.deadlineMs;
+        int waitMinutes = ctx.waitMinutes;
+        int pollIndex = 0;
+        // tid 会随 10008 切换，需写回 ctx 供 finally 清理使用
+        String tid = ctx.tid;
+        long retry = ctx.retry;
+        Long alistDownloadRetryNumber = config.getAlistDownloadRetryNumber();
+        Boolean delete = config.getDelete();
+        boolean claimedInFlight = ctx.claimedInFlight;
+        try {
             while (DateTime.now().getTime() < deadlineMs) {
                 if (shouldAbortWait()) {
                     log.warn("离线等待被用户取消 {}", reName);
@@ -426,10 +608,14 @@ public class OpenList implements BaseDownload {
                         }
                         String otherTid = findExistingTaskIdPreferActive(infoHash);
                         if (StrUtil.isNotBlank(otherTid) && !otherTid.equals(failedTid)) {
-                            tid = otherTid;
+                            // 双写：循环内读取本地 tid，finally 清理读取 ctx.tid
+                            tid = ctx.tid = otherTid;
+                            // 切换为复用任务：不再是本次新提交，delete=true 收尾不得远程删除它
+                            ctx.newlySubmittedTid = false;
                             log.info("切换到已存在离线任务 tid={} {}", tid, reName);
                         } else {
-                            tid = null; // 进入无 tid 文件轮询
+                            tid = ctx.tid = null; // 进入无 tid 文件轮询
+                            ctx.newlySubmittedTid = false;
                         }
                         sleepUntilNextPoll(deadlineMs, pollIndex++);
                         continue;
@@ -719,20 +905,7 @@ public class OpenList implements BaseDownload {
             log.error(e.getMessage(), e);
             return false;
         } finally {
-            // 仅清理本线程占用的 inFlight，避免误删其它线程标记
-            if (claimedInFlight) {
-                inFlightTasks.remove(infoHash);
-                currentInfoHash.compareAndSet(infoHash, null);
-                clearOfflineWait(infoHash);
-            }
-            // 配置要求删除时清理离线任务记录（超时 purge 已处理同 hash）
-            if (tid != null && delete) {
-                try {
-                    taskDelete(tid);
-                } catch (Exception e) {
-                    log.warn("删除离线任务失败 {}: {}", tid, e.getMessage());
-                }
-            }
+            releaseOfflinePlaceholder(ctx.infoHash, ctx.tid, ctx.claimedInFlight, delete, ctx.newlySubmittedTid);
         }
     }
 
@@ -835,40 +1008,7 @@ public class OpenList implements BaseDownload {
      * @param path 路径
      */
     public void mkdir(String path) {
-        invalidateFindFilesCache();
-        retryIdempotent("fs/mkdir " + path, () -> {
-            postApi("fs/mkdir")
-                    .body(GsonStatic.toJson(Map.of(
-                            "path", path
-                    )))
-                    .then(res -> {
-                        HttpReq.assertStatus(res);
-                        JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                        int code = jsonObject.get("code").getAsInt();
-                        String message = jsonObject.has("message") ? jsonObject.get("message").getAsString() : "";
-                        if (code == 200) {
-                            log.info("创建文件夹: {}", path);
-                            return;
-                        }
-
-                        if (!message.startsWith("failed to check if dir exists")) {
-                            throw new IllegalStateException("fs/mkdir 失败 code=" + code + " " + message);
-                        }
-
-                        Path pathObj = Path.of(path);
-                        if (pathObj.getNameCount() <= 1) {
-                            throw new IllegalStateException("fs/mkdir 失败 code=" + code + " " + message);
-                        }
-
-                        String parentPath = pathObj
-                                .getParent()
-                                .toString()
-                                .replace('\\', '/');
-                        mkdir(parentPath);
-                        mkdir(path);
-                    });
-            return null;
-        });
+        api.mkdir(path);
     }
 
     /**
@@ -879,16 +1019,7 @@ public class OpenList implements BaseDownload {
      * @param names  文件名
      */
     public void fsMove(String srcDir, String dstDir, List<String> names) {
-        invalidateFindFilesCache();
-        postApi("fs/move")
-                .body(GsonStatic.toJson(Map.of(
-                        "src_dir", srcDir,
-                        "dst_dir", dstDir,
-                        "names", names
-                ))).then(res -> {
-                    log.info(res.body());
-                    assertOpenListOk(res, "fs/move " + srcDir + " -> " + dstDir);
-                });
+        api.fsMove(srcDir, dstDir, names);
     }
 
     /**
@@ -898,12 +1029,7 @@ public class OpenList implements BaseDownload {
      * @param names 文件名
      */
     public void fsRemove(String dir, List<String> names) {
-        invalidateFindFilesCache();
-        postApi("fs/remove")
-                .body(GsonStatic.toJson(Map.of(
-                        "dir", dir,
-                        "names", names
-                ))).then(res -> assertOpenListOk(res, "fs/remove " + dir));
+        api.fsRemove(dir, names);
     }
 
     /**
@@ -1033,7 +1159,7 @@ public class OpenList implements BaseDownload {
         if (StrUtil.isBlank(path)) {
             return;
         }
-        invalidateFindFilesCache();
+        api.invalidateFindFilesCache();
         List<OpenListFileInfo> entries = fsList(path, true);
         // 先递归子目录
         for (OpenListFileInfo entry : entries) {
@@ -1100,7 +1226,7 @@ public class OpenList implements BaseDownload {
         List<OpenListFileInfo> last = List.of();
         int n = Math.max(1, attempts);
         for (int i = 0; i < n; i++) {
-            invalidateFindFilesCache();
+            api.invalidateFindFilesCache();
             last = findFiles(path);
             if (!last.isEmpty() || i == n - 1) {
                 return last;
@@ -1174,15 +1300,7 @@ public class OpenList implements BaseDownload {
      * @param srcDir  目录
      */
     public void fsBatchRename(List<Map<String, String>> mapList, String srcDir) {
-        invalidateFindFilesCache();
-        postApi("fs/batch_rename")
-                .body(GsonStatic.toJson(Map.of(
-                        "src_dir", srcDir,
-                        "rename_objects", mapList
-                ))).then(res -> {
-                    log.info(res.body());
-                    assertOpenListOk(res, "fs/batch_rename " + srcDir);
-                });
+        api.fsBatchRename(mapList, srcDir);
     }
 
     /**
@@ -1193,30 +1311,7 @@ public class OpenList implements BaseDownload {
      * @return tid
      */
     public String fsAddOfflineDownload(String magnet, String path) {
-        invalidateFindFilesCache();
-        return postApi("fs/add_offline_download")
-                .body(GsonStatic.toJson(Map.of(
-                        "path", path,
-                        "urls", List.of(magnet),
-                        "tool", config.getProvider(),
-                        "delete_policy", "delete_on_upload_succeed"
-                )))
-                .thenFunction(res -> {
-                    HttpReq.assertStatus(res);
-                    JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                    log.debug(jsonObject.toString());
-                    int code = jsonObject.get("code").getAsInt();
-                    // 10008: 任务已存在，视为成功（幂等）
-                    if (code == 10008) {
-                        log.info("离线任务已存在，跳过重复提交 {}", path);
-                        return null;
-                    }
-                    Assert.isTrue(code == 200);
-                    return jsonObject.getAsJsonObject("data")
-                            .getAsJsonArray("tasks")
-                            .get(0).getAsJsonObject()
-                            .get("id").getAsString();
-                });
+        return api.fsAddOfflineDownload(magnet, path);
     }
 
     /**
@@ -1226,42 +1321,7 @@ public class OpenList implements BaseDownload {
      * @return 文件列表
      */
     public List<OpenListFileInfo> fsList(String path, Boolean refresh) {
-        try {
-            return retryIdempotent("fs/list " + path, () -> postApi("fs/list")
-                    .body(GsonStatic.toJson(Map.of(
-                            "path", path,
-                            "page", 1,
-                            "per_page", 0,
-                            "refresh", refresh
-                    )))
-                    .thenFunction(res -> {
-                        HttpReq.assertStatus(res);
-                        JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                        int code = jsonObject.get("code").getAsInt();
-                        if (code != 200) {
-                            return List.of();
-                        }
-                        JsonElement data = jsonObject.get("data");
-                        if (Objects.isNull(data) || data.isJsonNull()) {
-                            return List.of();
-                        }
-                        JsonElement content = data.getAsJsonObject().get("content");
-                        if (Objects.isNull(content) || content.isJsonNull()) {
-                            return List.of();
-                        }
-                        List<OpenListFileInfo> infos = GsonStatic.fromJsonList(content.getAsJsonArray(), OpenListFileInfo.class);
-                        for (OpenListFileInfo info : infos) {
-                            info.setPath(path);
-                        }
-                        return ListUtil.sort(new ArrayList<>(infos), Comparator.comparing(fileInfo -> {
-                            Long size = fileInfo.getSize();
-                            return Long.MAX_VALUE - ObjectUtil.defaultIfNull(size, 0L);
-                        }));
-                    }));
-        } catch (Exception e) {
-            log.warn("OpenList fs/list 调用失败 path={}: {}", path, ExceptionUtils.getMessage(e));
-            return List.of();
-        }
+        return api.fsList(path, refresh);
     }
 
     /**
@@ -1271,23 +1331,7 @@ public class OpenList implements BaseDownload {
      * @return 任务信息
      */
     public Optional<OpenListTaskInfo> taskInfo(String tid) {
-        try {
-            OpenListTaskInfo taskInfo = retryIdempotent("task/info " + tid,
-                    () -> postApi("task/offline_download/info?tid=" + tid)
-                            .thenFunction(res -> {
-                                HttpReq.assertStatus(res);
-                                JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                                int code = jsonObject.get("code").getAsInt();
-                                if (code != 200 || !jsonObject.has("data") || jsonObject.get("data").isJsonNull()) {
-                                    throw new IllegalStateException("task/info 失败 code=" + code);
-                                }
-                                return GsonStatic.fromJson(jsonObject.get("data").getAsJsonObject(), OpenListTaskInfo.class);
-                            }));
-            return Optional.ofNullable(taskInfo);
-        } catch (Exception e) {
-            log.warn("OpenList task/info 调用失败 tid={}: {}", tid, ExceptionUtils.getMessage(e));
-            return Optional.empty();
-        }
+        return api.taskInfo(tid);
     }
 
     /**
@@ -1407,7 +1451,11 @@ public class OpenList implements BaseDownload {
                         taskCancel(id);
                     } catch (Exception ignore) {
                     }
-                    taskDelete(id);
+                    try {
+                        taskDelete(id);
+                    } catch (Exception e) {
+                        log.debug("删除多余任务失败 {}: {}", id, e.getMessage());
+                    }
                 }
                 case DELETE -> {
                     log.info("删除可清理残留任务: {} {} state={}", id, name, task.getState());
@@ -1422,7 +1470,11 @@ public class OpenList implements BaseDownload {
                         } catch (Exception ignore) {
                         }
                     }
-                    taskDelete(id);
+                    try {
+                        taskDelete(id);
+                    } catch (Exception e) {
+                        log.debug("删除残留任务失败 {}: {}", id, e.getMessage());
+                    }
                 }
             }
         }
@@ -1466,30 +1518,12 @@ public class OpenList implements BaseDownload {
     }
 
     /**
-     * 校验 OpenList API 返回 code==200
-     */
-    private void assertOpenListOk(HttpResponse res, String action) {
-        HttpReq.assertStatus(res);
-        JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-        int code = jsonObject.get("code").getAsInt();
-        if (code != 200) {
-            String message = jsonObject.has("message") ? jsonObject.get("message").getAsString() : "";
-            throw new IllegalStateException(action + " 失败 code=" + code + " " + message);
-        }
-    }
-
-    /**
      * 未完成的离线任务
      *
      * @return 任务列表
      */
     public List<OpenListTaskInfo> taskUnDoneList() {
-        return getApi("task/offline_download/undone")
-                .thenFunction(res -> {
-                    JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                    JsonArray jsonArray = jsonObject.get("data").getAsJsonArray();
-                    return GsonStatic.fromJsonList(jsonArray, OpenListTaskInfo.class);
-                });
+        return api.taskUnDoneList();
     }
 
     /**
@@ -1498,12 +1532,7 @@ public class OpenList implements BaseDownload {
      * @return 任务列表
      */
     public List<OpenListTaskInfo> taskDoneList() {
-        return getApi("task/offline_download/done")
-                .thenFunction(res -> {
-                    JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                    JsonArray jsonArray = jsonObject.get("data").getAsJsonArray();
-                    return GsonStatic.fromJsonList(jsonArray, OpenListTaskInfo.class);
-                });
+        return api.taskDoneList();
     }
 
     /**
@@ -1512,12 +1541,7 @@ public class OpenList implements BaseDownload {
      * @param tid 任务id
      */
     public void taskRetry(String tid) {
-        if (StrUtil.isBlank(tid)) {
-            return;
-        }
-        postApi("task/offline_download/retry")
-                .form("tid", tid)
-                .thenFunction(HttpResponse::isOk);
+        api.taskRetry(tid);
     }
 
     /**
@@ -1526,17 +1550,7 @@ public class OpenList implements BaseDownload {
      * @param tid 任务id
      */
     public void taskCancel(String tid) {
-        if (StrUtil.isBlank(tid)) {
-            return;
-        }
-        // 现网 OpenList/AList：query tid 有效；form 常返回 HTTP 200 + body code=404 且任务仍在
-        if (tryTaskAction("task/offline_download/cancel?tid=" + tid, null, "cancel/query", tid)) {
-            return;
-        }
-        if (tryTaskAction("task/offline_download/cancel", tid, "cancel/form", tid)) {
-            return;
-        }
-        log.debug("cancel 任务失败 {}", tid);
+        api.taskCancel(tid);
     }
 
     /**
@@ -1545,89 +1559,7 @@ public class OpenList implements BaseDownload {
      * @param tid 任务id
      */
     public void taskDelete(String tid) {
-        if (StrUtil.isBlank(tid)) {
-            return;
-        }
-        // 现网有效路径：POST delete?tid=
-        // form delete_some 常返回 code=200 data={} 但 running 任务仍残留，不能优先也不能只信 HTTP 200
-        if (tryTaskAction("task/offline_download/delete?tid=" + tid, null, "delete/query", tid)) {
-            return;
-        }
-        if (tryTaskAction("task/offline_download/delete", tid, "delete/form", tid)) {
-            return;
-        }
-        if (tryTaskAction("task/offline_download/delete_some", tid, "delete_some/form", tid)) {
-            return;
-        }
-        // 兼容旧版：JSON 数组 body（部分服务器会 400 invalid request format）
-        try {
-            HttpResponse res = postApi("task/offline_download/delete_some")
-                    .body(GsonStatic.toJson(List.of(tid)))
-                    .execute();
-            if (isOpenListCodeOk(res)) {
-                return;
-            }
-            log.debug("delete_some/json 失败 {}: {}", tid, res.body());
-        } catch (Exception e) {
-            log.debug("delete_some/json 异常 {}: {}", tid, e.getMessage());
-        }
-        log.warn("删除离线任务失败 {}", tid);
-    }
-
-    /**
-     * 执行 cancel/delete 类动作，并校验 body.code==200（不能只看 HTTP 200）。
-     *
-     * @param action  API path（可含 query）
-     * @param formTid 非空时用 form tid；空则只发 path
-     */
-    private boolean tryTaskAction(String action, String formTid, String label, String tid) {
-        try {
-            HttpRequest req = postApi(action);
-            if (StrUtil.isNotBlank(formTid)) {
-                req.form("tid", formTid);
-            }
-            HttpResponse res = req.execute();
-            if (isOpenListCodeOk(res)) {
-                return true;
-            }
-            log.debug("{} 未生效 tid={} body={}", label, tid, res.body());
-        } catch (Exception e) {
-            log.debug("{} 异常 tid={}: {}", label, tid, e.getMessage());
-        }
-        return false;
-    }
-
-    /**
-     * HTTP 层 ok 且 JSON code==200 才算 OpenList 业务成功。
-     * form cancel/delete 常返回 HTTP 200 + code 404/空成功，必须拆开判断。
-     */
-    static boolean isOpenListCodeOk(HttpResponse res) {
-        if (res == null) {
-            return false;
-        }
-        return isOpenListBusinessOk(res.isOk(), res.body());
-    }
-
-    /**
-     * 纯函数：便于单测。HTTP 非 2xx 直接失败；body 有 code 时必须 200。
-     */
-    static boolean isOpenListBusinessOk(boolean httpOk, String body) {
-        if (!httpOk) {
-            return false;
-        }
-        try {
-            if (StrUtil.isBlank(body)) {
-                // 少数实现只回 HTTP 200
-                return true;
-            }
-            JsonObject jsonObject = GsonStatic.fromJson(body, JsonObject.class);
-            if (jsonObject == null || !jsonObject.has("code")) {
-                return true;
-            }
-            return jsonObject.get("code").getAsInt() == 200;
-        } catch (Exception e) {
-            return false;
-        }
+        api.taskDelete(tid);
     }
 
     /**
@@ -1749,7 +1681,7 @@ public class OpenList implements BaseDownload {
         // 分段睡眠，便于任务管理器取消尽快生效
         long end = System.currentTimeMillis() + sleepMs;
         while (System.currentTimeMillis() < end) {
-            if (offlineCancelRequested.get() || ani.rss.task.RssTask.isCancelRequested()) {
+            if (offlineCancelRequested.get() || RssTask.isCancelRequested()) {
                 return;
             }
             long slice = Math.min(1000L, end - System.currentTimeMillis());
@@ -1809,7 +1741,8 @@ public class OpenList implements BaseDownload {
             throw new IllegalStateException("OpenList 未登录");
         }
         List<OpenListTaskInfo> tasks = listAllOfflineTasksStrict();
-        ResidualSnapshot snap = buildResidualSnapshot(tasks, currentInfoHash.get(), residualCleaning.get(), System.currentTimeMillis());
+        ResidualSnapshot snap = buildResidualSnapshot(tasks, Set.copyOf(currentInfoHashes),
+                residualCleaning.get(), System.currentTimeMillis());
         residualSnapshot.set(snap);
         return snap;
     }
@@ -1819,7 +1752,7 @@ public class OpenList implements BaseDownload {
      * 预览最多保留 {@link #RESIDUAL_PREVIEW_LIMIT} 条明细；samples 仍截断前 5 条名称。
      */
     static ResidualSnapshot buildResidualSnapshot(List<OpenListTaskInfo> tasks,
-                                                  String protectHash,
+                                                  Set<String> protectHashes,
                                                   boolean cleaning,
                                                   long scannedAt) {
         int active = 0;
@@ -1838,7 +1771,7 @@ public class OpenList implements BaseDownload {
                 } else {
                     terminal++;
                 }
-                ResidualItem item = toResidualItem(task, protectHash);
+                ResidualItem item = toResidualItem(task, protectHashes);
                 if (items.size() < RESIDUAL_PREVIEW_LIMIT) {
                     items.add(item);
                 }
@@ -1866,11 +1799,12 @@ public class OpenList implements BaseDownload {
                 .setMessage(message);
     }
 
-    static ResidualItem toResidualItem(OpenListTaskInfo task, String protectHash) {
+    static ResidualItem toResidualItem(OpenListTaskInfo task, Set<String> protectHashes) {
         ResidualKind kind = classifyResidual(task == null ? null : task.getState());
         String id = task == null ? "" : StrUtil.blankToDefault(task.getId(), "");
         String name = task == null ? "" : StrUtil.blankToDefault(task.getName(), id);
-        boolean protectedCurrent = task != null && taskNameContainsHash(task.getName(), protectHash);
+        boolean protectedCurrent = task != null && protectHashes != null
+                && protectHashes.stream().anyMatch(h -> taskNameContainsHash(task.getName(), h));
         String stateName = task != null && task.getState() != null ? task.getState().name() : "Unknown";
         String error = task == null ? null : StrUtil.blankToDefault(task.getError(), null);
         Integer progress = task == null ? null : task.getProgress();
@@ -1914,7 +1848,7 @@ public class OpenList implements BaseDownload {
             return new CleanResult().setOk(false).setMessage("清理正在进行中，请稍候");
         }
         try {
-            String protectHash = currentInfoHash.get();
+            Set<String> protectHashes = Set.copyOf(currentInfoHashes);
             List<OpenListTaskInfo> tasks = listAllOfflineTasksStrict();
             int cleaned = 0;
             int skipped = 0;
@@ -1929,10 +1863,10 @@ public class OpenList implements BaseDownload {
                     skipped++;
                     continue;
                 }
-                // 保护当前 RSS 正在等待的 hash，避免误杀在跑任务
-                if (StrUtil.isNotBlank(protectHash) && taskNameContainsHash(task.getName(), protectHash)) {
+                // 保护当前 RSS 正在等待的全部 hash，避免误杀在跑任务
+                if (protectHashes.stream().anyMatch(h -> taskNameContainsHash(task.getName(), h))) {
                     skipped++;
-                    log.info("清理残留跳过当前任务 tid={} hash={}", task.getId(), protectHash);
+                    log.info("清理残留跳过当前任务 tid={} hash={}", task.getId(), task.getName());
                     continue;
                 }
                 try {
@@ -2392,7 +2326,8 @@ public class OpenList implements BaseDownload {
 
 
     public String getCurrentInfoHash() {
-        return currentInfoHash.get();
+        // 兼容单值 getter：多 hash 并行时返回任一在等 hash（任务管理器展示用）
+        return currentInfoHashes.stream().findFirst().orElse(null);
     }
 
     public OfflineWaitSnapshot getOfflineWaitSnapshot() {
@@ -2480,35 +2415,40 @@ public class OpenList implements BaseDownload {
      */
     public void cancelCurrentOffline() {
         offlineCancelRequested.set(true);
-        String hash = currentInfoHash.get();
-        if (StrUtil.isBlank(hash)) {
+        // 多 hash 并行时取消全部在等任务（快照避免并发修改）
+        Set<String> hashes = Set.copyOf(currentInfoHashes);
+        if (hashes.isEmpty()) {
             return;
         }
         // 未 login 时 config 为空：只打断本地等待，不打远程 API
         if (config == null) {
-            log.warn("任务管理器取消，OpenList 未登录，仅释放本地占用 hash={}", hash);
-            clearDuplicateMagnet(hash);
-            inFlightTasks.remove(hash);
-            currentInfoHash.compareAndSet(hash, null);
+            log.warn("任务管理器取消，OpenList 未登录，仅释放本地占用 hashes={}", hashes);
+            for (String hash : hashes) {
+                clearDuplicateMagnet(hash);
+                inFlightTasks.remove(hash);
+                currentInfoHashes.remove(hash);
+            }
             return;
         }
-        log.warn("任务管理器取消，清理 OpenList 离线任务 hash={}（进行中 cancel+delete；终态仅 delete 记录）", hash);
-        try {
-            // purgeHashTasks：进行中先 cancel 再 delete；Succeeded/Failed 等终态只 delete 记录
-            purgeHashTasks(hash);
-        } catch (Exception e) {
-            log.warn("取消清理 OpenList 失败 {}: {}", hash, e.getMessage());
+        log.warn("任务管理器取消，清理 OpenList 离线任务 hashes={}（进行中 cancel+delete；终态仅 delete 记录）", hashes);
+        for (String hash : hashes) {
+            try {
+                // purgeHashTasks：进行中先 cancel 再 delete；Succeeded/Failed 等终态只 delete 记录
+                purgeHashTasks(hash);
+            } catch (Exception e) {
+                log.warn("取消清理 OpenList 失败 {}: {}", hash, e.getMessage());
+            }
+            clearDuplicateMagnet(hash);
+            inFlightTasks.remove(hash);
+            currentInfoHashes.remove(hash);
         }
-        clearDuplicateMagnet(hash);
-        inFlightTasks.remove(hash);
-        currentInfoHash.compareAndSet(hash, null);
     }
 
     /**
      * 轮询/等待是否应中止（超时仍由 deadline 负责）
      */
     private boolean shouldAbortWait() {
-        return offlineCancelRequested.get() || ani.rss.task.RssTask.isCancelRequested();
+        return offlineCancelRequested.get() || RssTask.isCancelRequested();
     }
 
     private TimeoutFileInspection inspectTimeoutFiles(String tempPath, String savePath, String reName,
@@ -2526,10 +2466,10 @@ public class OpenList implements BaseDownload {
 
     private TimeoutFileSnapshot freshEpisodeVideoSnapshot(String tempPath, String savePath, String reName,
                                                           List<Double> expectedEpisodes) {
-        invalidateFindFilesCache();
+        api.invalidateFindFilesCache();
         List<OpenListFileInfo> videos = expectedEpisodeVideos(findEpisodeFiles(tempPath, reName), expectedEpisodes);
         if (videos.isEmpty() && !Objects.equals(tempPath, savePath)) {
-            invalidateFindFilesCache();
+            api.invalidateFindFilesCache();
             // 最终目录通常是模板命名；reName 可能是合集临时目录名，回退扫最终目录视频
             videos = expectedEpisodeVideos(findEpisodeFiles(savePath, reName), expectedEpisodes);
             if (videos.isEmpty()) {
@@ -2648,98 +2588,26 @@ public class OpenList implements BaseDownload {
      * @return 文件列表
      */
     public synchronized List<OpenListFileInfo> findFiles(String path) {
-        CachedFileList cached = findFilesCache.get(path);
-        if (cached != null && cached.expireAt > System.currentTimeMillis()) {
-            return cached.files;
-        }
-
-        List<OpenListFileInfo> openListFileInfos = fsList(path, true);
-        List<OpenListFileInfo> list = openListFileInfos.stream()
-                .flatMap(openListFileInfo -> {
-                    if (openListFileInfo.getIsDir()) {
-                        return findFiles(path + "/" + openListFileInfo.getName()).stream();
-                    }
-                    return Stream.of(openListFileInfo);
-                }).toList();
-
-        List<OpenListFileInfo> sorted = ListUtil.sort(new ArrayList<>(list), Comparator.comparing(fileInfo -> {
-            Long size = fileInfo.getSize();
-            return Long.MAX_VALUE - ObjectUtil.defaultIfNull(size, 0L);
-        }));
-        findFilesCache.put(path, new CachedFileList(sorted, FIND_FILES_TTL_MS));
-        return sorted;
+        return api.findFiles(path);
     }
 
     private <T> T retryIdempotent(String action, Supplier<T> supplier) {
-        return retryIdempotent(action, supplier, IDEMPOTENT_API_RETRY_DELAYS_MS);
+        return api.retryIdempotent(action, supplier);
     }
 
     static <T> T retryIdempotent(String action, Supplier<T> supplier, long[] retryDelaysMs) {
-        int attempts = Math.max(1, Math.min(IDEMPOTENT_API_MAX_ATTEMPTS,
-                (retryDelaysMs == null ? 0 : retryDelaysMs.length) + 1));
-        RuntimeException last = null;
-        for (int attempt = 1; attempt <= attempts; attempt++) {
-            try {
-                return supplier.get();
-            } catch (RuntimeException e) {
-                last = e;
-                if (!isTransientOpenListFailure(e) || attempt >= attempts) {
-                    throw e;
-                }
-                long delay = Math.max(0L, retryDelaysMs[attempt - 1]);
-                log.warn("OpenList 临时故障，准备重试 action={} attempt={}/{} delayMs={} error={}",
-                        action, attempt, attempts, delay, ExceptionUtils.getMessage(e));
-                if (delay > 0) {
-                    ThreadUtil.sleep(delay);
-                }
-            }
-        }
-        throw last == null ? new IllegalStateException(action + " failed") : last;
+        return OpenListApi.retryIdempotent(action, supplier, retryDelaysMs);
     }
 
     static boolean isTransientOpenListFailure(Throwable throwable) {
-        Throwable current = throwable;
-        while (current != null) {
-            String className = current.getClass().getSimpleName().toLowerCase(Locale.ROOT);
-            String message = StrUtil.blankToDefault(current.getMessage(), "").toLowerCase(Locale.ROOT);
-            if (className.contains("sockettimeout")
-                    || className.contains("connectexception")
-                    || className.contains("noroutetohost")
-                    || message.contains("read timed out")
-                    || message.contains("connect timed out")
-                    || message.contains("connection reset")
-                    || message.contains("connection refused")
-                    || message.contains("status: 502")
-                    || message.contains("status: 503")
-                    || message.contains("status: 504")) {
-                return true;
-            }
-            current = current.getCause();
-        }
-        return false;
+        return OpenListApi.isTransientOpenListFailure(throwable);
     }
 
     /**
-     * API 最小间隔限流，避免固定 sleep 2s 拖慢轮询
+     * HTTP 层 ok 且 JSON code==200 才算 OpenList 业务成功（委托 OpenListApi，供测试/兼容）
      */
-    private static void throttleApi() {
-        synchronized (API_RATE_LOCK) {
-            long now = System.currentTimeMillis();
-            long wait = API_MIN_INTERVAL_MS - (now - lastApiCallAt);
-            if (wait > 0) {
-                ThreadUtil.sleep(wait);
-            }
-            lastApiCallAt = System.currentTimeMillis();
-        }
-    }
-
-    /**
-     * 目录变更后清理 findFiles/listFileNames 缓存
-     */
-    private static void invalidateFindFilesCache() {
-        findFilesCache.clear();
-        listNamesCache.clear();
-        listNamesExpire.clear();
+    static boolean isOpenListBusinessOk(boolean httpOk, String body) {
+        return OpenListApi.isOpenListBusinessOk(httpOk, body);
     }
 
     /**
@@ -2749,11 +2617,7 @@ public class OpenList implements BaseDownload {
      * @return
      */
     public synchronized HttpRequest getApi(String action) {
-        throttleApi();
-        String host = config.getDownloadToolHost();
-        String password = config.getDownloadToolPassword();
-        return HttpReq.get(host + "/api/" + action)
-                .header(Header.AUTHORIZATION, password);
+        return api.getApi(action);
     }
 
     /**
@@ -2763,11 +2627,7 @@ public class OpenList implements BaseDownload {
      * @return
      */
     public synchronized HttpRequest postApi(String action) {
-        throttleApi();
-        String host = config.getDownloadToolHost();
-        String password = config.getDownloadToolPassword();
-        return HttpReq.post(host + "/api/" + action)
-                .header(Header.AUTHORIZATION, password);
+        return api.postApi(action);
     }
 
 }

@@ -33,8 +33,108 @@ import java.util.concurrent.atomic.AtomicReference;
 @Slf4j
 @Component
 public class RssTask implements BaseTask {
-    public static final AtomicBoolean download = new AtomicBoolean(false);
-    private static final AtomicLong downloadStartTime = new AtomicLong(0);
+    /**
+     * ===== RSS 任务状态机（显式状态对象）=====
+     * 生命周期/当前轮/上一轮状态与轮次生命周期方法收拢于此。
+     * 引用方式：RssJobState.xxx；状态变更必须经其方法或直接操作对应 Atomic 字段。
+     */
+    static final class RssJobState {
+        // ---- 生命周期状态（跨轮次）----
+        /** 全局下载任务锁 */
+        static final AtomicBoolean download = new AtomicBoolean(false);
+        static final AtomicLong downloadStartTime = new AtomicLong(0);
+        /** 轮次世代号（取消/抢占判定） */
+        static final AtomicLong generationSequence = new AtomicLong(0);
+        static final AtomicLong activeGeneration = new AtomicLong(0);
+        /** 生命周期互斥 */
+        static final Object LIFECYCLE_LOCK = new Object();
+
+        // ---- 当前轮状态（resetRoundState 初始化 / clearRoundState 清理）----
+        static final AtomicBoolean cancelRequested = new AtomicBoolean(false);
+        static final AtomicReference<CancelReason> cancelReason = new AtomicReference<>(CancelReason.NONE);
+        static final AtomicReference<String> jobScope = new AtomicReference<>("idle");
+        static final AtomicReference<String> jobTitle = new AtomicReference<>("");
+        static final AtomicReference<String> jobAniId = new AtomicReference<>("");
+        static final AtomicReference<String> jobMessage = new AtomicReference<>("空闲");
+        static final AtomicReference<JobSource> jobSource = new AtomicReference<>(null);
+        static final AtomicReference<ExecutorService> activePool = new AtomicReference<>();
+        static final AtomicReference<Thread> activeRunner = new AtomicReference<>();
+        static final AtomicReference<PendingManual> pendingManual = new AtomicReference<>(null);
+        static final AtomicInteger subscriptionTotal = new AtomicInteger(0);
+        static final AtomicInteger subscriptionActive = new AtomicInteger(0);
+        static final AtomicInteger subscriptionCompleted = new AtomicInteger(0);
+        static final AtomicInteger subscriptionFailed = new AtomicInteger(0);
+
+        // ---- 上一轮状态（recordRoundFinished 写入，任务管理器"最近一次"展示）----
+        static final AtomicLong lastFinishedAt = new AtomicLong(0);
+        static final AtomicLong lastDurationMs = new AtomicLong(0);
+        static final AtomicReference<String> lastResultMessage = new AtomicReference<>("");
+        static final AtomicReference<String> lastTitle = new AtomicReference<>("");
+        static final AtomicReference<String> lastSource = new AtomicReference<>(null);
+        static final AtomicReference<String> lastScope = new AtomicReference<>(null);
+
+        // ---- 轮次生命周期 ----
+
+        /**
+         * 记录上一轮完成信息（任务管理器"最近一次"展示）
+         */
+        static void recordRoundFinished(long finishedAt, long duration, String title, String scope,
+                                        JobSource source, String message) {
+            RssJobState.lastFinishedAt.set(finishedAt);
+            RssJobState.lastDurationMs.set(duration);
+            RssJobState.lastTitle.set(title);
+            RssJobState.lastScope.set(scope);
+            RssJobState.lastSource.set(source == null ? null : source.name().toLowerCase());
+            RssJobState.lastResultMessage.set(message);
+        }
+
+        /**
+         * 初始化当前轮状态（acquireLock 持锁后调用）
+         */
+        static void resetRoundState(JobSource source, String message) {
+            long generation = RssJobState.generationSequence.incrementAndGet();
+            RssJobState.activeGeneration.set(generation);
+            RssJobState.downloadStartTime.set(System.currentTimeMillis());
+            RssJobState.cancelRequested.set(false);
+            RssJobState.cancelReason.set(CancelReason.NONE);
+            RssJobState.activeRunner.set(null);
+            RssJobState.activePool.set(null);
+            RssJobState.subscriptionTotal.set(0);
+            RssJobState.subscriptionActive.set(0);
+            RssJobState.subscriptionCompleted.set(0);
+            RssJobState.subscriptionFailed.set(0);
+            RssJobState.jobScope.set("starting");
+            RssJobState.jobTitle.set("");
+            RssJobState.jobAniId.set("");
+            RssJobState.jobSource.set(source == null ? JobSource.MANUAL : source);
+            RssJobState.jobMessage.set(message == null ? "任务启动中..." : message);
+        }
+
+        /**
+         * 清理当前轮状态（finishGeneration 持锁后调用），回到空闲
+         */
+        static void clearRoundState(String idleMessage) {
+            RssJobState.jobScope.set("idle");
+            RssJobState.jobTitle.set("");
+            RssJobState.jobAniId.set("");
+            RssJobState.jobSource.set(null);
+            RssJobState.downloadStartTime.set(0);
+            RssJobState.activeGeneration.set(0);
+            RssJobState.activeRunner.compareAndSet(Thread.currentThread(), null);
+            RssJobState.download.set(false);
+            RssJobState.cancelRequested.set(false);
+            RssJobState.cancelReason.set(CancelReason.NONE);
+            RssJobState.subscriptionTotal.set(0);
+            RssJobState.subscriptionActive.set(0);
+            RssJobState.subscriptionCompleted.set(0);
+            RssJobState.subscriptionFailed.set(0);
+            RssJobState.jobMessage.set(idleMessage);
+        }
+
+        private RssJobState() {
+        }
+    }
+
     /** 兜底上限：若配置读取失败时使用 */
     private static final long FALLBACK_MAX_DOWNLOAD_DURATION_MS = TimeUnit.MINUTES.toMillis(90);
     /** 在离线超时之上留一点收尾缓冲（分钟） */
@@ -69,33 +169,6 @@ public class RssTask implements BaseTask {
         }
     }
 
-    /** 当前这一轮 RSS 下载的可取消开关（手动刷新 / 定时任务共用） */
-    private static final AtomicBoolean cancelRequested = new AtomicBoolean(false);
-    private static final AtomicReference<CancelReason> cancelReason = new AtomicReference<>(CancelReason.NONE);
-    private static final AtomicReference<String> jobScope = new AtomicReference<>("idle");
-    private static final AtomicReference<String> jobTitle = new AtomicReference<>("");
-    private static final AtomicReference<String> jobAniId = new AtomicReference<>("");
-    private static final AtomicReference<String> jobMessage = new AtomicReference<>("空闲");
-    private static final AtomicReference<JobSource> jobSource = new AtomicReference<>(null);
-    private static final AtomicReference<ExecutorService> activePool = new AtomicReference<>();
-    private static final AtomicReference<Thread> activeRunner = new AtomicReference<>();
-    private static final AtomicReference<PendingManual> pendingManual = new AtomicReference<>(null);
-    private static final AtomicLong generationSequence = new AtomicLong(0);
-    private static final AtomicLong activeGeneration = new AtomicLong(0);
-    private static final AtomicInteger subscriptionTotal = new AtomicInteger(0);
-    private static final AtomicInteger subscriptionActive = new AtomicInteger(0);
-    private static final AtomicInteger subscriptionCompleted = new AtomicInteger(0);
-    private static final AtomicInteger subscriptionFailed = new AtomicInteger(0);
-    private static final Object LIFECYCLE_LOCK = new Object();
-
-    /** 上一轮已处理完成时间 */
-    private static final AtomicLong lastFinishedAt = new AtomicLong(0);
-    private static final AtomicLong lastDurationMs = new AtomicLong(0);
-    private static final AtomicReference<String> lastResultMessage = new AtomicReference<>("");
-    private static final AtomicReference<String> lastTitle = new AtomicReference<>("");
-    private static final AtomicReference<String> lastSource = new AtomicReference<>(null);
-    private static final AtomicReference<String> lastScope = new AtomicReference<>(null);
-
     /**
      * 获取全局 RSS 任务锁（别名，兼容上游 API 命名）
      */
@@ -115,7 +188,7 @@ public class RssTask implements BaseTask {
      * aniList 为 null 时刷全部启用订阅；非空时只刷指定订阅。
      */
     public static void syncDownload(List<Ani> aniList) {
-        download(new AtomicBoolean(true), aniList, activeGeneration.get());
+        download(new AtomicBoolean(true), aniList, RssJobState.activeGeneration.get());
     }
 
     public static void download(AtomicBoolean loop) {
@@ -123,16 +196,16 @@ public class RssTask implements BaseTask {
     }
 
     public static void download(AtomicBoolean loop, List<Ani> targetList) {
-        download(loop, targetList, activeGeneration.get());
+        download(loop, targetList, RssJobState.activeGeneration.get());
     }
 
     private static void download(AtomicBoolean loop, List<Ani> targetList, long generation) {
-        if (generation <= 0 || generation != activeGeneration.get() || !download.get()) {
-            log.debug("忽略已失效的 RSS 执行 generation={} activeGeneration={}", generation, activeGeneration.get());
+        if (generation <= 0 || generation != RssJobState.activeGeneration.get() || !RssJobState.download.get()) {
+            log.debug("忽略已失效的 RSS 执行 generation={} activeGeneration={}", generation, RssJobState.activeGeneration.get());
             return;
         }
         Thread runner = Thread.currentThread();
-        if (!activeRunner.compareAndSet(null, runner)) {
+        if (!RssJobState.activeRunner.compareAndSet(null, runner)) {
             log.warn("RSS 执行线程重复进入 generation={}", generation);
             return;
         }
@@ -141,7 +214,7 @@ public class RssTask implements BaseTask {
         ExecutorService pool = null;
         try {
             if (!TorrentUtil.login()) {
-                jobMessage.set("下载器登录失败");
+                RssJobState.jobMessage.set("下载器登录失败");
                 return;
             }
 
@@ -150,24 +223,24 @@ public class RssTask implements BaseTask {
                     : new ArrayList<>(targetList);
 
             if (targetList == null) {
-                jobScope.set("all");
-                jobTitle.set("全部启用订阅");
-                jobAniId.set("");
+                RssJobState.jobScope.set("all");
+                RssJobState.jobTitle.set("全部启用订阅");
+                RssJobState.jobAniId.set("");
             } else if (candidates.size() == 1 && candidates.get(0) != null) {
-                jobScope.set("single");
-                jobTitle.set(StrUtil.blankToDefault(candidates.get(0).getTitle(), ""));
-                jobAniId.set(StrUtil.blankToDefault(candidates.get(0).getId(), ""));
+                RssJobState.jobScope.set("single");
+                RssJobState.jobTitle.set(StrUtil.blankToDefault(candidates.get(0).getTitle(), ""));
+                RssJobState.jobAniId.set(StrUtil.blankToDefault(candidates.get(0).getId(), ""));
             } else {
-                jobScope.set("partial");
-                jobTitle.set("部分订阅 (" + candidates.size() + ")");
-                jobAniId.set("");
+                RssJobState.jobScope.set("partial");
+                RssJobState.jobTitle.set("部分订阅 (" + candidates.size() + ")");
+                RssJobState.jobAniId.set("");
             }
-            jobMessage.set("扫描订阅中...");
+            RssJobState.jobMessage.set("扫描订阅中...");
 
             List<Ani> enabled = new ArrayList<>();
             for (Ani ani : candidates) {
                 if (!isActive(loop)) {
-                    jobMessage.set("已取消");
+                    RssJobState.jobMessage.set("已取消");
                     return;
                 }
                 if (ani == null) {
@@ -187,24 +260,24 @@ public class RssTask implements BaseTask {
             }
 
             if (enabled.isEmpty()) {
-                jobMessage.set("无可下载订阅");
+                RssJobState.jobMessage.set("无可下载订阅");
                 return;
             }
 
-            subscriptionTotal.set(enabled.size());
-            subscriptionActive.set(0);
-            subscriptionCompleted.set(0);
-            subscriptionFailed.set(0);
+            RssJobState.subscriptionTotal.set(enabled.size());
+            RssJobState.subscriptionActive.set(0);
+            RssJobState.subscriptionCompleted.set(0);
+            RssJobState.subscriptionFailed.set(0);
             updateProgressMessage(generation);
 
             int poolSize = Math.min(ANI_PARALLELISM, enabled.size());
             pool = Executors.newFixedThreadPool(poolSize);
-            activePool.set(pool);
+            RssJobState.activePool.set(pool);
             List<Future<?>> futures = new ArrayList<>(enabled.size());
 
             for (Ani ani : enabled) {
                 if (!isActive(loop)) {
-                    jobMessage.set("已取消");
+                    RssJobState.jobMessage.set("已取消");
                     break;
                 }
                 futures.add(pool.submit(() -> {
@@ -216,23 +289,23 @@ public class RssTask implements BaseTask {
                     boolean stillExists = AniUtil.getAniList().stream()
                             .anyMatch(it -> Objects.equals(it.getId(), aniId));
                     if (!stillExists) {
-                        subscriptionCompleted.incrementAndGet();
+                        RssJobState.subscriptionCompleted.incrementAndGet();
                         updateProgressMessage(generation);
                         return;
                     }
                     String title = ani.getTitle();
-                    subscriptionActive.incrementAndGet();
+                    RssJobState.subscriptionActive.incrementAndGet();
                     updateProgressMessage(generation);
                     try {
                         downloadService.downloadAni(ani);
                     } catch (Exception e) {
-                        subscriptionFailed.incrementAndGet();
+                        RssJobState.subscriptionFailed.incrementAndGet();
                         String message = ExceptionUtils.getMessage(e);
                         log.error("{} {}", title, message);
                         log.error(message, e);
                     } finally {
-                        subscriptionActive.decrementAndGet();
-                        subscriptionCompleted.incrementAndGet();
+                        RssJobState.subscriptionActive.decrementAndGet();
+                        RssJobState.subscriptionCompleted.incrementAndGet();
                         updateProgressMessage(generation);
                     }
                 }));
@@ -242,42 +315,42 @@ public class RssTask implements BaseTask {
 
             for (Future<?> future : futures) {
                 if (!isActive(loop)) {
-                    jobMessage.set("取消中...");
+                    RssJobState.jobMessage.set("取消中...");
                     break;
                 }
                 try {
                     future.get();
                 } catch (CancellationException e) {
-                    if (!cancelRequested.get()) {
+                    if (!RssJobState.cancelRequested.get()) {
                         log.warn("RSS 子任务被取消: {}", e.getMessage());
                     }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    cancelRequested.set(true);
-                    cancelReason.compareAndSet(CancelReason.NONE, CancelReason.USER);
+                    RssJobState.cancelRequested.set(true);
+                    RssJobState.cancelReason.compareAndSet(CancelReason.NONE, CancelReason.USER);
                     break;
                 } catch (ExecutionException e) {
-                    subscriptionFailed.incrementAndGet();
+                    RssJobState.subscriptionFailed.incrementAndGet();
                     log.error(ExceptionUtils.getMessage(e), e);
                 }
             }
-            if (cancelRequested.get()) {
-                jobMessage.set(cancelReason.get() == CancelReason.PREEMPT ? "已为手动刷新让路" : "已取消");
+            if (RssJobState.cancelRequested.get()) {
+                RssJobState.jobMessage.set(RssJobState.cancelReason.get() == CancelReason.PREEMPT ? "已为手动刷新让路" : "已取消");
             } else {
-                int failed = subscriptionFailed.get();
-                int completed = subscriptionCompleted.get();
-                int total = subscriptionTotal.get();
-                jobMessage.set(failed > 0
+                int failed = RssJobState.subscriptionFailed.get();
+                int completed = RssJobState.subscriptionCompleted.get();
+                int total = RssJobState.subscriptionTotal.get();
+                RssJobState.jobMessage.set(failed > 0
                         ? ("部分失败: " + failed + "/" + total + "，已处理 " + completed + "/" + total)
                         : ("已完成: " + completed + "/" + total));
             }
         } catch (Exception e) {
             String message = ExceptionUtils.getMessage(e);
             log.error(message, e);
-            jobMessage.set("异常: " + message);
+            RssJobState.jobMessage.set("异常: " + message);
         } finally {
             shutdownAndAwaitPool(pool, generation);
-            activePool.compareAndSet(pool, null);
+            RssJobState.activePool.compareAndSet(pool, null);
 
             PendingManual next = finishGeneration(generation);
             if (next != null) {
@@ -296,7 +369,7 @@ public class RssTask implements BaseTask {
         PendingManual job = buildPending(aniList);
 
         // 快速路径：空闲则抢锁启动
-        if (!download.get()) {
+        if (!RssJobState.download.get()) {
             try {
                 acquireLock(JobSource.MANUAL, "手动刷新启动中...");
                 startDownloadAsync(aniList);
@@ -306,8 +379,8 @@ public class RssTask implements BaseTask {
             }
         }
 
-        JobSource source = jobSource.get();
-        if (!download.get()) {
+        JobSource source = RssJobState.jobSource.get();
+        if (!RssJobState.download.get()) {
             // 双检：刚才还在跑，现在已空
             try {
                 acquireLock(JobSource.MANUAL, "手动刷新启动中...");
@@ -318,14 +391,14 @@ public class RssTask implements BaseTask {
             }
         }
 
-        if (download.get() && source == JobSource.PERIODIC) {
+        if (RssJobState.download.get() && source == JobSource.PERIODIC) {
             // 抢先：请求取消周期任务，并挂上待执行手动刷新
-            PendingManual prev = pendingManual.getAndSet(job);
-            cancelReason.set(CancelReason.PREEMPT);
-            cancelRequested.set(true);
-            jobMessage.set("手动刷新抢先中，等待周期任务退出...");
+            PendingManual prev = RssJobState.pendingManual.getAndSet(job);
+            RssJobState.cancelReason.set(CancelReason.PREEMPT);
+            RssJobState.cancelRequested.set(true);
+            RssJobState.jobMessage.set("手动刷新抢先中，等待周期任务退出...");
             log.warn("手动刷新抢先周期任务: {}", job.title);
-            ExecutorService pool = activePool.get();
+            ExecutorService pool = RssJobState.activePool.get();
             if (pool != null) {
                 pool.shutdownNow();
             }
@@ -338,9 +411,9 @@ public class RssTask implements BaseTask {
             return "已请求周期任务让路，手动刷新将随后执行";
         }
 
-        if (download.get() && source == JobSource.MANUAL) {
-            PendingManual prev = pendingManual.getAndSet(job);
-            jobMessage.set("已排队待执行: " + job.title);
+        if (RssJobState.download.get() && source == JobSource.MANUAL) {
+            PendingManual prev = RssJobState.pendingManual.getAndSet(job);
+            RssJobState.jobMessage.set("已排队待执行: " + job.title);
             if (prev != null) {
                 return "当前已有手动刷新，新的请求已替换待执行队列";
             }
@@ -348,10 +421,10 @@ public class RssTask implements BaseTask {
         }
 
         // 未知来源或锁异常：尽量排队，避免硬抛导致前端无路可走
-        if (download.get()) {
-            pendingManual.set(job);
-            cancelReason.set(CancelReason.PREEMPT);
-            cancelRequested.set(true);
+        if (RssJobState.download.get()) {
+            RssJobState.pendingManual.set(job);
+            RssJobState.cancelReason.set(CancelReason.PREEMPT);
+            RssJobState.cancelRequested.set(true);
             cleanupDownloadToolOnCancel("未知来源抢先");
             return "存在运行中任务，已请求让路并排队手动刷新";
         }
@@ -361,7 +434,7 @@ public class RssTask implements BaseTask {
             startDownloadAsync(aniList);
             return "已开始刷新RSS";
         } catch (IllegalStateException e) {
-            pendingManual.set(job);
+            RssJobState.pendingManual.set(job);
             return "任务繁忙，已排队待执行";
         }
     }
@@ -372,8 +445,8 @@ public class RssTask implements BaseTask {
      * @return true 表示已拿到锁并应执行 syncDownload
      */
     public static boolean tryStartPeriodic() {
-        if (download.get()) {
-            log.debug("周期 RSS 跳过：已有任务 source={} msg={}", jobSource.get(), jobMessage.get());
+        if (RssJobState.download.get()) {
+            log.debug("周期 RSS 跳过：已有任务 source={} msg={}", RssJobState.jobSource.get(), RssJobState.jobMessage.get());
             return false;
         }
         try {
@@ -386,14 +459,14 @@ public class RssTask implements BaseTask {
     }
 
     private static void updateProgressMessage(long generation) {
-        if (generation != activeGeneration.get() || cancelRequested.get()) {
+        if (generation != RssJobState.activeGeneration.get() || RssJobState.cancelRequested.get()) {
             return;
         }
-        int total = subscriptionTotal.get();
-        int completed = subscriptionCompleted.get();
-        int active = subscriptionActive.get();
-        int failed = subscriptionFailed.get();
-        jobMessage.set("订阅进度 " + completed + "/" + total
+        int total = RssJobState.subscriptionTotal.get();
+        int completed = RssJobState.subscriptionCompleted.get();
+        int active = RssJobState.subscriptionActive.get();
+        int failed = RssJobState.subscriptionFailed.get();
+        RssJobState.jobMessage.set("订阅进度 " + completed + "/" + total
                 + "，运行中 " + active
                 + (failed > 0 ? "，失败 " + failed : ""));
     }
@@ -407,9 +480,9 @@ public class RssTask implements BaseTask {
         while (!pool.isTerminated()) {
             try {
                 if (!pool.awaitTermination(1, TimeUnit.SECONDS)
-                        && generation == activeGeneration.get()
-                        && cancelRequested.get()) {
-                    jobMessage.set(cancelReason.get() == CancelReason.PREEMPT
+                        && generation == RssJobState.activeGeneration.get()
+                        && RssJobState.cancelRequested.get()) {
+                    RssJobState.jobMessage.set(RssJobState.cancelReason.get() == CancelReason.PREEMPT
                             ? "手动刷新抢先中，等待当前订阅退出..."
                             : "取消中，等待当前订阅退出...");
                 }
@@ -424,49 +497,32 @@ public class RssTask implements BaseTask {
     }
 
     private static PendingManual finishGeneration(long generation) {
-        synchronized (LIFECYCLE_LOCK) {
-            if (generation != activeGeneration.get()) {
-                log.debug("忽略旧 RSS 任务收尾 generation={} activeGeneration={}", generation, activeGeneration.get());
+        synchronized (RssJobState.LIFECYCLE_LOCK) {
+            if (generation != RssJobState.activeGeneration.get()) {
+                log.debug("忽略旧 RSS 任务收尾 generation={} activeGeneration={}", generation, RssJobState.activeGeneration.get());
                 return null;
             }
 
-            long startedAt = downloadStartTime.get();
+            long startedAt = RssJobState.downloadStartTime.get();
             long finishedAt = System.currentTimeMillis();
             long duration = startedAt > 0 ? Math.max(0L, finishedAt - startedAt) : 0L;
-            String finishedTitle = StrUtil.blankToDefault(jobTitle.get(), "");
-            String finishedScope = StrUtil.blankToDefault(jobScope.get(), "idle");
-            JobSource finishedSource = jobSource.get();
-            String finishedMessage = StrUtil.blankToDefault(jobMessage.get(), "已完成");
-            lastFinishedAt.set(finishedAt);
-            lastDurationMs.set(duration);
-            lastTitle.set(finishedTitle);
-            lastScope.set(finishedScope);
-            lastSource.set(finishedSource == null ? null : finishedSource.name().toLowerCase());
-            lastResultMessage.set(finishedMessage);
+            RssJobState.recordRoundFinished(
+                    finishedAt,
+                    duration,
+                    StrUtil.blankToDefault(RssJobState.jobTitle.get(), ""),
+                    StrUtil.blankToDefault(RssJobState.jobScope.get(), "idle"),
+                    RssJobState.jobSource.get(),
+                    StrUtil.blankToDefault(RssJobState.jobMessage.get(), "已完成"));
 
-            CancelReason reason = cancelReason.get();
+            CancelReason reason = RssJobState.cancelReason.get();
             PendingManual next = null;
             if (reason == CancelReason.USER) {
-                pendingManual.set(null);
+                RssJobState.pendingManual.set(null);
             } else {
-                next = pendingManual.getAndSet(null);
+                next = RssJobState.pendingManual.getAndSet(null);
             }
 
-            jobScope.set("idle");
-            jobTitle.set("");
-            jobAniId.set("");
-            jobSource.set(null);
-            downloadStartTime.set(0);
-            activeGeneration.set(0);
-            activeRunner.compareAndSet(Thread.currentThread(), null);
-            download.set(false);
-            cancelRequested.set(false);
-            cancelReason.set(CancelReason.NONE);
-            subscriptionTotal.set(0);
-            subscriptionActive.set(0);
-            subscriptionCompleted.set(0);
-            subscriptionFailed.set(0);
-            jobMessage.set(next == null ? "空闲" : "准备执行排队任务...");
+            RssJobState.clearRoundState(next == null ? "空闲" : "准备执行排队任务...");
             return next;
         }
     }
@@ -492,22 +548,22 @@ public class RssTask implements BaseTask {
         } catch (Exception e) {
             log.error("启动排队手动刷新失败: {}", ExceptionUtils.getMessage(e), e);
             // 放回队列，避免丢失（仅当仍空闲失败时）
-            if (!download.get()) {
-                pendingManual.compareAndSet(null, buildPending(aniList));
+            if (!RssJobState.download.get()) {
+                RssJobState.pendingManual.compareAndSet(null, buildPending(aniList));
             }
         }
     }
 
     private static void startDownloadAsync(List<Ani> aniList) {
-        long generation = activeGeneration.get();
+        long generation = RssJobState.activeGeneration.get();
         ThreadUtil.execute(() -> {
             try {
                 download(new AtomicBoolean(true), aniList, generation);
             } catch (Exception e) {
                 String message = ExceptionUtils.getMessage(e);
                 log.error(message, e);
-                if (generation == activeGeneration.get()) {
-                    jobMessage.set("异常: " + message);
+                if (generation == RssJobState.activeGeneration.get()) {
+                    RssJobState.jobMessage.set("异常: " + message);
                 }
             }
         });
@@ -538,10 +594,10 @@ public class RssTask implements BaseTask {
      * 获取全局锁。source 可为 null（兼容旧 syncLock 调用，视为手动侧入口）。
      */
     private static void acquireLock(JobSource source, String message) {
-        synchronized (LIFECYCLE_LOCK) {
+        synchronized (RssJobState.LIFECYCLE_LOCK) {
             long maxDurationMs = resolveMaxDownloadDurationMs(ConfigUtil.CONFIG);
-            if (download.get()) {
-                long elapsed = System.currentTimeMillis() - downloadStartTime.get();
+            if (RssJobState.download.get()) {
+                long elapsed = System.currentTimeMillis() - RssJobState.downloadStartTime.get();
                 if (elapsed > maxDurationMs) {
                     log.warn("检测到超时任务（已运行 {} 分钟，上限 {} 分钟），尝试安全恢复",
                             elapsed / 60000, maxDurationMs / 60000);
@@ -552,25 +608,10 @@ public class RssTask implements BaseTask {
                     throw new IllegalStateException("存在未完成任务，请等待...");
                 }
             }
-            if (!download.compareAndSet(false, true)) {
+            if (!RssJobState.download.compareAndSet(false, true)) {
                 throw new IllegalStateException("存在未完成任务，请等待...");
             }
-            long generation = generationSequence.incrementAndGet();
-            activeGeneration.set(generation);
-            downloadStartTime.set(System.currentTimeMillis());
-            cancelRequested.set(false);
-            cancelReason.set(CancelReason.NONE);
-            activeRunner.set(null);
-            activePool.set(null);
-            subscriptionTotal.set(0);
-            subscriptionActive.set(0);
-            subscriptionCompleted.set(0);
-            subscriptionFailed.set(0);
-            jobScope.set("starting");
-            jobTitle.set("");
-            jobAniId.set("");
-            jobSource.set(source == null ? JobSource.MANUAL : source);
-            jobMessage.set(message == null ? "任务启动中..." : message);
+            RssJobState.resetRoundState(source, message);
         }
     }
 
@@ -597,26 +638,26 @@ public class RssTask implements BaseTask {
         String lastJobTitle;
         String lastJobSource;
         String lastJobScope;
-        synchronized (LIFECYCLE_LOCK) {
-            running = download.get();
-            canceling = cancelRequested.get();
-            startedAt = downloadStartTime.get();
-            scope = running ? jobScope.get() : "idle";
-            title = jobTitle.get();
-            aniId = jobAniId.get();
-            pending = pendingManual.get();
-            source = jobSource.get();
-            message = running ? jobMessage.get() : (pending != null ? "空闲（有待执行）" : "空闲");
-            total = subscriptionTotal.get();
-            active = subscriptionActive.get();
-            completed = subscriptionCompleted.get();
-            failed = subscriptionFailed.get();
-            finishedAt = lastFinishedAt.get();
-            lastDuration = lastDurationMs.get();
-            lastMsg = lastResultMessage.get();
-            lastJobTitle = lastTitle.get();
-            lastJobSource = lastSource.get();
-            lastJobScope = lastScope.get();
+        synchronized (RssJobState.LIFECYCLE_LOCK) {
+            running = RssJobState.download.get();
+            canceling = RssJobState.cancelRequested.get();
+            startedAt = RssJobState.downloadStartTime.get();
+            scope = running ? RssJobState.jobScope.get() : "idle";
+            title = RssJobState.jobTitle.get();
+            aniId = RssJobState.jobAniId.get();
+            pending = RssJobState.pendingManual.get();
+            source = RssJobState.jobSource.get();
+            message = running ? RssJobState.jobMessage.get() : (pending != null ? "空闲（有待执行）" : "空闲");
+            total = RssJobState.subscriptionTotal.get();
+            active = RssJobState.subscriptionActive.get();
+            completed = RssJobState.subscriptionCompleted.get();
+            failed = RssJobState.subscriptionFailed.get();
+            finishedAt = RssJobState.lastFinishedAt.get();
+            lastDuration = RssJobState.lastDurationMs.get();
+            lastMsg = RssJobState.lastResultMessage.get();
+            lastJobTitle = RssJobState.lastTitle.get();
+            lastJobSource = RssJobState.lastSource.get();
+            lastJobScope = RssJobState.lastScope.get();
         }
 
         long elapsed = (running && startedAt > 0) ? Math.max(0L, System.currentTimeMillis() - startedAt) : 0L;
@@ -1059,14 +1100,14 @@ public class RssTask implements BaseTask {
      * 同时清空待执行手动刷新。
      */
     public static boolean requestCancel() {
-        PendingManual dropped = pendingManual.getAndSet(null);
-        if (!download.get()) {
+        PendingManual dropped = RssJobState.pendingManual.getAndSet(null);
+        if (!RssJobState.download.get()) {
             if (dropped != null) {
-                jobMessage.set("已清除待执行刷新");
+                RssJobState.jobMessage.set("已清除待执行刷新");
                 cleanupDownloadToolOnCancel("清除待执行时附带清理");
                 return true;
             }
-            // RSS 调度空闲，但 OpenList 可能仍占用 currentInfoHash
+            // RSS 调度空闲，但 OpenList 可能仍占用在等 hash（currentInfoHashes）
             if (isOpenListTool()) {
                 String hash = null;
                 try {
@@ -1074,20 +1115,20 @@ public class RssTask implements BaseTask {
                 } catch (Exception ignored) {
                 }
                 if (StrUtil.isNotBlank(hash)) {
-                    jobMessage.set("取消 OpenList 离线任务...");
+                    RssJobState.jobMessage.set("取消 OpenList 离线任务...");
                     cleanupDownloadToolOnCancel("用户取消 OpenList 占用");
-                    jobMessage.set("已请求取消 OpenList 离线任务");
+                    RssJobState.jobMessage.set("已请求取消 OpenList 离线任务");
                     return true;
                 }
             }
             return false;
         }
-        cancelReason.set(CancelReason.USER);
-        cancelRequested.set(true);
-        jobMessage.set("取消中...");
+        RssJobState.cancelReason.set(CancelReason.USER);
+        RssJobState.cancelRequested.set(true);
+        RssJobState.jobMessage.set("取消中...");
         log.warn("用户请求取消 RSS 任务 scope={} title={} source={} droppedPending={}",
-                jobScope.get(), jobTitle.get(), jobSource.get(), dropped != null);
-        ExecutorService pool = activePool.get();
+                RssJobState.jobScope.get(), RssJobState.jobTitle.get(), RssJobState.jobSource.get(), dropped != null);
+        ExecutorService pool = RssJobState.activePool.get();
         if (pool != null) {
             pool.shutdownNow();
         }
@@ -1096,12 +1137,12 @@ public class RssTask implements BaseTask {
         // 仅当 15s 后仍占用且线程池已结束时兜底（残留锁），避免与在跑任务竞态。
         ThreadUtil.execute(() -> {
             ThreadUtil.sleep(15, TimeUnit.SECONDS);
-            if (!download.get() || !cancelRequested.get()) {
+            if (!RssJobState.download.get() || !RssJobState.cancelRequested.get()) {
                 return;
             }
-            ExecutorService p = activePool.get();
+            ExecutorService p = RssJobState.activePool.get();
             boolean poolGone = p == null || p.isTerminated();
-            Thread runner = activeRunner.get();
+            Thread runner = RssJobState.activeRunner.get();
             boolean runnerGone = runner == null || !runner.isAlive();
             if (poolGone && runnerGone) {
                 forceReleaseLock("取消后残留锁兜底释放");
@@ -1128,13 +1169,13 @@ public class RssTask implements BaseTask {
             return requestCancel();
         }
         if ("rss-pending".equals(itemId)) {
-            PendingManual dropped = pendingManual.getAndSet(null);
+            PendingManual dropped = RssJobState.pendingManual.getAndSet(null);
             if (dropped == null) {
                 return false;
             }
             // 仅空闲时更新全局文案；运行中避免覆盖“处理中: xxx”
-            if (!download.get()) {
-                jobMessage.set("已清除待执行刷新");
+            if (!RssJobState.download.get()) {
+                RssJobState.jobMessage.set("已清除待执行刷新");
             }
             log.warn("任务管理器清除待执行刷新: {}", dropped.title);
             return true;
@@ -1152,12 +1193,12 @@ public class RssTask implements BaseTask {
                 return false;
             }
             // 运行中只清 OpenList 占用，不改 RSS 主文案
-            if (!download.get()) {
-                jobMessage.set("取消 OpenList 离线任务...");
+            if (!RssJobState.download.get()) {
+                RssJobState.jobMessage.set("取消 OpenList 离线任务...");
             }
             cleanupDownloadToolOnCancel("任务条目取消 OpenList");
-            if (!download.get()) {
-                jobMessage.set("已请求取消 OpenList 离线任务");
+            if (!RssJobState.download.get()) {
+                RssJobState.jobMessage.set("已请求取消 OpenList 离线任务");
             }
             return true;
         }
@@ -1184,7 +1225,7 @@ public class RssTask implements BaseTask {
      */
     public static boolean isOpenListTool() {
         try {
-            return isOpenListTool(ConfigUtil.CONFIG);
+            return TorrentUtil.isOfflineTool();
         } catch (Exception e) {
             return false;
         }
@@ -1205,48 +1246,48 @@ public class RssTask implements BaseTask {
         if (loop != null && !loop.get()) {
             return false;
         }
-        return !cancelRequested.get();
+        return !RssJobState.cancelRequested.get();
     }
 
     public static boolean isCancelRequested() {
-        return cancelRequested.get();
+        return RssJobState.cancelRequested.get();
     }
 
     /** 测试/诊断：当前是否有待执行手动刷新 */
     static boolean hasPendingManual() {
-        return pendingManual.get() != null;
+        return RssJobState.pendingManual.get() != null;
     }
 
     /** 测试辅助：读取来源 */
     static JobSource currentSource() {
-        return jobSource.get();
+        return RssJobState.jobSource.get();
     }
 
     private static void clearJobState() {
-        cancelRequested.set(false);
-        cancelReason.set(CancelReason.NONE);
-        jobScope.set("idle");
-        jobTitle.set("");
-        jobAniId.set("");
-        jobMessage.set("空闲");
-        jobSource.set(null);
-        subscriptionTotal.set(0);
-        subscriptionActive.set(0);
-        subscriptionCompleted.set(0);
-        subscriptionFailed.set(0);
+        RssJobState.cancelRequested.set(false);
+        RssJobState.cancelReason.set(CancelReason.NONE);
+        RssJobState.jobScope.set("idle");
+        RssJobState.jobTitle.set("");
+        RssJobState.jobAniId.set("");
+        RssJobState.jobMessage.set("空闲");
+        RssJobState.jobSource.set(null);
+        RssJobState.subscriptionTotal.set(0);
+        RssJobState.subscriptionActive.set(0);
+        RssJobState.subscriptionCompleted.set(0);
+        RssJobState.subscriptionFailed.set(0);
     }
 
     private static boolean forceReleaseLock(String reason) {
-        synchronized (LIFECYCLE_LOCK) {
-            ExecutorService pool = activePool.get();
-            Thread runner = activeRunner.get();
+        synchronized (RssJobState.LIFECYCLE_LOCK) {
+            ExecutorService pool = RssJobState.activePool.get();
+            Thread runner = RssJobState.activeRunner.get();
             boolean poolAlive = pool != null && !pool.isTerminated();
             boolean runnerAlive = runner != null && runner.isAlive();
             if (poolAlive || runnerAlive) {
                 log.warn("拒绝强制释放 RSS 全局锁，执行线程仍存活: {}", reason);
-                cancelReason.compareAndSet(CancelReason.NONE, CancelReason.USER);
-                cancelRequested.set(true);
-                jobMessage.set("任务超时，等待执行线程退出...");
+                RssJobState.cancelReason.compareAndSet(CancelReason.NONE, CancelReason.USER);
+                RssJobState.cancelRequested.set(true);
+                RssJobState.jobMessage.set("任务超时，等待执行线程退出...");
                 if (pool != null) {
                     pool.shutdownNow();
                 }
@@ -1254,11 +1295,11 @@ public class RssTask implements BaseTask {
             }
 
             log.warn("安全释放无活动线程的 RSS 残留锁: {}", reason);
-            activePool.set(null);
-            activeRunner.set(null);
-            activeGeneration.set(0);
-            download.set(false);
-            downloadStartTime.set(0);
+            RssJobState.activePool.set(null);
+            RssJobState.activeRunner.set(null);
+            RssJobState.activeGeneration.set(0);
+            RssJobState.download.set(false);
+            RssJobState.downloadStartTime.set(0);
             clearJobState();
             return true;
         }

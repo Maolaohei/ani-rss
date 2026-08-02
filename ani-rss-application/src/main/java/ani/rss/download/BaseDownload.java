@@ -18,6 +18,14 @@ import java.util.Set;
 
 public interface BaseDownload {
     /**
+     * 是否为离线长等待型下载器（OpenList/Alist 等网盘离线工具）。
+     * 离线型下载器的 download() 提交后需长时间等待离线完成，不应长期占用 RSS 主线程池。
+     */
+    default boolean isOffline() {
+        return false;
+    }
+
+    /**
      * 登录
      *
      * @param config 设置
