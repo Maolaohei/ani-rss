@@ -150,6 +150,7 @@ export let rssJobTempDirResidualScan = () => api.post('api/rssJobTempDirResidual
  * @returns {Promise<unknown>}
  */
 export let rssJobTempDirResidualClean = () => api.post('api/rssJobTempDirResidualClean')
+export let rssJobRecheckDownloaded = () => api.post('api/rssJobRecheckDownloaded')
 
 /**
  * 失败下载队列

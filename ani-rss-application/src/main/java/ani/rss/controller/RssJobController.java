@@ -2,21 +2,32 @@ package ani.rss.controller;
 
 import ani.rss.annotation.Auth;
 import ani.rss.download.OpenList;
+import ani.rss.entity.Ani;
+import ani.rss.entity.Item;
 import ani.rss.entity.vo.RssJobStatus;
 import ani.rss.entity.web.Result;
+import ani.rss.service.DownloadService;
 import ani.rss.task.RssTask;
+import ani.rss.util.other.AniUtil;
+import ani.rss.util.other.ItemsUtil;
+import ani.rss.util.other.TorrentUtil;
+import cn.hutool.core.text.StrFormatter;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.extra.spring.SpringUtil;
 import io.swagger.v3.oas.annotations.Operation;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.io.File;
+import java.util.List;
 import java.util.Map;
 
 /**
  * RSS 任务管理器
  */
+@Slf4j
 @RestController
 public class RssJobController extends BaseController {
 
@@ -62,6 +73,44 @@ public class RssJobController extends BaseController {
         } else {
             result.setMessage("已请求取消");
         }
+        return result;
+    }
+
+    @Auth
+    @Operation(summary = "强制识别已下载(补回种子记录)")
+    @PostMapping("/rssJobRecheckDownloaded")
+    public Result<RssJobStatus> rssJobRecheckDownloaded() {
+        // 对记录被误删的已下载集数: 重新检查文件真实存在并补回种子记录, 避免重新下载
+        DownloadService downloadService = SpringUtil.getBean(DownloadService.class);
+        int checked = 0;
+        int downloaded = 0;
+        int restored = 0;
+        for (Ani ani : AniUtil.getAniList()) {
+            try {
+                List<Item> items = ItemsUtil.getItems(ani);
+                for (Item item : items) {
+                    checked++;
+                    if (!downloadService.itemDownloaded(ani, item, false)) {
+                        continue;
+                    }
+                    downloaded++;
+                    // itemDownloaded 命中时内部已补写种子记录(DownloadService.saveTorrent)
+                    File torrent = TorrentUtil.getTorrent(ani, item);
+                    if (torrent.exists()) {
+                        restored++;
+                    } else {
+                        // 种子下载失败(如 404), 不重复请求, 仅告警
+                        log.warn("补回种子记录失败(种子下载失败) {} - {}", ani.getTitle(), item.getReName());
+                    }
+                }
+            } catch (Exception e) {
+                // 单个订阅失败(如 RSS 拉取失败)不影响其他订阅
+                log.debug("强制识别已下载失败: {} - {}", ani.getTitle(), e.getMessage());
+            }
+        }
+        Result<RssJobStatus> result = Result.success(RssTask.getJobStatus());
+        result.setMessage(StrFormatter.format("识别完成: 检查 {} 项, 已下载 {} 项, 补回记录 {} 项",
+                checked, downloaded, restored));
         return result;
     }
 

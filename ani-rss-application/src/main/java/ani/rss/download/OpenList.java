@@ -92,6 +92,43 @@ public class OpenList implements BaseDownload {
     private static final long FIND_FILES_TTL_MS = 3000L;
     private static final Map<String, CachedFileList> findFilesCache = new ConcurrentHashMap<>();
 
+    // listFileNames 长缓存: "本地已下载"判断用, 文件列表变化不频繁
+    private static final long LIST_NAMES_TTL_MS = TimeUnit.SECONDS.toMillis(60);
+    private static final Map<String, List<String>> listNamesCache = new ConcurrentHashMap<>();
+    private static final Map<String, Long> listNamesExpire = new ConcurrentHashMap<>();
+
+    /**
+     * 列出网盘目录下文件路径(递归, 60s 缓存), 供"本地已下载"判断使用。
+     * 下载目录是网盘虚拟路径(本地文件系统不可见), 需通过 API 检查文件真实存在。
+     */
+    public List<String> listFileNames(String dirPath) {
+        Long expire = listNamesExpire.get(dirPath);
+        if (expire != null && expire > System.currentTimeMillis()) {
+            List<String> cached = listNamesCache.get(dirPath);
+            if (cached != null) {
+                return cached;
+            }
+        }
+        List<String> names;
+        try {
+            names = findFiles(dirPath).stream()
+                    .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
+                    .map(f -> {
+                        String dir = f.getPath();
+                        String name = f.getName();
+                        return StrUtil.isBlank(dir) ? name : dir + "/" + name;
+                    })
+                    .collect(Collectors.toList());
+        } catch (Exception e) {
+            // API 故障: 不缓存, 下次重试; 记日志避免静默误判"目录无文件"
+            log.warn("列出网盘目录失败 {}: {}", dirPath, ExceptionUtils.getMessage(e));
+            return List.of();
+        }
+        listNamesCache.put(dirPath, names);
+        listNamesExpire.put(dirPath, System.currentTimeMillis() + LIST_NAMES_TTL_MS);
+        return names;
+    }
+
     private static final int IDEMPOTENT_API_MAX_ATTEMPTS = 3;
     private static final long[] IDEMPOTENT_API_RETRY_DELAYS_MS = {500L, 1500L};
     private static final long TIMEOUT_FILE_STABILITY_WAIT_MS = 2000L;
@@ -2663,10 +2700,12 @@ public class OpenList implements BaseDownload {
     }
 
     /**
-     * 目录变更后清理 findFiles 缓存
+     * 目录变更后清理 findFiles/listFileNames 缓存
      */
     private static void invalidateFindFilesCache() {
         findFilesCache.clear();
+        listNamesCache.clear();
+        listNamesExpire.clear();
     }
 
     /**

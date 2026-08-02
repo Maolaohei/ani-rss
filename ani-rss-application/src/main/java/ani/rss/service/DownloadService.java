@@ -4,6 +4,7 @@ import ani.rss.commons.ExceptionUtils;
 import ani.rss.commons.FileUtils;
 import ani.rss.commons.GsonStatic;
 import ani.rss.commons.PinyinUtils;
+import ani.rss.download.OpenList;
 import ani.rss.entity.*;
 import ani.rss.enums.NotificationStatusEnum;
 import ani.rss.enums.StringEnum;
@@ -128,8 +129,11 @@ public class DownloadService {
         // 本地 infoHash 去重：合集展开后的 clone 仍会进入循环，但同 infoHash 的第二个及后续 clone 会被此 Set 过滤跳过
         Set<String> pushedHashes = new HashSet<>();
 
-        // 每个订阅只扫一次本地下载目录
-        Set<String> localEpisodeIndex = buildLocalEpisodeIndex(ani, savePath);
+        // 每个订阅只扫一次本地下载目录; OpenList 为网盘虚拟路径, 不预构建
+        // (151 行信任记录, itemDownloaded 内部按需用 OpenList API 检查, 避免每轮 API 调用)
+        Set<String> localEpisodeIndex = isOpenListTool()
+                ? null
+                : buildLocalEpisodeIndex(ani, savePath);
 
         for (Item item : items) {
             if (RssTask.isCancelRequested()) {
@@ -155,10 +159,14 @@ public class DownloadService {
                     // 不跳过，继续下载流程
                 } else {
                     // 记录有效性校验: 下载器有对应任务 或 本地有对应文件 才视为已下载;
-                    // 记录存在但任务/文件均无 → 过期记录, 清理后重新下载
-                    boolean recordValid = Boolean.TRUE.equals(config.getRename())
-                            ? itemDownloaded(ani, item, true, localEpisodeIndex)
-                            : true;
+                    // OpenList/Alist: 下载目录是网盘虚拟路径, 本地文件不可见且任务列表恒空,
+                    // 无法可靠校验, 信任种子记录, 避免误删有效记录导致无限重下
+                    boolean recordValid;
+                    if (isOpenListTool() || !Boolean.TRUE.equals(config.getRename())) {
+                        recordValid = true;
+                    } else {
+                        recordValid = itemDownloaded(ani, item, true, localEpisodeIndex);
+                    }
                     if (recordValid) {
                         log.debug("种子记录已存在 {}", reName);
                         if (master && !is5) {
@@ -972,13 +980,23 @@ public class DownloadService {
 
 
     /**
-     * 构建本地下载目录中的集数索引，避免每个 item 重复 listFiles
+     * 构建本地下载目录中的集数索引，避免每个 item 重复 listFiles。
+     * OpenList/Alist: 下载目录为网盘虚拟路径, 通过 OpenList API 列出文件构建索引。
      */
     private Set<String> buildLocalEpisodeIndex(Ani ani, String downloadPath) {
         Set<String> index = new HashSet<>();
         boolean ovaLegacy = Boolean.TRUE.equals(ani.getOva()) && !RenameUtil.isNamingV2(ani);
         // 剧场版(电影式)/旧版 OVA: 文件名不含 SxxExx, 按文件名主名索引
         boolean movieStyle = RenameUtil.isMovie(ani) || ovaLegacy;
+
+        if (isOpenListTool() && TorrentUtil.DOWNLOAD instanceof OpenList openList) {
+            // 网盘虚拟路径, 本地文件系统不可见, 用 OpenList API 列出文件
+            for (String name : openList.listFileNames(downloadPath)) {
+                addFileToIndex(index, name, movieStyle);
+            }
+            return index;
+        }
+
         List<File> files = FileUtils.listFileList(downloadPath);
         for (File file : files) {
             if (file.isDirectory()) {
@@ -991,32 +1009,39 @@ public class DownloadService {
                     continue;
                 }
             }
-            String mainName = FileUtil.mainName(file);
-            if (StrUtil.isBlank(mainName)) {
-                continue;
-            }
-            mainName = mainName.trim().toUpperCase();
-            if (movieStyle) {
-                index.add("M:" + mainName);
-                continue;
-            }
-            if (!ReUtil.contains(StringEnum.SEASON_REG, mainName)) {
-                continue;
-            }
-            String seasonStr = ReUtil.get(StringEnum.SEASON_REG, mainName, 1);
-            String episodeStr = ReUtil.get(StringEnum.SEASON_REG, mainName, 2);
-            if (StrUtil.isBlank(seasonStr) || StrUtil.isBlank(episodeStr)) {
-                continue;
-            }
-            try {
-                int s = Integer.parseInt(seasonStr);
-                double e = Double.parseDouble(episodeStr);
-                // 统一规范化，匹配时 O(1) 查找
-                index.add(s + ":" + e);
-            } catch (Exception ignored) {
-            }
+            addFileToIndex(index, file.getPath(), movieStyle);
         }
         return index;
+    }
+
+    /**
+     * 将文件名加入本地索引: movieStyle 用 M: 主名, 普通番剧用 season:episode
+     */
+    private static void addFileToIndex(Set<String> index, String filePath, boolean movieStyle) {
+        String mainName = FileUtil.mainName(new File(filePath));
+        if (StrUtil.isBlank(mainName)) {
+            return;
+        }
+        mainName = mainName.trim().toUpperCase();
+        if (movieStyle) {
+            index.add("M:" + mainName);
+            return;
+        }
+        if (!ReUtil.contains(StringEnum.SEASON_REG, mainName)) {
+            return;
+        }
+        String seasonStr = ReUtil.get(StringEnum.SEASON_REG, mainName, 1);
+        String episodeStr = ReUtil.get(StringEnum.SEASON_REG, mainName, 2);
+        if (StrUtil.isBlank(seasonStr) || StrUtil.isBlank(episodeStr)) {
+            return;
+        }
+        try {
+            int s = Integer.parseInt(seasonStr);
+            double e = Double.parseDouble(episodeStr);
+            // 统一规范化，匹配时 O(1) 查找
+            index.add(s + ":" + e);
+        } catch (Exception ignored) {
+        }
     }
 
     /**

@@ -208,6 +208,15 @@
         >
           全部取消
         </el-button>
+        <el-button
+            type="success"
+            bg
+            text
+            :loading="rechecking"
+            @click="recheckDownloaded"
+        >
+          强制识别已下载
+        </el-button>
       </div>
     </template>
   </el-dialog>
@@ -225,6 +234,7 @@ let appliedSeq = 0
 let actionInFlight = 0
 const loading = ref(false)
 const cancelingAll = ref(false)
+const rechecking = ref(false)
 const cancelingId = ref('')
 const scanning = ref(false)
 const cleaning = ref(false)
@@ -629,6 +639,21 @@ const scanResidual = async () => {
   } finally {
     actionInFlight--
     scanning.value = false
+  }
+}
+
+const recheckDownloaded = async () => {
+  const seq = nextRequestSeq()
+  actionInFlight++
+  rechecking.value = true
+  try {
+    const res = await http.rssJobRecheckDownloaded()
+    ElMessage.success(res.message || '识别完成')
+    applyResponseStatus(seq, res?.data)
+  } catch (_) {
+  } finally {
+    actionInFlight--
+    rechecking.value = false
   }
 }
 
