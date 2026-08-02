@@ -1,6 +1,7 @@
 package ani.rss.controller;
 
 import ani.rss.annotation.Auth;
+import ani.rss.commons.ExceptionUtils;
 import ani.rss.commons.FileUtils;
 import ani.rss.commons.MavenUtils;
 import ani.rss.config.CronConfig;
@@ -31,6 +32,7 @@ import cn.hutool.core.lang.Assert;
 import cn.hutool.core.text.StrFormatter;
 import cn.hutool.core.util.ClassUtil;
 import cn.hutool.core.util.ObjectUtil;
+import cn.hutool.core.util.ReUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.core.util.ZipUtil;
 import cn.hutool.extra.spring.SpringUtil;
@@ -52,6 +54,9 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
+import java.util.Set;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 
 @Slf4j
 @RestController
@@ -241,6 +246,13 @@ public class ConfigController extends BaseController {
     public Result<Void> downloadLoginTest(@RequestBody Config config) {
         ConfigUtil.format(config);
         String download = config.getDownloadToolType();
+        // 兼容旧配置：Alist 已迁移为 OpenList
+        if ("Alist".equals(download)) {
+            download = "OpenList";
+        }
+        // 白名单校验：请求体可控的下载器类型不得反射加载任意类
+        Set<String> allowedTools = Set.of("qBittorrent", "Transmission", "Aria2", "OpenList");
+        Assert.isTrue(allowedTools.contains(download), "不支持的下载工具类型: " + download);
         Class<BaseDownload> loadClass = ClassUtil.loadClass("ani.rss.download." + download);
         BaseDownload baseDownload = SpringUtil.getBean(loadClass);
         Boolean login = baseDownload.login(true, config);
@@ -248,7 +260,7 @@ public class ConfigController extends BaseController {
             return Result.success("登录成功");
         }
         if ("qBittorrent".equalsIgnoreCase(download)) {
-            return Result.error("登录失败：qBittorrent ≥5.2 请填写 ApiKey（Bearer），旧版用户名密码登录已不再支持。");
+            return Result.error("登录失败：请检查 ApiKey（≥5.2，填密码栏）或用户名密码（≤5.1）是否正确。");
         }
         if ("OpenList".equalsIgnoreCase(download) || "Alist".equalsIgnoreCase(download)) {
             return Result.error("登录失败：请检查 Host、Token 与保存位置/临时目录配置。");
@@ -313,6 +325,9 @@ public class ConfigController extends BaseController {
         // 删除旧的种子记录
         FileUtil.del(configDir + "/torrents");
 
+        // 白名单校验：备份包只允许已知文件，拒绝 .. / 绝对路径 / 未知文件（防配置投毒与 zip-slip）
+        verifyZipEntries(file.getInputStream());
+
         @Cleanup
         InputStream inputStream = file.getInputStream();
 
@@ -330,6 +345,39 @@ public class ConfigController extends BaseController {
     @RequestMapping("/ping")
     public Result<Void> ping() {
         return Result.success();
+    }
+
+    /**
+     * 校验备份 zip 的条目：仅允许备份白名单内的文件，拒绝绝对路径与 .. 穿越（zip-slip）
+     */
+    private void verifyZipEntries(InputStream inputStream) {
+        try (ZipInputStream zipIn = new ZipInputStream(inputStream, StandardCharsets.UTF_8)) {
+            ZipEntry entry;
+            boolean hasEntry = false;
+            int entryCount = 0;
+            while ((entry = zipIn.getNextEntry()) != null) {
+                // 防 zip bomb：条目数上限
+                Assert.isTrue(++entryCount <= 10000, "备份包条目过多");
+                hasEntry = true;
+                String name = entry.getName();
+                String normalized = name.replace('\\', '/');
+                boolean pathSafe = !normalized.startsWith("/")
+                        && !ReUtil.contains("(^|/)\\.\\.(/|$)", normalized);
+                Assert.isTrue(pathSafe, "备份包包含非法路径: " + name);
+
+                // 与 ConfigUtil.backup 的备份清单保持一致
+                boolean allowed = normalized.equals("config.v2.json")
+                        || normalized.equals("ani.v2.json")
+                        || normalized.equals("database.db")
+                        || normalized.startsWith("torrents/")
+                        || normalized.startsWith("files/")
+                        || normalized.endsWith("/");
+                Assert.isTrue(allowed, "备份包包含未授权文件: " + name);
+            }
+            Assert.isTrue(hasEntry, "备份包为空");
+        } catch (IOException e) {
+            throw new RuntimeException("备份包解析失败: " + ExceptionUtils.getMessage(e), e);
+        }
     }
 
     /**

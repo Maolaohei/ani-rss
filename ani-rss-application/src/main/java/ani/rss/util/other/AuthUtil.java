@@ -50,6 +50,12 @@ public class AuthUtil {
     }
 
     /**
+     * 进程内随机密钥（不落盘、重启即失效），用于签发 token；
+     * 旧实现把配置中的 uuid 直接作为 key，配置文件泄露即可离线伪造任意 token。
+     */
+    private static volatile String RANDOM_KEY = UUID.randomUUID().toString();
+
+    /**
      * 刷新密钥
      */
     public static String resetKey() {
@@ -59,11 +65,13 @@ public class AuthUtil {
         Integer loginEffectiveHours = config.getLoginEffectiveHours();
         Boolean multiLoginForbidden = config.getMultiLoginForbidden();
 
-        String key = config.getUuid();
-
-        if (multiLoginForbidden) {
-            // 禁止多端登录
+        String key;
+        if (Boolean.TRUE.equals(multiLoginForbidden)) {
+            // 禁止多端登录：每次登录签发新 key，旧 token 立即失效
             key = UUID.randomUUID().toString();
+        } else {
+            // 允许多端登录：共享进程内随机 key（重启后所有 token 失效，需重新登录）
+            key = RANDOM_KEY;
         }
         CacheUtils.put("auth_key", key, TimeUnit.HOURS.toMillis(loginEffectiveHours));
         return key;

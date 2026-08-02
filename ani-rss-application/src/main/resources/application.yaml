@@ -25,7 +25,8 @@ spring:
     enabled: false
 server:
   port: 7789
-  address: 0.0.0.0
+  # 默认仅本机监听，需要局域网/公网访问时设置环境变量 SERVER_ADDRESS=0.0.0.0
+  address: ${SERVER_ADDRESS:127.0.0.1}
   tomcat:
     threads:
       max: 100

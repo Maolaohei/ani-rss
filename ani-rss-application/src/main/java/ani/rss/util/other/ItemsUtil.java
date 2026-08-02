@@ -22,7 +22,11 @@ import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.core.util.*;
 import lombok.extern.slf4j.Slf4j;
 import org.w3c.dom.*;
+import org.xml.sax.InputSource;
 
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import java.io.StringReader;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Function;
@@ -108,6 +112,35 @@ public class ItemsUtil {
     }
 
     /**
+     * 安全解析 RSS XML：禁用 DOCTYPE 与外部实体，防止 XXE（恶意源可通过实体回显本地文件）。
+     * 优先严格模式（拒绝一切 DOCTYPE）；若源确实声明 DOCTYPE 则回退宽松模式（仍禁外部实体）。
+     */
+    private static Document readXmlSafely(String xml) {
+        try {
+            return parseXml(xml, true);
+        } catch (Exception e) {
+            log.warn("RSS 包含 DOCTYPE 声明，已降级宽松模式解析: {}", ExceptionUtils.getMessage(e));
+            return parseXml(xml, false);
+        }
+    }
+
+    private static Document parseXml(String xml, boolean disallowDoctype) {
+        try {
+            DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+            factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", disallowDoctype);
+            factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
+            factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+            factory.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
+            factory.setXIncludeAware(false);
+            factory.setExpandEntityReferences(false);
+            DocumentBuilder builder = factory.newDocumentBuilder();
+            return builder.parse(new InputSource(new StringReader(xml)));
+        } catch (Exception e) {
+            throw new RuntimeException("XML 解析失败: " + ExceptionUtils.getMessage(e), e);
+        }
+    }
+
+    /**
      * 获取视频列表
      *
      * @param ani
@@ -131,7 +164,7 @@ public class ItemsUtil {
 
         List<Item> items = new ArrayList<>();
 
-        Document document = XmlUtil.readXML(xml);
+        Document document = readXmlSafely(xml);
         Node channel = document.getElementsByTagName("channel").item(0);
         NodeList childNodes = channel.getChildNodes();
         List<String> globalExcludeList = config.getExclude();
@@ -235,6 +268,15 @@ public class ItemsUtil {
 
             infoHash = infoHash.toLowerCase();
             infoHash = URLUtil.decode(infoHash);
+
+            // 安全校验：infoHash 会被拼入种子文件路径（{infoHash}.torrent），
+            // 必须为 40 位 hex（BTIH v1）/ 64 位 hex（BTIH v2）或 32 位 base32，拒绝路径穿越载荷
+            if (!ReUtil.isMatch("^[0-9a-f]{40}$", infoHash)
+                    && !ReUtil.isMatch("^[0-9a-f]{64}$", infoHash)
+                    && !ReUtil.isMatch("^[a-z2-7]{32}$", infoHash)) {
+                log.warn("跳过非法 infoHash 条目: {} title={}", infoHash, itemTitle);
+                continue;
+            }
 
             try {
                 length = StrUtil.nullToDefault(length, "0");

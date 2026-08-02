@@ -9,6 +9,7 @@ import ani.rss.entity.NotificationConfig;
 import ani.rss.enums.BgmTokenTypeEnum;
 import ani.rss.enums.SortTypeEnum;
 import ani.rss.service.ClearService;
+import ani.rss.service.DownloadService;
 import ani.rss.util.basic.LogUtil;
 import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.core.bean.DynaBean;
@@ -65,7 +66,8 @@ public class ConfigUtil {
         String ovaDownloadPathTemplate = StrFormatter.format("{}/${title}", ovaDownloadPath);
         String completedPathTemplate = StrFormatter.format("{}/${title}/Season ${season}", completedPath);
 
-        String password = SecureUtil.sha256("admin");
+        // 不再硬编码默认口令：全新部署时由 load() 生成随机密码并写入启动日志
+        String password = SecureUtil.sha256(RandomUtil.randomString(16));
 
         String notificationTemplate = """
                 ${emoji}${emoji}${emoji}
@@ -188,7 +190,7 @@ public class ConfigUtil {
                 .setRenameDelTmdbId(false)
                 .setPriorityKeywordsEnable(false)
                 .setPriorityKeywords(new ArrayList<>())
-                .setVerifyLoginIp(false)
+                .setVerifyLoginIp(true)
                 .setAutoTrackersUpdate(false)
                 .setTrackersUpdateUrls("https://cf.trackerslist.com/best.txt")
                 .setAutoUpdate(false)
@@ -241,6 +243,7 @@ public class ConfigUtil {
                 .setBgmApi("https://api.bgm.tv")
                 .setAutoStart(false)
                 .setAllowCors(false)
+                .setCorsOrigins("")
                 .setNetworkPrefer("")
                 .setUuid(UUID.randomUUID().toString());
     }
@@ -288,7 +291,15 @@ public class ConfigUtil {
         File configFile = getConfigFile();
 
         if (!configFile.exists()) {
+            // 首次启动：生成随机登录密码，避免默认弱口令 admin/admin
+            String randomPassword = RandomUtil.randomString(16);
+            CONFIG.getLogin().setPassword(SecureUtil.sha256(randomPassword));
             FileUtil.writeUtf8String(GsonStatic.toJson(CONFIG), configFile);
+            String tip = StrFormatter.format(
+                    "首次启动：已生成随机登录密码 [{}]（用户名 {}），请登录后立即修改。",
+                    randomPassword, CONFIG.getLogin().getUsername());
+            System.out.println("[ani-rss] " + tip);
+            log.warn(tip);
         }
         String s = FileUtil.readUtf8String(configFile);
 
@@ -306,6 +317,8 @@ public class ConfigUtil {
      * 将设置保存到磁盘
      */
     public static synchronized void sync() {
+        // 配置已变更：下载路径反向索引失效
+        DownloadService.invalidateDownloadPathIndex();
         File configFile = getConfigFile();
         log.debug("保存配置 {}", configFile);
         try {

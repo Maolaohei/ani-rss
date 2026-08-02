@@ -21,7 +21,7 @@ public class Login implements Serializable {
     /**
      * 密码
      */
-    @Schema(description = "密码 (MD5摘要)")
+    @Schema(description = "密码 (SHA-256摘要)")
     private String password;
     /**
      * ip

@@ -110,6 +110,8 @@ public class AniUtil {
      * 将订阅配置保存到磁盘
      */
     public static synchronized void sync() {
+        // 订阅已变更：下载路径反向索引失效
+        DownloadService.invalidateDownloadPathIndex();
         File configFile = getAniFile();
         log.debug("保存订阅 {}", configFile);
         try {
@@ -347,6 +349,9 @@ public class AniUtil {
         }
         Assert.notNull(season, "季不能为空");
         Assert.notBlank(title, "标题不能为空");
+        // 标题会拼入种子缓存目录与下载路径，禁止目录穿越载荷
+        Assert.isFalse(title.contains(".."), "标题不能包含 \"..\"");
+        Assert.isFalse(title.contains("/") || title.contains("\\"), "标题不能包含 / 或 \\");
         Assert.notNull(offset, "集数偏移不能为空");
     }
 

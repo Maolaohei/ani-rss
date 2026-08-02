@@ -13,8 +13,13 @@
       <el-input v-model:model-value="props.config.downloadToolHost" placeholder="http://192.168.1.x:8080"/>
     </el-form-item>
     <template v-if="props.config.downloadToolType === 'qBittorrent'">
-      <el-form-item label="ApiKey">
-        <el-input v-model.trim="props.config.downloadToolPassword" placeholder="qbt_xxxx" show-password>
+      <el-form-item label="用户名">
+        <el-input v-model.trim="props.config.downloadToolUsername"
+                  placeholder="qBittorrent ≤5.1 用户名（≥5.2 可留空）"
+                  autocomplete="off"/>
+      </el-form-item>
+      <el-form-item label="密码 / ApiKey">
+        <el-input v-model.trim="props.config.downloadToolPassword" placeholder="密码 或 qbt_xxxx" show-password>
           <template #prefix>
             <el-icon class="el-input__icon">
               <Key/>
@@ -25,7 +30,7 @@
       <el-form-item>
         <el-alert show-icon type="info" :closable="false">
           <template #title>
-            qBittorrent ≥5.2 使用 Bearer ApiKey（Tools → Options → Web UI → API Key）。旧版用户名密码登录已不再支持。
+            qBittorrent ≥5.2 可在密码栏填 Bearer ApiKey（Tools → Options → Web UI → API Key）；旧版（≤5.1）填写用户名密码即可，自动兼容。
           </template>
         </el-alert>
       </el-form-item>

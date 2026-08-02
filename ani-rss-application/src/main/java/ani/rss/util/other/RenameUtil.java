@@ -698,9 +698,9 @@ public class RenameUtil {
                 String fieldName = LambdaUtil.getFieldName(func1);
                 String s = StrFormatter.format("${{}}", fieldName);
                 String v = func1.callWithRuntimeException(object).toString();
-                // 路径安全: title/themoviedbName 中的 / 替换为全角，避免多层目录
+                // 路径安全: title/themoviedbName 中的 / 与 \ 替换为全角，避免多层目录/转义
                 if ("title".equals(fieldName) || "themoviedbName".equals(fieldName)) {
-                    v = v.replace("/", "／");
+                    v = sanitizePathSegment(v);
                 }
                 template = template.replace(s, v);
             } catch (Exception ignored) {
@@ -821,7 +821,28 @@ public class RenameUtil {
         while (s.contains("  ")) {
             s = s.replace("  ", " ");
         }
+        s = sanitizePathSegment(s);
+        // Windows 不允许文件名以点/空格结尾
+        s = s.replaceAll("[. ]+$", "");
         return s.trim();
+    }
+
+    /**
+     * 路径段清洗：防目录穿越（..）、处理 Windows 保留名。
+     * 用于标题等拼入文件/目录名的字段。
+     */
+    public static String sanitizePathSegment(String s) {
+        if (StrUtil.isBlank(s)) {
+            return "";
+        }
+        // 目录穿越载荷：.. 替换为全角点
+        s = s.replace("..", "．");
+        // Windows 保留设备名（CON/PRN/AUX/NUL/COM1-9/LPT1-9），加前缀避免建目录/文件失败
+        String mainName = s.contains(".") ? s.substring(0, s.lastIndexOf('.')) : s;
+        if (mainName.matches("(?i)^(con|prn|aux|nul|com[1-9]|lpt[1-9])$")) {
+            s = "_" + s;
+        }
+        return s;
     }
 
     /**

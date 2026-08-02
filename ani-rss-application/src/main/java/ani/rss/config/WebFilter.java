@@ -49,7 +49,7 @@ public class WebFilter implements Filter {
         Global.REQUEST.set(request);
         Global.RESPONSE.set(response);
         try {
-            cors(response);
+            cors(request, response);
             filterChain.doFilter(req, res);
         } finally {
             Global.REQUEST.remove();
@@ -57,14 +57,27 @@ public class WebFilter implements Filter {
         }
     }
 
-    private void cors(HttpServletResponse response) {
+    private void cors(HttpServletRequest request, HttpServletResponse response) {
         Config config = ConfigUtil.CONFIG;
         Boolean allowCors = config.getAllowCors();
         if (!allowCors) {
             return;
         }
 
-        response.addHeader("Access-Control-Allow-Origin", "*");
+        // 仅允许白名单内 Origin 回显；不再使用通配符 *，避免任意站点跨域访问
+        String origin = request.getHeader("Origin");
+        String corsOrigins = config.getCorsOrigins();
+        if (StrUtil.isBlank(origin) || StrUtil.isBlank(corsOrigins)) {
+            return;
+        }
+
+        List<String> allowList = StrUtil.split(corsOrigins, ",", true, true);
+        if (!allowList.contains(origin)) {
+            return;
+        }
+
+        response.addHeader("Access-Control-Allow-Origin", origin);
+        response.addHeader("Vary", "Origin");
         response.addHeader("Access-Control-Allow-Methods", "*");
         response.addHeader("Access-Control-Allow-Headers", "*");
         response.addHeader("Access-Control-Max-Age", "0");

@@ -3,6 +3,7 @@ package ani.rss.notification;
 import ani.rss.entity.Ani;
 import ani.rss.entity.NotificationConfig;
 import ani.rss.enums.NotificationStatusEnum;
+import ani.rss.util.other.RenameUtil;
 import cn.hutool.core.lang.Assert;
 import cn.hutool.system.SystemUtil;
 import lombok.extern.slf4j.Slf4j;
@@ -51,11 +52,19 @@ public class ShellNotification implements BaseNotification {
         String shell = notificationConfig.getShell();
         int aliveLimit = notificationConfig.getAliveLimit();
         Assert.notBlank(shell, "shell 不能为空");
-        notificationConfig.setNotificationTemplate(shell);
-        shell = replaceNotificationTemplate(ani, notificationConfig, text, notificationStatusEnum);
+
+        // 值清洗：RSS/订阅/BGM 等外部数据在拼入 shell 命令前剥离全部 shell 元字符（防注入主防线）
+        Ani safeAni = sanitizeAni(ani);
+        NotificationConfig safeConfig = new NotificationConfig();
+        cn.hutool.core.bean.BeanUtil.copyProperties(notificationConfig, safeConfig);
+        safeConfig.setComment(sanitizeShellValue(notificationConfig.getComment()));
+        String safeText = sanitizeShellValue(text);
+        safeConfig.setNotificationTemplate(shell);
+
+        shell = replaceNotificationTemplate(safeAni, safeConfig, safeText, notificationStatusEnum);
         shell = shell.trim();
 
-        // 安全检查：检测常见 shell 注入模式
+        // 安全检查：检测常见 shell 注入模式（纵深防御，覆盖值清洗遗漏面如 BGM 集标题）
         if (containsShellInjection(shell)) {
             log.error("检测到潜在 shell 注入，已阻止执行: {}", shell);
             return false;
@@ -125,6 +134,40 @@ public class ShellNotification implements BaseNotification {
     }
 
     /**
+     * 清洗将拼入 shell 命令的外部数据：剥离全部 shell 元字符，防命令注入。
+     * 保留字母/数字/中文、空格与常见安全符号（. , : / - _ = + % @）
+     */
+    private static String sanitizeShellValue(String s) {
+        if (s == null) {
+            return null;
+        }
+        return s.replaceAll("[;&|<>$`\\\\\"'()\\[\\]{}*?!~#\\n\\r\\t]", " ");
+    }
+
+    /**
+     * 复制订阅并清洗所有会进入通知模板的字段（title/subgroup 等）
+     */
+    private static Ani sanitizeAni(Ani ani) {
+        if (ani == null) {
+            return null;
+        }
+        Ani copy = new Ani();
+        cn.hutool.core.bean.BeanUtil.copyProperties(ani, copy);
+        copy.setTitle(sanitizeShellValue(ani.getTitle()));
+        copy.setThemoviedbName(sanitizeShellValue(ani.getThemoviedbName()));
+        copy.setSubgroup(sanitizeShellValue(ani.getSubgroup()));
+        copy.setBgmUrl(sanitizeShellValue(ani.getBgmUrl()));
+        try {
+            // 预取 jpTitle 并清洗，避免模板替换时触发网络获取未清洗值
+            copy.setJpTitle(sanitizeShellValue(RenameUtil.getJpTitle(ani)));
+        } catch (Exception ignored) {
+            // 网络失败：至少清洗已复制的原值，避免未清洗数据进入命令
+            copy.setJpTitle(sanitizeShellValue(copy.getJpTitle()));
+        }
+        return copy;
+    }
+
+    /**
      * 检测 shell 注入模式
      */
     private static boolean containsShellInjection(String command) {
@@ -138,6 +181,10 @@ public class ShellNotification implements BaseNotification {
                 ">\\s*/dev",    // > /dev
                 "mkfs\\s",      // mkfs
                 "dd\\s+if=",    // dd if=
+                "\\$\\{",       // 未替换模板变量/变量注入
+                ";\\s*(wget|curl|nc|python|perl|bash|sh|base64|chmod|chown|kill|pkill|systemctl|docker|sudo|su|shutdown|reboot)\\s",
+                "\\|\\s*(wget|curl|nc|python|perl|bash|sh|base64|chmod|chown|kill|pkill|systemctl|docker|sudo|su|shutdown|reboot)\\s",
+                "&&\\s*(wget|curl|nc|python|perl|bash|sh|base64|chmod|chown|kill|pkill|systemctl|docker|sudo|su|shutdown|reboot)\\s",
         };
         for (String pattern : dangerousPatterns) {
             if (command.matches("(?i).*" + pattern + ".*")) {

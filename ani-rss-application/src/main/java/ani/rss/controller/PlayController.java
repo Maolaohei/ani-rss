@@ -52,6 +52,9 @@ public class PlayController extends BaseController {
             return Result.success(subtitlesList);
         }
 
+        // 与 /file 同规则：防止任意路径读取
+        FileController.verifyFilePath(filename);
+
         Assert.isTrue(FileUtil.exist(filename), "视频文件不存在");
 
         @Cleanup

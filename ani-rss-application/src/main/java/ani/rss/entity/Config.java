@@ -745,6 +745,13 @@ public class Config implements Serializable {
     @Schema(description = "允许跨域")
     private Boolean allowCors;
 
+    /**
+     * 跨域白名单（逗号分隔的 Origin，如 https://a.example.com,https://b.example.com）。
+     * 非空时才允许对应来源跨域访问；避免使用通配符 *。
+     */
+    @Schema(description = "跨域白名单(逗号分隔 Origin)")
+    private String corsOrigins;
+
     @Schema(description = "唯一ID")
     private String uuid;
 

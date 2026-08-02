@@ -31,6 +31,10 @@
       <el-checkbox v-model="props.config.verifyLoginIp" label="如果IP发生改变登录将失效"/>
       <el-checkbox v-model="props.config.limitLoginAttempts" label="限制尝试次数"/>
       <el-checkbox v-model="props.config.allowCors" label="允许跨域"/>
+      <el-input v-if="props.config.allowCors"
+                v-model="props.config.corsOrigins"
+                class="cors-input"
+                placeholder="跨域白名单 Origin（逗号分隔），如 https://a.example.com,https://b.example.com"/>
     </el-form-item>
     <el-form-item label="IP白名单">
       <div class="full-width">
@@ -101,6 +105,11 @@ let props = defineProps(['config'])
 
 <style scoped>
 .login-api-key-buttons {
+  margin-left: 12px;
+}
+
+.cors-input {
+  width: 360px;
   margin-left: 12px;
 }
 </style>

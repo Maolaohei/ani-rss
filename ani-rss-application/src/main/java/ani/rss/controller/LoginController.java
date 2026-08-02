@@ -46,10 +46,8 @@ public class LoginController extends BaseController {
             myLogin.setIp("");
         }
 
-        // 同时支持 MD5（旧版）和 SHA-256（新版）验证
-        boolean passwordMatch = password.equals(myPassword)
-                || password.equals(SecureUtil.md5(myPassword))
-                || password.equals(SecureUtil.sha256(myPassword));
+        // 仅支持 SHA-256（前端统一 CryptoJS.SHA256 提交；已移除明文/MD5 兼容，防止弱口令比对）
+        boolean passwordMatch = password.equals(SecureUtil.sha256(myPassword));
 
         if (username.equals(myUsername) && passwordMatch) {
             AuthUtil.resetKey();
