@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -210,7 +211,7 @@ class OpenListResidualPolicyTest {
                 new OpenListTaskInfo().setId("t2").setName("dup").setState(OpenListTaskInfo.State.Failed)
         );
 
-        OpenList.ResidualSnapshot snap = OpenList.buildResidualSnapshot(tasks, protectHash, false, 123L);
+        OpenList.ResidualSnapshot snap = OpenList.buildResidualSnapshot(tasks, Set.of(protectHash), false, 123L);
 
         assertEquals(1, snap.getActiveCount());
         assertEquals(2, snap.getTerminalCount());
@@ -248,7 +249,7 @@ class OpenListResidualPolicyTest {
 
     @Test
     void buildResidualSnapshot_empty_tasks() {
-        OpenList.ResidualSnapshot snap = OpenList.buildResidualSnapshot(List.of(), null, true, 1L);
+        OpenList.ResidualSnapshot snap = OpenList.buildResidualSnapshot(List.of(), Set.of(), true, 1L);
         assertEquals(0, snap.getTotalCount());
         assertEquals("无离线残留", snap.getMessage());
         assertTrue(snap.getItems().isEmpty());
@@ -269,7 +270,7 @@ class OpenListResidualPolicyTest {
 
     @Test
     void toResidualItem_null_safe() {
-        OpenList.ResidualItem item = OpenList.toResidualItem(null, "abc");
+        OpenList.ResidualItem item = OpenList.toResidualItem(null, Set.of("abc"));
         assertEquals("", item.getId());
         assertEquals("TERMINAL", item.getKind());
         assertEquals("Unknown", item.getState());
@@ -337,7 +338,23 @@ class OpenListResidualPolicyTest {
     void collection_episode_keeps_name_when_episode_cannot_be_extracted() {
         OpenList openList = new OpenList();
 
-        assertEquals("Show", openList.collectionEpisodeReName("Show movie.mkv", "Show", 3));
+        // 无集数文件（特典/CM/SP 等）保留原文件名，避免与正片模板名（含 SxxExx）冲突覆盖；
+        // 测试输入 reName="Show" 仅为模板基名示例，真实场景 reName 含集数
+        assertEquals("Show movie", openList.collectionEpisodeReName("Show movie.mkv", "Show", 3));
+    }
+
+    @Test
+    void shouldDeleteTidOnRelease_only_newly_submitted_when_delete_enabled() {
+        // delete=true + 本次新提交 → 删除
+        assertTrue(OpenList.shouldDeleteTidOnRelease("tid-1", true, true));
+        // delete=true + 复用任务（10008 切换的 otherTid 或历史轮次）→ 不删除，避免中断他人下载
+        assertFalse(OpenList.shouldDeleteTidOnRelease("tid-2", false, true));
+        // delete=false → 不删除
+        assertFalse(OpenList.shouldDeleteTidOnRelease("tid-3", true, false));
+        // tid 为空 → 不删除
+        assertFalse(OpenList.shouldDeleteTidOnRelease(null, true, true));
+        // delete 未配置（null）→ 不删除
+        assertFalse(OpenList.shouldDeleteTidOnRelease("tid-4", true, null));
     }
 
     @Test

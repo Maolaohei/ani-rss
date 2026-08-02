@@ -257,40 +257,51 @@ class RssJobControlTest {
         Constructor<?> ctor = pendingCls.getDeclaredConstructor(List.class, String.class, String.class);
         ctor.setAccessible(true);
         Object pending = ctor.newInstance(targetList, title, scope);
-        Field f = RssTask.class.getDeclaredField("pendingManual");
+        Field f = fieldOf("pendingManual");
         f.setAccessible(true);
         @SuppressWarnings("unchecked")
         AtomicReference<Object> ref = (AtomicReference<Object>) f.get(null);
         ref.set(pending);
     }
 
+    /**
+     * 反射查找状态字段：状态机收拢到 RssJobState 后优先在其中查找，RssTask 兜底（兼容遗留字段）
+     */
+    private static Field fieldOf(String name) throws Exception {
+        try {
+            return RssTask.RssJobState.class.getDeclaredField(name);
+        } catch (NoSuchFieldException e) {
+            return RssTask.class.getDeclaredField(name);
+        }
+    }
+
     private static void setBoolean(String field, boolean value) throws Exception {
-        Field f = RssTask.class.getDeclaredField(field);
+        Field f = fieldOf(field);
         f.setAccessible(true);
         ((AtomicBoolean) f.get(null)).set(value);
     }
 
     private static void setLong(String field, long value) throws Exception {
-        Field f = RssTask.class.getDeclaredField(field);
+        Field f = fieldOf(field);
         f.setAccessible(true);
         ((AtomicLong) f.get(null)).set(value);
     }
 
     private static void setInteger(String field, int value) throws Exception {
-        Field f = RssTask.class.getDeclaredField(field);
+        Field f = fieldOf(field);
         f.setAccessible(true);
         ((AtomicInteger) f.get(null)).set(value);
     }
 
     private static AtomicLong atomicLong(String field) throws Exception {
-        Field f = RssTask.class.getDeclaredField(field);
+        Field f = fieldOf(field);
         f.setAccessible(true);
         return (AtomicLong) f.get(null);
     }
 
     @SuppressWarnings({"rawtypes", "unchecked"})
     private static void setCancelReason(String constant) throws Exception {
-        Field f = RssTask.class.getDeclaredField("cancelReason");
+        Field f = fieldOf("cancelReason");
         f.setAccessible(true);
         AtomicReference ref = (AtomicReference) f.get(null);
         Class<? extends Enum> enumType = (Class<? extends Enum>) Class.forName(RssTask.class.getName() + "$CancelReason");
@@ -304,14 +315,14 @@ class RssJobControlTest {
     }
     @SuppressWarnings("unchecked")
     private static void setRef(String field, String value) throws Exception {
-        Field f = RssTask.class.getDeclaredField(field);
+        Field f = fieldOf(field);
         f.setAccessible(true);
         ((AtomicReference<String>) f.get(null)).set(value);
     }
 
     @SuppressWarnings("unchecked")
     private static void setRefObj(String field, Object value) throws Exception {
-        Field f = RssTask.class.getDeclaredField(field);
+        Field f = fieldOf(field);
         f.setAccessible(true);
         ((AtomicReference<Object>) f.get(null)).set(value);
     }
@@ -431,9 +442,11 @@ class RssJobControlTest {
                 false, false, "idle", "", "空闲", null,
                 0L, 0L, null,
                 false, null,
+                null, null, null, null,
                 true, 0, 0, 0,
                 System.currentTimeMillis(), false,
                 "无离线残留", List.of(),
+                null, null, null, null,
                 0L, 0L, "", "", null, null
         );
         assertTrue(tasks.stream().noneMatch(t -> "residual-summary".equals(t.getId())),
@@ -446,9 +459,11 @@ class RssJobControlTest {
                 false, false, "idle", "", "空闲", null,
                 0L, 0L, null,
                 false, null,
+                null, null, null, null,
                 true, 1, 0, 1,
                 System.currentTimeMillis(), false,
                 "进行中 1 / 终态 0", List.of("tid=abc"),
+                null, null, null, null,
                 0L, 0L, "", "", null, null
         );
         assertTrue(activeOnly.stream().anyMatch(t -> "residual-summary".equals(t.getId())
@@ -458,9 +473,11 @@ class RssJobControlTest {
                 false, false, "idle", "", "空闲", null,
                 0L, 0L, null,
                 false, null,
+                null, null, null, null,
                 true, 0, 2, 2,
                 System.currentTimeMillis(), false,
                 "进行中 0 / 终态 2", List.of(),
+                null, null, null, null,
                 0L, 0L, "", "", null, null
         );
         assertTrue(terminalOnly.stream().anyMatch(t -> "residual-summary".equals(t.getId())
@@ -473,9 +490,11 @@ class RssJobControlTest {
                 false, false, "idle", "", "空闲", null,
                 0L, 0L, null,
                 false, null,
+                null, null, null, null,
                 true, 0, 0, 0,
                 System.currentTimeMillis(), true,
                 "清理中", List.of(),
+                null, null, null, null,
                 0L, 0L, "", "", null, null
         );
         assertTrue(cleaning.stream().anyMatch(t -> "residual-summary".equals(t.getId())
@@ -485,9 +504,11 @@ class RssJobControlTest {
                 false, false, "idle", "", "空闲", null,
                 0L, 0L, null,
                 false, null,
+                null, null, null, null,
                 true, 0, 0, 0,
                 System.currentTimeMillis(), false,
                 "OpenList 残留快照不可用", List.of(),
+                null, null, null, null,
                 0L, 0L, "", "", null, null
         );
         assertTrue(error.stream().anyMatch(t -> "residual-summary".equals(t.getId())));
@@ -506,6 +527,10 @@ class RssJobControlTest {
             Object pending,
             boolean openListBusy,
             String currentHash,
+            String offlineTitle,
+            Integer offlineProgress,
+            String offlineState,
+            Long offlineEtaMs,
             boolean residualSupported,
             Integer residualActive,
             Integer residualTerminal,
@@ -514,6 +539,10 @@ class RssJobControlTest {
             Boolean residualCleaning,
             String residualMessage,
             List<String> residualSamples,
+            Integer tempDirTotal,
+            Integer tempDirCleanable,
+            Boolean tempDirCleaning,
+            String tempDirMessage,
             long finishedAt,
             long lastDuration,
             String lastMsg,
@@ -523,7 +552,7 @@ class RssJobControlTest {
     ) throws Exception {
         Method m = null;
         for (Method method : RssTask.class.getDeclaredMethods()) {
-            if ("buildTaskItems".equals(method.getName()) && method.getParameterCount() == 25) {
+            if ("buildTaskItems".equals(method.getName()) && method.getParameterCount() == 33) {
                 m = method;
                 break;
             }
@@ -534,8 +563,10 @@ class RssJobControlTest {
                 running, canceling, scope, title, message, source,
                 startedAt, elapsed, pending,
                 openListBusy, currentHash,
+                offlineTitle, offlineProgress, offlineState, offlineEtaMs,
                 residualSupported, residualActive, residualTerminal, residualTotal,
                 residualScannedAt, residualCleaning, residualMessage, residualSamples,
+                tempDirTotal, tempDirCleanable, tempDirCleaning, tempDirMessage,
                 finishedAt, lastDuration, lastMsg, lastJobTitle, lastJobSource, lastJobScope
         );
         return (List<RssJobItem>) result;
