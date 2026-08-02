@@ -9,6 +9,7 @@ import ani.rss.entity.web.Result;
 import ani.rss.service.DownloadService;
 import ani.rss.task.RssTask;
 import ani.rss.util.other.AniUtil;
+import ani.rss.util.other.FailedDownloadQueue;
 import ani.rss.util.other.ItemsUtil;
 import ani.rss.util.other.TorrentUtil;
 import cn.hutool.core.text.StrFormatter;
@@ -98,6 +99,13 @@ public class RssJobController extends BaseController {
                     File torrent = TorrentUtil.getTorrent(ani, item);
                     if (torrent.exists()) {
                         restored++;
+                        // 文件已真实存在, 清除失败队列中的对应记录(已下载 ≠ 失败)
+                        try {
+                            FailedDownloadQueue.remove(
+                                    FailedDownloadQueue.keyOf(ani.getId(), item.getInfoHash(), item.getReName()));
+                        } catch (Exception e) {
+                            log.debug("清除失败记录失败: {}", e.getMessage());
+                        }
                     } else {
                         // 种子下载失败(如 404), 不重复请求, 仅告警
                         log.warn("补回种子记录失败(种子下载失败) {} - {}", ani.getTitle(), item.getReName());

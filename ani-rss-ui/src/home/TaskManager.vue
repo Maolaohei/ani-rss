@@ -1,5 +1,5 @@
 <template>
-  <el-dialog v-model="dialogVisible" center title="任务管理器" width="760px">
+  <el-dialog v-model="dialogVisible" center title="任务管理器" width="820px">
     <div class="job-body">
       <div class="job-summary">
         <div class="job-row">
@@ -157,66 +157,70 @@
     </div>
     <template #footer>
       <div class="job-footer">
-        <el-button bg text @click="refreshNow" :loading="loading">刷新</el-button>
-        <el-button
-            v-if="status.residualSupported"
-            bg
-            text
-            :loading="scanning"
-            @click="scanResidual"
-        >
-          扫描离线残留
-        </el-button>
-        <el-button
-            v-if="status.residualSupported"
-            type="warning"
-            bg
-            text
-            :disabled="status.residualCleaning"
-            :loading="cleaning"
-            @click="cleanResidual"
-        >
-          清理离线残留
-        </el-button>
-        <el-button
-            v-if="status.residualSupported"
-            bg
-            text
-            :loading="scanningTemp"
-            @click="scanTempDir"
-        >
-          扫描临时目录
-        </el-button>
-        <el-button
-            v-if="status.residualSupported"
-            type="warning"
-            bg
-            text
-            :disabled="status.tempDirResidualCleaning"
-            :loading="cleaningTemp"
-            @click="cleanTempDir"
-        >
-          清理临时目录
-        </el-button>
-        <el-button
-            type="danger"
-            bg
-            text
-            :disabled="(!status.canCancel && !taskList.some(t => t.cancellable)) || status.cancelRequested"
-            :loading="cancelingAll"
-            @click="cancelAll"
-        >
-          全部取消
-        </el-button>
-        <el-button
-            type="success"
-            bg
-            text
-            :loading="rechecking"
-            @click="recheckDownloaded"
-        >
-          强制识别已下载
-        </el-button>
+        <div class="job-footer-group">
+          <el-button bg text @click="refreshNow" :loading="loading">刷新</el-button>
+          <el-button
+              type="success"
+              bg
+              text
+              :loading="rechecking"
+              @click="recheckDownloaded"
+          >
+            强制识别已下载
+          </el-button>
+        </div>
+        <el-divider v-if="status.residualSupported" direction="vertical"/>
+        <div v-if="status.residualSupported" class="job-footer-group">
+          <el-button
+              bg
+              text
+              :loading="scanning"
+              @click="scanResidual"
+          >
+            扫描离线残留
+          </el-button>
+          <el-button
+              type="warning"
+              bg
+              text
+              :disabled="status.residualCleaning"
+              :loading="cleaning"
+              @click="cleanResidual"
+          >
+            清理离线残留
+          </el-button>
+          <el-button
+              bg
+              text
+              :loading="scanningTemp"
+              @click="scanTempDir"
+          >
+            扫描临时目录
+          </el-button>
+          <el-button
+              type="warning"
+              bg
+              text
+              :disabled="status.tempDirResidualCleaning"
+              :loading="cleaningTemp"
+              @click="cleanTempDir"
+          >
+            清理临时目录
+          </el-button>
+        </div>
+        <div class="job-footer-spacer"></div>
+        <div class="job-footer-group">
+          <el-button
+              type="danger"
+              bg
+              text
+              :disabled="(!status.canCancel && !taskList.some(t => t.cancellable)) || status.cancelRequested"
+              :loading="cancelingAll"
+              @click="cancelAll"
+          >
+            全部取消
+          </el-button>
+        </div>
       </div>
     </template>
   </el-dialog>
@@ -929,8 +933,21 @@ defineExpose({show})
 .job-footer {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   flex-wrap: wrap;
   gap: 8px;
+  width: 100%;
+}
+
+.job-footer-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.job-footer-spacer {
+  flex: 1;
 }
 
 .residual-preview {
