@@ -174,6 +174,7 @@ export let rssToAni = (ani) => api.post('api/rssToAni', ani)
  * @returns {Promise<unknown>}
  */
 export let previewAni = (ani) => api.post('api/previewAni', ani)
+export let forceDownload = (ani, infoHashes) => api.post('api/forceDownload', {ani, infoHashes})
 
 /**
  * 日志

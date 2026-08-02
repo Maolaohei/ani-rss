@@ -746,6 +746,67 @@ public class DownloadService {
         }
     }
 
+    /**
+     * 强制下载: 删除已有文件(本地/网盘)与种子记录后, 走正常下载流程重新下载。
+     * 重命名/等待/离线提交等处理与正常下载完全一致。
+     *
+     * @return 结果文案
+     */
+    public String forceDownloadItem(Ani ani, Item item) {
+        if (ani == null || item == null) {
+            throw new IllegalArgumentException("参数无效");
+        }
+        Object lock = lockForAni(ani);
+        synchronized (lock) {
+            // 1. 清种子记录(正式 + pending)
+            File marker = TorrentUtil.getTorrent(ani, item);
+            if (marker != null && marker.exists()) {
+                FileUtil.del(marker);
+            }
+            TorrentUtil.deletePendingTorrent(ani, item);
+
+            // 2. 删除已有文件: OpenList 用 API 删网盘文件, 本地直接删文件
+            String downloadPath = getDownloadPath(ani);
+            if (isOpenListTool() && TorrentUtil.DOWNLOAD instanceof OpenList openList) {
+                openList.forceDeleteFiles(downloadPath, item.getReName());
+            } else {
+                deleteLocalFilesByReName(downloadPath, item.getReName());
+            }
+
+            // 3. 走正常下载流程(提交/离线等待/重命名等)
+            File saved = isOpenListTool()
+                    ? TorrentUtil.saveTorrentPending(ani, item)
+                    : TorrentUtil.saveTorrent(ani, item);
+            if (saved == null || !saved.exists()) {
+                throw new IllegalStateException(item.getReName() + " 种子下载失败，无法强制下载");
+            }
+            download(ani, item, downloadPath, saved);
+            return "已强制下载：" + item.getReName();
+        }
+    }
+
+    /**
+     * 删除本地下载目录下与 reName 匹配的文件(主名相等或包含)
+     */
+    private void deleteLocalFilesByReName(String downloadPath, String reName) {
+        if (StrUtil.isBlank(downloadPath) || StrUtil.isBlank(reName)) {
+            return;
+        }
+        String target = reName.trim().toUpperCase();
+        List<File> files = FileUtils.listFileList(downloadPath);
+        for (File file : files) {
+            String main = FileUtil.mainName(file).trim().toUpperCase();
+            if (main.equals(target) || main.contains(target)) {
+                try {
+                    FileUtil.del(file);
+                    log.info("强制下载: 删除本地已有文件 {}", file.getPath());
+                } catch (Exception e) {
+                    log.warn("强制下载: 删除本地文件失败 {}: {}", file.getPath(), ExceptionUtils.getMessage(e));
+                }
+            }
+        }
+    }
+
     private static Item matchFailedItem(List<Item> items, FailedDownloadQueue.FailedItem failed) {
         if (items == null || items.isEmpty() || failed == null) {
             return null;

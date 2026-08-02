@@ -907,6 +907,40 @@ public class OpenList implements BaseDownload {
     }
 
     /**
+     * 强制下载用: 删除网盘目录下与 reName 匹配的已有文件/目录(主名相等或包含)。
+     */
+    public void forceDeleteFiles(String dirPath, String reName) {
+        if (StrUtil.isBlank(dirPath) || StrUtil.isBlank(reName)) {
+            return;
+        }
+        String target = reName.trim().toUpperCase();
+        List<String> toRemove = new ArrayList<>();
+        try {
+            for (OpenListFileInfo entry : fsList(dirPath, true)) {
+                String name = entry.getName();
+                if (StrUtil.isBlank(name)) {
+                    continue;
+                }
+                String main = FileUtil.mainName(new File(name)).trim().toUpperCase();
+                if (main.equals(target) || main.contains(target)) {
+                    toRemove.add(name);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("强制下载: 列出网盘目录失败 {}: {}", dirPath, ExceptionUtils.getMessage(e));
+            return;
+        }
+        if (!toRemove.isEmpty()) {
+            try {
+                fsRemove(dirPath, toRemove);
+                log.info("强制下载: 删除网盘已有文件 {}/{}", dirPath, toRemove);
+            } catch (Exception e) {
+                log.warn("强制下载: 删除网盘文件失败 {}/{}: {}", dirPath, toRemove, ExceptionUtils.getMessage(e));
+            }
+        }
+    }
+
+    /**
      * 文件是否位于 prefix 目录下（含其自身路径）。
      */
     static boolean isUnderPath(OpenListFileInfo file, String prefix) {

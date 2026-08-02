@@ -3,6 +3,7 @@ package ani.rss.controller;
 import ani.rss.annotation.Auth;
 import ani.rss.commons.ExceptionUtils;
 import ani.rss.commons.FileUtils;
+import ani.rss.commons.GsonStatic;
 import ani.rss.commons.PinyinUtils;
 import ani.rss.commons.WeekComparator;
 import ani.rss.entity.*;
@@ -443,6 +444,58 @@ public class AniController extends BaseController {
             log.error(message, e);
             return Result.error("RSS解析失败 {}", message);
         }
+    }
+
+    @Auth
+    @Operation(summary = "强制下载(删除已有文件后重新下载)")
+    @PostMapping("/forceDownload")
+    public Result<String> forceDownload(@RequestBody Map<String, Object> body) {
+        // body: { ani: {...}, infoHashes: ["hash1", ...] }
+        Object aniObj = body == null ? null : body.get("ani");
+        if (aniObj == null) {
+            return Result.error("参数缺失: ani");
+        }
+        Ani ani = GsonStatic.fromJson(GsonStatic.toJson(aniObj), Ani.class);
+        List<String> hashes = new ArrayList<>();
+        Object hashObj = body == null ? null : body.get("infoHashes");
+        if (hashObj instanceof List<?> list) {
+            for (Object o : list) {
+                if (o != null) {
+                    hashes.add(String.valueOf(o));
+                }
+            }
+        }
+        if (hashes.isEmpty()) {
+            return Result.error("参数缺失: infoHashes");
+        }
+        // 重新拉取 RSS 匹配最新 item, 避免使用过期的预览数据
+        List<Item> items = ItemsUtil.getItems(ani);
+        int ok = 0;
+        List<String> failedNames = new ArrayList<>();
+        for (String hash : hashes) {
+            Item match = items.stream()
+                    .filter(it -> hash.equalsIgnoreCase(it.getInfoHash()))
+                    .findFirst()
+                    .orElse(null);
+            if (match == null) {
+                failedNames.add(hash);
+                continue;
+            }
+            try {
+                downloadService.forceDownloadItem(ani, match);
+                ok++;
+            } catch (Exception e) {
+                log.error("强制下载失败 {}: {}", match.getReName(), ExceptionUtils.getMessage(e));
+                failedNames.add(match.getReName());
+            }
+        }
+        Result<String> result = Result.success("");
+        if (failedNames.isEmpty()) {
+            result.setMessage("已强制下载 " + ok + " 项, 将按正常流程处理(离线下载/重命名等)");
+        } else {
+            result.setMessage("已强制下载 " + ok + " 项, 失败 " + failedNames.size() + " 项");
+        }
+        return result;
     }
 
     @Auth

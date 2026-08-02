@@ -23,6 +23,14 @@
             </el-button>
           </template>
         </popconfirm>
+        <popconfirm @confirm="forceDownload" :title="`强制下载${selectViews.length}项? 将删除已有文件后重新下载`">
+          <template #reference>
+            <el-button icon="RefreshRight" bg text type="warning" :disabled="!selectViews.length"
+                       :loading="forceDownloading">
+              强制下载
+            </el-button>
+          </template>
+        </popconfirm>
       </div>
       <div class="items-table-container">
         <el-table :data="showItems" height="500"
@@ -239,6 +247,27 @@ let delTorrent = () => {
       .then(res => {
         ElMessage.success(res.message)
         load()
+      })
+}
+
+let forceDownloading = ref(false)
+let forceDownload = () => {
+  let infoHashes = selectViews.value.map(it => it['infoHash']).filter(Boolean)
+  if (!infoHashes.length) {
+    ElMessage.warning('选中条目缺少 InfoHash，无法强制下载')
+    return
+  }
+  forceDownloading.value = true
+  http.forceDownload(props.ani, infoHashes)
+      .then(res => {
+        ElMessage.success(res.message)
+        load()
+      })
+      .catch(err => {
+        ElMessage.error(err?.message || '强制下载失败')
+      })
+      .finally(() => {
+        forceDownloading.value = false
       })
 }
 
