@@ -12,6 +12,17 @@ import java.nio.charset.StandardCharsets;
 
 @Slf4j
 public class HttpRequestPlus extends HttpRequest {
+    /**
+     * 调用方正在对瞬时故障执行重试时置位：底层不再打 ERROR，避免与调用方
+     * 带上下文的重试日志（如 OpenListApi.retryIdempotent 的 WARN）重复刷屏。
+     * 仅影响执行线程内后续请求，线程安全。
+     */
+    private static final ThreadLocal<Boolean> RETRY_MODE = ThreadLocal.withInitial(() -> Boolean.FALSE);
+
+    public static void setRetryMode(boolean on) {
+        RETRY_MODE.set(on);
+    }
+
     public HttpRequestPlus(UrlBuilder url) {
         super(url);
     }
@@ -47,7 +58,12 @@ public class HttpRequestPlus extends HttpRequest {
             return super.execute(isAsync);
         } catch (Exception e) {
             String message = ExceptionUtils.getMessage(e);
-            log.error("url: {}, error: {}", url, message);
+            if (Boolean.TRUE.equals(RETRY_MODE.get())) {
+                // 调用方正在重试并会记录带上下文的日志，这里只留 DEBUG 便于排查
+                log.debug("url: {}, error: {} (重试中，由调用方记录)", url, message);
+            } else {
+                log.error("url: {}, error: {}", url, message);
+            }
             throw e;
         }
     }

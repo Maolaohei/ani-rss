@@ -1,5 +1,6 @@
 package ani.rss.config;
 
+import ani.rss.commons.ExceptionUtils;
 import ani.rss.download.BaseDownload;
 import ani.rss.entity.About;
 import ani.rss.entity.Config;
@@ -72,6 +73,7 @@ public class CronConfig {
     }
 
     public void updateTrackers(Config config) {
+        long start = System.currentTimeMillis();
         String trackersUpdateUrls = config.getTrackersUpdateUrls();
         Assert.notBlank(trackersUpdateUrls, "Trackers更新地址 为空");
 
@@ -81,37 +83,49 @@ public class CronConfig {
         Assert.isTrue(!urls.isEmpty(), "Trackers更新地址 为空");
 
         Set<String> trackers = new HashSet<>();
+        int failedUrls = 0;
 
         for (String url : urls) {
             log.info("获取 tracker {}", url);
-            HttpReq.get(url)
-                    .then(res -> {
-                        int status = res.getStatus();
-                        boolean ok = res.isOk();
-                        Assert.isTrue(ok, "更新trackers失败 {} {}", status, url);
-                        String contentType = res.header(Header.CONTENT_TYPE);
-                        Assert.notBlank(contentType, "更新trackers失败 contentType 为空 {}", url);
-                        Assert.isTrue(contentType.contains(ContentType.TEXT_PLAIN), "更新trackers失败 {} {}", contentType, url);
+            try {
+                HttpReq.get(url)
+                        .then(res -> {
+                            int status = res.getStatus();
+                            boolean ok = res.isOk();
+                            Assert.isTrue(ok, "更新trackers失败 {} {}", status, url);
+                            String contentType = res.header(Header.CONTENT_TYPE);
+                            Assert.notBlank(contentType, "更新trackers失败 contentType 为空 {}", url);
+                            Assert.isTrue(contentType.contains(ContentType.TEXT_PLAIN), "更新trackers失败 {} {}", contentType, url);
 
-                        String body = res.body();
-                        StrUtil.split(body, "\n")
-                                .stream()
-                                .filter(StrUtil::isNotBlank)
-                                .map(s -> s.replace("\"", ""))
-                                .map(String::trim)
-                                .filter(s -> {
-                                    for (String string : List.of("udp://", "wss://", "ws://", "https://", "http://")) {
-                                        if (s.startsWith(string)) {
-                                            return true;
+                            String body = res.body();
+                            StrUtil.split(body, "\n")
+                                    .stream()
+                                    .filter(StrUtil::isNotBlank)
+                                    .map(s -> s.replace("\"", ""))
+                                    .map(String::trim)
+                                    .filter(s -> {
+                                        for (String string : List.of("udp://", "wss://", "ws://", "https://", "http://")) {
+                                            if (s.startsWith(string)) {
+                                                return true;
+                                            }
                                         }
-                                    }
-                                    return false;
-                                })
-                                .forEach(trackers::add);
-                    });
+                                        return false;
+                                    })
+                                    .forEach(trackers::add);
+                        });
+                log.info("获取 tracker 成功 {}（累计 {} 条）", url, trackers.size());
+            } catch (Exception e) {
+                // 单个来源失败不中断其它来源
+                failedUrls++;
+                log.warn("获取 tracker 失败 {}: {}", url, ExceptionUtils.getMessage(e));
+            }
         }
 
-        Assert.isTrue(!trackers.isEmpty(), "获取到0个trackers, 不进行更新");
+        Assert.isTrue(!trackers.isEmpty(),
+                "获取到0个trackers, 不进行更新（失败来源 {} 个）", failedUrls);
+        if (failedUrls > 0) {
+            log.warn("Tracker 更新: {} 个来源失败，使用其余来源共 {} 条", failedUrls, trackers.size());
+        }
 
         String download = config.getDownloadToolType();
         Class<BaseDownload> loadClass = ClassUtil.loadClass("ani.rss.download." + download);
@@ -119,6 +133,8 @@ public class CronConfig {
         Boolean login = baseDownload.login(config);
         Assert.isTrue(login, "{} 登录失败", download);
         baseDownload.updateTrackers(trackers);
+        log.info("Tracker 更新完成: 共 {} 条，耗时 {}ms（{}）", trackers.size(),
+                System.currentTimeMillis() - start, download);
     }
 
 }

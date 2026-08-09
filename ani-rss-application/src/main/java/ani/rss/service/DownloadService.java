@@ -610,7 +610,8 @@ public class DownloadService {
             } catch (ani.rss.download.OfflineTimeoutException e) {
                 // 超时 != 坏种：不删种子、不报疑似坏种；占用已在 OpenList 内清理
                 String message = ExceptionUtils.getMessage(e);
-                log.error("{} 离线超时失败: {}", name, message);
+                // message 已包含番剧名（OfflineTimeoutException 构造时拼接），不再重复
+                log.error("离线超时失败: {}", message);
                 recordDownloadFailure(ani, item, message);
                 NotificationUtil.send(ConfigUtil.CONFIG, ani,
                         TaskFailureHumanizer.formatNotify(name, message),

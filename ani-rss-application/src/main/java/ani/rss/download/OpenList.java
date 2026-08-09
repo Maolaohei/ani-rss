@@ -117,6 +117,17 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     private static final long DUPLICATE_MAGNET_COOLDOWN_MS = TimeUnit.MINUTES.toMillis(30);
     private static final ConcurrentHashMap<String, Long> DUPLICATE_MAGNET_UNTIL = new ConcurrentHashMap<>();
 
+    /**
+     * 卡住任务（115 中存在但不下载）单轮流程内最多删除并重新提交的次数。
+     * 超过上限后按原有失败逻辑收尾，避免无限循环。
+     */
+    private static final int MAX_STUCK_RESUBMIT = 2;
+
+    /**
+     * 本次新提交任务无任何进度变化达到该时长，判定为卡住，触发删除+重新提交。
+     */
+    private static final long STALL_DETECT_MS = TimeUnit.MINUTES.toMillis(10);
+
     @Override
     public boolean isOffline() {
         return true;
@@ -253,7 +264,10 @@ public class OpenList implements BaseDownload, OfflineDownloader {
      * 离线失败收尾：失败队列 + 错误通知 + 清除 pending（与 DownloadService 同步流程一致）
      */
     private void handleOfflineFailure(Ani ani, Item item, String name, String reason) {
-        String raw = name + " " + reason;
+        // OfflineTimeoutException 的 message 已包含 reName，避免重复拼接（历史日志曾出现番剧名 ×2）
+        String raw = StrUtil.isNotBlank(reason) && reason.startsWith(name + " ")
+                ? reason
+                : name + " " + StrUtil.blankToDefault(reason, "离线下载失败");
         log.error(raw);
         try {
             FailedDownloadQueue.record(
@@ -293,6 +307,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         final boolean skipNewSubmit;
         final int waitMinutes;
         final long deadlineMs;
+        /** 原始磁力链接：卡住任务删除后重新提交使用 */
+        final String magnet;
 
         String tid;            // 可变：10008 时切换/清空
         long retry;
@@ -301,10 +317,15 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         boolean newlySubmittedTid;
         boolean shortCircuit;          // 提交阶段已决定结果（无需进入等待）
         Boolean shortCircuitResult;
+        /** 本流程内卡住重提次数（上限 MAX_STUCK_RESUBMIT） */
+        int resubmitCount;
+        /** 无进度卡住检测：首次观测时间（0=未开始）与上次进度 */
+        long stallStartMs;
+        int lastProgress;
 
         OfflineDownloadContext(String infoHash, String reName, String finalRenameBase, String tempDirName,
                                String path, String tempDownloadDir, boolean isCollection, boolean skipNewSubmit,
-                               int waitMinutes, long deadlineMs) {
+                               int waitMinutes, long deadlineMs, String magnet) {
             this.infoHash = infoHash;
             this.reName = reName;
             this.finalRenameBase = finalRenameBase;
@@ -315,6 +336,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             this.skipNewSubmit = skipNewSubmit;
             this.waitMinutes = waitMinutes;
             this.deadlineMs = deadlineMs;
+            this.magnet = magnet;
         }
     }
 
@@ -424,11 +446,15 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 if (StrUtil.isNotBlank(s)) {
                     String finalSavePath = savePath;
                     String seasonKey = s;
+                    // 本次任务目录（刚 mkdir 创建）：必须排除，否则洗版会把刚创建的任务目录当旧文件删掉，
+                    // 导致 115 离线任务落点目录被删 → 任务 Failed → 下轮提交被 10008 挡住 → 死循环
+                    String taskDirPath = trimTrailingSlash(path);
+                    String currentDirName = taskDirPath.substring(taskDirPath.lastIndexOf('/') + 1);
                     try {
                         fsList(savePath, true)
                                 .stream()
                                 .map(OpenListFileInfo::getName)
-                                .filter(name -> name != null && name.contains(seasonKey))
+                                .filter(name -> isWashTarget(name, seasonKey, currentDirName))
                                 .forEach(name -> {
                                     fsRemove(finalSavePath, List.of(name));
                                     log.info("已开启备用RSS, 自动删除 {}/{}", finalSavePath, name);
@@ -480,7 +506,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             OfflineDownloadContext ctx = new OfflineDownloadContext(
                     infoHash, reName, finalRenameBase, tempDirName,
                     path, tempDownloadDir, isCollection, skipNewSubmit,
-                    waitMinutes, deadlineMs);
+                    waitMinutes, deadlineMs, magnet);
             ctx.tid = tid;
             ctx.claimedInFlight = claimedInFlight;
             ctx.newlySubmittedTid = newlySubmittedTid;
@@ -527,10 +553,147 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     }
 
     private OfflineDownloadContext shortCircuitResult(Boolean result) {
-        OfflineDownloadContext ctx = new OfflineDownloadContext("", "", "", "", "", "", false, false, 1, 0);
+        OfflineDownloadContext ctx = new OfflineDownloadContext("", "", "", "", "", "", false, false, 1, 0, null);
         ctx.shortCircuit = true;
         ctx.shortCircuitResult = result;
         return ctx;
+    }
+
+    /**
+     * 任务状态是否进行中（Pending/Running/Waiting_for_Retry/Preparing_to_Retry）
+     */
+    static boolean isActiveState(OpenListTaskInfo.State state) {
+        return state == OpenListTaskInfo.State.Pending
+                || state == OpenListTaskInfo.State.Running
+                || state == OpenListTaskInfo.State.Waiting_for_Retry
+                || state == OpenListTaskInfo.State.Preparing_to_Retry;
+    }
+
+    /**
+     * 无进度卡住检测：本次新提交任务进度长时间无变化 → 删除并重新提交。
+     * 记录首次观测时间与进度，进度变化则重置观测窗口。
+     *
+     * @return true 表示已删除并重新提交（调用方应 continue 重新轮询）
+     */
+    private boolean detectStallAndResubmit(OfflineDownloadContext ctx, OpenListTaskInfo taskInfo) {
+        Integer progress = taskInfo.getProgress();
+        StallProbe probe = probeStall(ctx.lastProgress, progress, ctx.stallStartMs,
+                System.currentTimeMillis(), STALL_DETECT_MS);
+        ctx.stallStartMs = probe.stallStartMs();
+        ctx.lastProgress = probe.lastProgress();
+        if (!probe.shouldResubmit()) {
+            return false;
+        }
+        log.warn("离线任务无进度疑似卡住 state={} progress={}，删除并重新提交 {}",
+                taskInfo.getState(), progress, ctx.reName);
+        return resubmitStuckTask(ctx, "无进度卡住");
+    }
+
+    /**
+     * 卡住任务处理：删除当前任务并重新提交同一磁力，重置卡住观测窗口。
+     * 受 MAX_STUCK_RESUBMIT 上限约束，超限返回 false。
+     *
+     * @return true 表示已成功重新提交（ctx.tid 已更新为新任务）
+     */
+    /**
+     * 无进度卡住观测结果（probeStall 纯函数输出）
+     */
+    record StallProbe(long stallStartMs, int lastProgress, boolean shouldResubmit) {
+    }
+
+    /**
+     * 无进度卡住判定（纯函数，便于单测）：根据观测窗口与进度变化决定是否触发重提。
+     * 规则与 detectStallAndResubmit 原实现完全一致：
+     * - progress 为 null：115 未返回进度（排队中/API 未支持），重置窗口不重提
+     * - 窗口未开始（stallStartMs==0）：开始观测不重提
+     * - 进度有变化：有进展，重置窗口不重提
+     * - 无变化且未超过窗口：保持观测不重提
+     * - 无变化且已超过窗口：触发重提
+     */
+    static StallProbe probeStall(int lastProgress, Integer progress, long stallStartMs,
+                                 long now, long stallDetectMs) {
+        if (progress == null) {
+            return new StallProbe(now, -1, false);
+        }
+        if (stallStartMs == 0L) {
+            return new StallProbe(now, progress, false);
+        }
+        if (progress != lastProgress) {
+            return new StallProbe(now, progress, false);
+        }
+        if (now - stallStartMs < stallDetectMs) {
+            return new StallProbe(stallStartMs, lastProgress, false);
+        }
+        return new StallProbe(stallStartMs, lastProgress, true);
+    }
+
+    /**
+     * 卡住任务是否允许重新提交：未达重提上限且有可用磁力（纯函数，便于单测）
+     */
+    static boolean canResubmitStuckTask(int resubmitCount, String magnet) {
+        return resubmitCount < MAX_STUCK_RESUBMIT && StrUtil.isNotBlank(magnet);
+    }
+
+    private boolean resubmitStuckTask(OfflineDownloadContext ctx, String reason) {
+        if (!canResubmitStuckTask(ctx.resubmitCount, ctx.magnet)) {
+            if (ctx.resubmitCount >= MAX_STUCK_RESUBMIT) {
+                log.warn("卡住重提次数已达上限 {}，放弃重提 {}", ctx.resubmitCount, ctx.reName);
+            } else {
+                log.warn("无法重提（无磁力） {}", ctx.reName);
+            }
+            return false;
+        }
+        ctx.resubmitCount++;
+        // 删除卡住的旧任务（终态直接删；进行中先 cancel 再 delete）
+        String oldTid = ctx.tid;
+        if (StrUtil.isNotBlank(oldTid)) {
+            OpenListTaskInfo.State oldState = taskInfo(oldTid)
+                    .map(OpenListTaskInfo::getState).orElse(null);
+            if (isActiveState(oldState)) {
+                try {
+                    taskCancel(oldTid);
+                } catch (Exception cancelEx) {
+                    log.debug("取消卡住任务失败 {}: {}", oldTid, cancelEx.getMessage());
+                }
+            }
+            try {
+                taskDelete(oldTid);
+            } catch (Exception deleteEx) {
+                // 删除失败可能导致同 hash 双任务：告警，靠重提后再次轮询兜底
+                log.warn("删除卡住任务失败 {}: {}", oldTid, deleteEx.getMessage());
+            }
+        }
+        // 重提前清除 10008 冷却，允许立即重新提交
+        clearDuplicateMagnet(ctx.infoHash);
+        try {
+            String newTid = fsAddOfflineDownload(ctx.magnet, ctx.path);
+            if (StrUtil.isNotBlank(newTid)) {
+                ctx.tid = newTid;
+                ctx.newlySubmittedTid = true;
+                // 重置卡住观测，给新任务完整窗口
+                ctx.stallStartMs = 0L;
+                ctx.lastProgress = -1;
+                log.info("卡住任务已删除并重新提交 tid={} (第{}/{}) {} reason={}",
+                        newTid, ctx.resubmitCount, MAX_STUCK_RESUBMIT, ctx.reName, reason);
+                return true;
+            }
+            // 重新提交仍 10008/空 tid：恢复冷却防打爆，进入无 tid 文件轮询等待
+            markDuplicateMagnet(ctx.infoHash);
+            ctx.tid = null;
+            ctx.newlySubmittedTid = false;
+            ctx.stallStartMs = 0L;
+            ctx.lastProgress = -1;
+            log.warn("卡住任务重新提交未返回 tid，转为等待文件 {} reason={}", ctx.reName, reason);
+            return false;
+        } catch (Exception e) {
+            markDuplicateMagnet(ctx.infoHash);
+            ctx.tid = null;
+            ctx.newlySubmittedTid = false;
+            ctx.stallStartMs = 0L;
+            ctx.lastProgress = -1;
+            log.warn("卡住任务重新提交异常 {}: {}", ctx.reName, ExceptionUtils.getMessage(e));
+            return false;
+        }
     }
 
     /**
@@ -566,6 +729,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                     clearDuplicateMagnet(infoHash);
                     return false;
                 }
+                // 卡住重提会更新 ctx.tid，循环顶部同步局部 tid
+                tid = ctx.tid;
                 if (tid != null) {
                     Optional<OpenListTaskInfo> taskInfoOpt = taskInfo(tid);
                     if (taskInfoOpt.isEmpty()) {
@@ -589,19 +754,23 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                         return false;
                     }
 
-                    // Pending/Running：只等待，不触发重试、不扫目录
+                    // Pending/Running：等待；本次新提交任务做无进度卡住检测
                     if (state == OpenListTaskInfo.State.Pending
                             || state == OpenListTaskInfo.State.Running
                             || state == OpenListTaskInfo.State.Waiting_for_Retry
                             || state == OpenListTaskInfo.State.Preparing_to_Retry) {
+                        if (ctx.newlySubmittedTid
+                                && ctx.resubmitCount < MAX_STUCK_RESUBMIT
+                                && detectStallAndResubmit(ctx, taskInfo)) {
+                            continue; // 已删除并重新提交，重新轮询新 tid
+                        }
                         sleepUntilNextPoll(deadlineMs, pollIndex++);
                         continue;
                     }
 
                     // 10008 优先于文件兜底：否则会误把同季其它集视频当成成功，又因临时目录无文件 return false
                     if (isDuplicateOfflineError(taskInfo.getError())) {
-                        log.warn("离线任务报告任务已存在(10008) tid={} state={}，转为等待已有任务/文件 {}",
-                                tid, state, reName);
+                        log.warn("离线任务报告任务已存在(10008) tid={} state={} {}", tid, state, reName);
                         markDuplicateMagnet(infoHash);
                         String failedTid = tid;
                         // 清理本次 add 产生的失败壳任务，避免列表堆积
@@ -614,12 +783,32 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                         }
                         String otherTid = findExistingTaskIdPreferActive(infoHash);
                         if (StrUtil.isNotBlank(otherTid) && !otherTid.equals(failedTid)) {
-                            // 双写：循环内读取本地 tid，finally 清理读取 ctx.tid
-                            tid = ctx.tid = otherTid;
-                            // 切换为复用任务：不再是本次新提交，delete=true 收尾不得远程删除它
-                            ctx.newlySubmittedTid = false;
-                            log.info("切换到已存在离线任务 tid={} {}", tid, reName);
+                            OpenListTaskInfo.State otherState = taskInfo(otherTid)
+                                    .map(OpenListTaskInfo::getState).orElse(null);
+                            if (isActiveState(otherState) || otherState == null) {
+                                // 进行中或状态未知（查询失败）：保守复用，不误删可能仍在进行的任务
+                                // 双写：循环内读取本地 tid，finally 清理读取 ctx.tid
+                                tid = ctx.tid = otherTid;
+                                // 切换为复用任务：不再是本次新提交，delete=true 收尾不得远程删除它
+                                ctx.newlySubmittedTid = false;
+                                log.info("切换到已存在离线任务 tid={} state={} {}", tid, otherState, reName);
+                            } else {
+                                // 已有任务是终态失败/未知（卡住）：删除并重新提交，而非死等
+                                log.warn("已有任务卡住 state={} tid={}，删除并重新提交 {}",
+                                        otherState, otherTid, reName);
+                                tid = ctx.tid = otherTid;
+                                if (resubmitStuckTask(ctx, "10008 已有任务卡住")) {
+                                    continue;
+                                }
+                                tid = ctx.tid = null; // 进入无 tid 文件轮询
+                                ctx.newlySubmittedTid = false;
+                            }
                         } else {
+                            // 无其他任务：尝试删除本次壳任务并重新提交一次（可能残留已清理）
+                            if (ctx.resubmitCount < MAX_STUCK_RESUBMIT
+                                    && resubmitStuckTask(ctx, "10008 无已有任务，重新提交")) {
+                                continue;
+                            }
                             tid = ctx.tid = null; // 进入无 tid 文件轮询
                             ctx.newlySubmittedTid = false;
                         }
@@ -637,6 +826,18 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                     if (state == OpenListTaskInfo.State.Failed
                             || state == OpenListTaskInfo.State.Error
                             || state == OpenListTaskInfo.State.Canceled) {
+                        // 卡住任务（Failed/Error 且本次新提交）：删除并重新提交，上限内。
+                        // 复用/历史任务不在此重提：交由下一轮 RSS 的 adoptOrCleanResidualTasks 清理，
+                        // 避免状态查询竞态下误删他人仍可能进行的下载。
+                        if (state != OpenListTaskInfo.State.Canceled
+                                && ctx.newlySubmittedTid
+                                && ctx.resubmitCount < MAX_STUCK_RESUBMIT) {
+                            log.warn("离线任务终态失败疑似卡住 state={} error={}，删除并重新提交 {}",
+                                    state, taskInfo.getError(), reName);
+                            if (resubmitStuckTask(ctx, "终态失败卡住")) {
+                                continue;
+                            }
+                        }
                         log.error("离线任务已终结 state={} error={}，放弃重试（非坏种判定）", state, taskInfo.getError());
                         return false;
                     }
@@ -713,18 +914,43 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                         .filter(f -> FileUtils.isSubtitleFormat(f.getName()))
                         .toList();
                 openListFileInfos = saveFiles;
-                if (!videoList.isEmpty()) {
-                    // 已在最终目录：不要再 rename/move 到自己，直接成功；
-                    // 视频/字幕已确认落盘，强制清掉临时目录（含嵌套残留）
-                    log.info("本集文件已在最终目录，视为下载完成 {}", reName);
-                    if (tempDownloadDir != null) {
-                        cleanupTempDownloadDir(savePath, tempDirName, true);
+                if (videoList.isEmpty()) {
+                    // 与超时终检 inspectTimeoutFiles 的兜底一致：savePath 递归下可能已存在本集视频
+                    // 但未按模板命名（合集原始标题目录/非模板命名），按集数匹配而非模板名，
+                    // 避免「终检通过 → 后处理判失败 → 清标记 → 下轮重提交」死循环
+                    List<OpenListFileInfo> fallback = findFiles(savePath).stream()
+                            .filter(f -> !isUnderPath(f, tempDownloadDir != null ? tempDownloadDir : null))
+                            .toList();
+                    List<OpenListFileInfo> fallbackVideos = expectedEpisodeVideos(fallback, item.getEpisodeRange());
+                    if (!fallbackVideos.isEmpty()) {
+                        log.info("savePath 兜底扫描发现本集文件，进入后处理 {} videos={}",
+                                reName, fallbackVideos.size());
+                        videoList = fallbackVideos.stream()
+                                .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
+                                .toList();
+                        subtitleList = fallback.stream()
+                                .filter(f -> FileUtils.isSubtitleFormat(f.getName()))
+                                .toList();
+                        openListFileInfos = fallback;
                     }
-                    clearDuplicateMagnet(infoHash);
-                    NotificationUtil.send(config, ani,
-                            StrFormatter.format("{} 下载完成", item.getReName()),
-                            NotificationStatusEnum.DOWNLOAD_END);
-                    return true;
+                }
+                if (!videoList.isEmpty()) {
+                    if (!saveFiles.isEmpty() || videoList.stream()
+                            .allMatch(f -> Objects.equals(trimTrailingSlash(f.getPath()), trimTrailingSlash(savePath)))) {
+                        // 已在最终目录：不要再 rename/move 到自己，直接成功；
+                        // 视频/字幕已确认落盘，强制清掉临时目录（含嵌套残留）
+                        log.info("本集文件已在最终目录，视为下载完成 {}", reName);
+                        if (tempDownloadDir != null) {
+                            cleanupTempDownloadDir(savePath, tempDirName, true);
+                        }
+                        clearDuplicateMagnet(infoHash);
+                        NotificationUtil.send(config, ani,
+                                StrFormatter.format("{} 下载完成", item.getReName()),
+                                NotificationStatusEnum.DOWNLOAD_END);
+                        return true;
+                    }
+                    // 兜底文件位于 savePath 子目录（如合集原始标题目录）：继续走下方重命名/移动流程
+                    log.info("本集文件位于 savePath 子目录，继续重命名/移动 {}", reName);
                 }
             }
 
@@ -1088,6 +1314,34 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         }
         return full.equalsIgnoreCase(pref)
                 || full.toLowerCase(Locale.ROOT).startsWith(pref.toLowerCase(Locale.ROOT) + "/");
+    }
+
+    /**
+     * 去掉路径尾部斜杠，用于路径相等比较（兼容 115/OpenList 返回的目录路径格式差异）
+     */
+    static String trimTrailingSlash(String path) {
+        if (StrUtil.isBlank(path)) {
+            return "";
+        }
+        String p = path.replace('\\', '/');
+        while (p.endsWith("/") && p.length() > 1) {
+            p = p.substring(0, p.length() - 1);
+        }
+        return p;
+    }
+
+    /**
+     * 洗版删除目标判定：名称含 seasonKey 的旧文件/目录，但排除本次任务目录
+     * （刚 mkdir 创建的目录，否则洗版会删掉它导致离线任务落点丢失）
+     */
+    static boolean isWashTarget(String name, String seasonKey, String currentDirName) {
+        if (name == null || StrUtil.isBlank(seasonKey)) {
+            return false;
+        }
+        if (name.equals(currentDirName)) {
+            return false;
+        }
+        return name.contains(seasonKey);
     }
 
     /**

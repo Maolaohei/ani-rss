@@ -67,6 +67,31 @@ class OpenListResidualPolicyTest {
     }
 
     @Test
+    void isActiveState_classifies_waiting_states() {
+        // 进行中：可复用/需要等待
+        for (OpenListTaskInfo.State state : new OpenListTaskInfo.State[]{
+                OpenListTaskInfo.State.Pending,
+                OpenListTaskInfo.State.Running,
+                OpenListTaskInfo.State.Waiting_for_Retry,
+                OpenListTaskInfo.State.Preparing_to_Retry
+        }) {
+            assertTrue(OpenList.isActiveState(state), "state=" + state);
+        }
+        // 终态/失败：不可作为进行中复用
+        for (OpenListTaskInfo.State state : new OpenListTaskInfo.State[]{
+                OpenListTaskInfo.State.Succeeded,
+                OpenListTaskInfo.State.Error,
+                OpenListTaskInfo.State.Failing,
+                OpenListTaskInfo.State.Failed,
+                OpenListTaskInfo.State.Canceling,
+                OpenListTaskInfo.State.Canceled
+        }) {
+            assertFalse(OpenList.isActiveState(state), "state=" + state);
+        }
+        assertFalse(OpenList.isActiveState(null));
+    }
+
+    @Test
     void wash_season_key_null_safe_contract() {
         String seasonKey = null;
         String fileName = "Show.S01E05v2.mkv";
@@ -387,6 +412,84 @@ class OpenListResidualPolicyTest {
         assertEquals(List.of(3.0), validation.expected());
         assertEquals(List.of(3.0), validation.matched());
         assertTrue(validation.missing().isEmpty());
+    }
+
+    @Test
+    void trimTrailingSlash_normalizes_paths() {
+        assertEquals("/a/b/c", OpenList.trimTrailingSlash("/a/b/c"));
+        assertEquals("/a/b/c", OpenList.trimTrailingSlash("/a/b/c/"));
+        assertEquals("/a/b/c", OpenList.trimTrailingSlash("/a/b/c////"));
+        assertEquals("/a/b/c", OpenList.trimTrailingSlash("\\a\\b\\c\\"));
+        assertEquals("/", OpenList.trimTrailingSlash("//"));
+        assertEquals("", OpenList.trimTrailingSlash(""));
+        assertEquals("", OpenList.trimTrailingSlash(null));
+    }
+
+    @Test
+    void wash_target_excludes_current_task_dir() {
+        // 含 seasonKey 的旧文件：删除
+        assertTrue(OpenList.isWashTarget("Show S01E05v2.mkv", "S01E05", "Show S01E06"));
+        assertTrue(OpenList.isWashTarget("Show S01E05v2.mkv", "S01E05", null));
+        // 本次任务目录（刚 mkdir）：排除，避免误删离线任务落点
+        assertFalse(OpenList.isWashTarget("Show S01E05", "S01E05", "Show S01E05"));
+        // 不含 seasonKey / 空 seasonKey / 空 name：不删
+        assertFalse(OpenList.isWashTarget("Show S01E01.mkv", "S01E05", null));
+        assertFalse(OpenList.isWashTarget("Show.mkv", "", null));
+        assertFalse(OpenList.isWashTarget(null, "S01E05", null));
+    }
+
+    @Test
+    void probeStall_window_state_machine() {
+        long now = 1_000_000L;
+        long window = 600_000L; // 10min
+
+        // progress 为 null：115 未返回进度，重置窗口不重提
+        OpenList.StallProbe p = OpenList.probeStall(50, null, 100L, now, window);
+        assertEquals(now, p.stallStartMs());
+        assertEquals(-1, p.lastProgress());
+        assertFalse(p.shouldResubmit());
+
+        // 窗口未开始（stallStartMs==0）：开始观测不重提
+        p = OpenList.probeStall(-1, 50, 0L, now, window);
+        assertEquals(now, p.stallStartMs());
+        assertEquals(50, p.lastProgress());
+        assertFalse(p.shouldResubmit());
+
+        // 进度有变化：有进展，重置窗口不重提
+        p = OpenList.probeStall(50, 60, now, now + 1, window);
+        assertEquals(now + 1, p.stallStartMs());
+        assertEquals(60, p.lastProgress());
+        assertFalse(p.shouldResubmit());
+
+        // 无变化且窗口未到：保持观测不重提
+        p = OpenList.probeStall(50, 50, now, now + window - 1, window);
+        assertEquals(now, p.stallStartMs());
+        assertEquals(50, p.lastProgress());
+        assertFalse(p.shouldResubmit());
+
+        // 无变化且窗口已到：触发重提
+        p = OpenList.probeStall(50, 50, now, now + window, window);
+        assertEquals(now, p.stallStartMs());
+        assertEquals(50, p.lastProgress());
+        assertTrue(p.shouldResubmit());
+
+        // 窗口恰好边界：now - start == window 触发（>= 语义）
+        p = OpenList.probeStall(10, 10, now, now + window, window);
+        assertTrue(p.shouldResubmit());
+    }
+
+    @Test
+    void canResubmitStuckTask_guards() {
+        // 未达上限且有磁力：允许
+        assertTrue(OpenList.canResubmitStuckTask(0, "magnet:?xt=urn:btih:abcdef"));
+        assertTrue(OpenList.canResubmitStuckTask(1, "magnet:?xt=urn:btih:abcdef"));
+        // 达上限（MAX_STUCK_RESUBMIT=2）：拒绝
+        assertFalse(OpenList.canResubmitStuckTask(2, "magnet:?xt=urn:btih:abcdef"));
+        assertFalse(OpenList.canResubmitStuckTask(3, "magnet:?xt=urn:btih:abcdef"));
+        // 无磁力/空磁力：拒绝
+        assertFalse(OpenList.canResubmitStuckTask(0, null));
+        assertFalse(OpenList.canResubmitStuckTask(0, ""));
+        assertFalse(OpenList.canResubmitStuckTask(0, "   "));
     }
 
     @Test

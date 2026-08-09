@@ -6,6 +6,7 @@ import ani.rss.entity.Config;
 import ani.rss.entity.OpenListFileInfo;
 import ani.rss.entity.OpenListTaskInfo;
 import ani.rss.util.basic.HttpReq;
+import ani.rss.util.basic.HttpRequestPlus;
 import cn.hutool.core.collection.ListUtil;
 import cn.hutool.core.lang.Assert;
 import cn.hutool.core.thread.ThreadUtil;
@@ -548,6 +549,9 @@ public class OpenListApi {
                 (retryDelaysMs == null ? 0 : retryDelaysMs.length) + 1));
         RuntimeException last = null;
         for (int attempt = 1; attempt <= attempts; attempt++) {
+            // 重试期间抑制 HttpRequestPlus 的 ERROR（瞬时故障会在此重试并由 WARN 记录），
+            // 避免单次故障在日志里刷出「ERROR + WARN」两条重复记录
+            HttpRequestPlus.setRetryMode(true);
             try {
                 return supplier.get();
             } catch (RuntimeException e) {
@@ -561,6 +565,8 @@ public class OpenListApi {
                 if (delay > 0) {
                     ThreadUtil.sleep(delay);
                 }
+            } finally {
+                HttpRequestPlus.setRetryMode(false);
             }
         }
         throw last == null ? new IllegalStateException(action + " failed") : last;
@@ -612,6 +618,11 @@ public class OpenListApi {
     }
 
     /**
+     * fs/ 目录操作（fs/list、fs/mkdir 等）响应慢：放宽超时，避免 20s 读超时引发重试风暴
+     */
+    private static final int OPENLIST_FS_TIMEOUT_MS = 60 * 1000;
+
+    /**
      * get api
      *
      * @param action
@@ -621,8 +632,10 @@ public class OpenListApi {
         throttleApi();
         String host = config.getDownloadToolHost();
         String password = config.getDownloadToolPassword();
-        return HttpReq.get(host + "/api/" + action)
-                .header(Header.AUTHORIZATION, password);
+        HttpRequest req = action != null && action.startsWith("fs/")
+                ? HttpReq.get(host + "/api/" + action, OPENLIST_FS_TIMEOUT_MS)
+                : HttpReq.get(host + "/api/" + action);
+        return req.header(Header.AUTHORIZATION, password);
     }
 
     /**
@@ -635,8 +648,10 @@ public class OpenListApi {
         throttleApi();
         String host = config.getDownloadToolHost();
         String password = config.getDownloadToolPassword();
-        return HttpReq.post(host + "/api/" + action)
-                .header(Header.AUTHORIZATION, password);
+        HttpRequest req = action != null && action.startsWith("fs/")
+                ? HttpReq.post(host + "/api/" + action, OPENLIST_FS_TIMEOUT_MS)
+                : HttpReq.post(host + "/api/" + action);
+        return req.header(Header.AUTHORIZATION, password);
     }
 
 }

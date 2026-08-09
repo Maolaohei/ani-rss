@@ -52,9 +52,31 @@ public class HttpReq {
         return req;
     }
 
+    /**
+     * POST 并覆盖默认超时（默认 20s），用于响应可能较慢的接口（如 OpenList fs/list）
+     */
+    public static HttpRequest post(String url, int timeoutMs) {
+        HttpRequest req = HttpRequestPlus.post(url);
+        config(req);
+        req.timeout(timeoutMs);
+        setProxy(req);
+        return req;
+    }
+
     public static HttpRequest get(String url) {
         HttpRequest req = HttpRequestPlus.get(url);
         config(req);
+        setProxy(req);
+        return req;
+    }
+
+    /**
+     * GET 并覆盖默认超时（默认 20s），用于响应可能较慢的接口（如 OpenList fs/list）
+     */
+    public static HttpRequest get(String url, int timeoutMs) {
+        HttpRequest req = HttpRequestPlus.get(url);
+        config(req);
+        req.timeout(timeoutMs);
         setProxy(req);
         return req;
     }
