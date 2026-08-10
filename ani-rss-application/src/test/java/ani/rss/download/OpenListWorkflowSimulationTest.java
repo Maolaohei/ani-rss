@@ -137,6 +137,30 @@ class OpenListWorkflowSimulationTest {
         assertFalse(server.exists(savePath + "/" + tempDirName), "合集模板目录应被清理");
     }
 
+    // ============ 场景 4：遗留嵌套目录（本地已存在）+ 10008 云端残留 → 识别并归位 ============
+
+    @Test
+    void legacy_template_dir_detected_as_locally_existing_and_recovered() throws Exception {
+        String savePath = "/追番/Show/Season 1";
+        String tempDirName = "Show S01E03";
+        // 115 云端去重残留：任何提交都 10008；文件早已在目标目录（遗留的嵌套结构）
+        server.forceDuplicateAdd = true;
+        server.putFile(savePath + "/" + tempDirName + "/" + RAW_FILE_NAME + "/" + RAW_FILE_NAME, 1000L);
+
+        OpenList openList = openList(savePath);
+        assertEquals(Boolean.TRUE, openList.download(ani(), item(HASH1), savePath, torrentFile(HASH1)));
+
+        awaitFinalTopLevel(savePath, List.of(tempDirName + ".mkv"), 30_000);
+
+        List<String> top = server.topLevel(savePath);
+        assertEquals(List.of(tempDirName + ".mkv"), top,
+                "遗留嵌套目录应被识别为本地已存在并归位，实际=" + top);
+        assertFalse(server.exists(savePath + "/" + tempDirName),
+                "遗留模板目录应被清理（不再残留嵌套）");
+        assertFalse(server.exists(savePath + "/" + tempDirName + "/" + RAW_FILE_NAME),
+                "遗留 115 任务目录（名=文件名.mkv）应被清理");
+    }
+
     // ============ 辅助 ============
 
     private OpenList openList(String savePath) {
@@ -208,6 +232,8 @@ class OpenListWorkflowSimulationTest {
         volatile boolean placeTaskDirInTarget = true;
         /** true: 种子含 2 个文件（合集） */
         volatile boolean multiFileSeed = false;
+        /** true: add_offline_download 返回 10008（任务已存在，模拟 115 云端去重残留） */
+        volatile boolean forceDuplicateAdd = false;
 
         private final Gson gson = new Gson();
 
@@ -426,6 +452,13 @@ class OpenListWorkflowSimulationTest {
                         });
                     }
                     case "fs/add_offline_download": {
+                        if (forceDuplicateAdd) {
+                            // 115 云端去重残留：任务已存在
+                            JsonObject dup = new JsonObject();
+                            dup.addProperty("code", 10008);
+                            dup.addProperty("message", "任务已存在，请勿输入重复的链接地址");
+                            return dup;
+                        }
                         String path = str(req, "path");
                         String magnet = req.getAsJsonArray("urls").get(0).getAsString();
                         String tid = "tid-" + UUID.randomUUID().toString().substring(0, 8);

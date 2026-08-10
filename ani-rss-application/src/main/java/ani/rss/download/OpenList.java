@@ -3026,6 +3026,23 @@ public class OpenList implements BaseDownload, OfflineDownloader {
      */
     private boolean hasEpisodeVideos(String dir, String reName, List<Double> expectedEpisodes) {
         List<OpenListFileInfo> videos = expectedEpisodeVideos(findEpisodeFiles(dir, reName), expectedEpisodes);
+        if (videos.isEmpty() && StrUtil.isNotBlank(dir) && StrUtil.isNotBlank(reName)) {
+            // 本地已存在检查：dir 下可能有同模板名的遗留目录（115 任务目录嵌套/历史残留，
+            // 如「Season 1/爱书的下克上…S04E15/原始文件名.mkv/文件」），
+            // 进入该目录按集数匹配内部文件，识别为已下载后由后处理重命名/移动归位
+            try {
+                videos = fsList(dir, true).stream()
+                        .filter(f -> Boolean.TRUE.equals(f.getIsDir()))
+                        .filter(f -> f.getName().equalsIgnoreCase(reName)
+                                || isEpisodeFileName(f.getName(), reName))
+                        .map(d -> expectedEpisodeVideos(
+                                findEpisodeFiles(dir + "/" + d.getName(), reName), expectedEpisodes))
+                        .flatMap(List::stream)
+                        .toList();
+            } catch (Exception e) {
+                log.debug("本地已存在目录检查失败 {}: {}", dir, ExceptionUtils.getMessage(e));
+            }
+        }
         if (normalizedEpisodes(expectedEpisodes).isEmpty()) {
             return !videos.isEmpty();
         }
