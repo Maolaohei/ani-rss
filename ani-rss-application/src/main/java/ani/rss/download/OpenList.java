@@ -1527,6 +1527,131 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     }
 
     /**
+     * 遗留问题修复结果
+     */
+    public record RepairResult(int repaired, List<String> details, String message) {
+    }
+
+    /**
+     * 遗留问题修复（任务管理器入口）：扫描订阅 savePath 下的嵌套遗留
+     * （模板目录/文件名.mkv/文件，本集文件未归位到顶层），移动到顶层并清理空壳。
+     * 仅做「移动 + 删空目录」，不改任务状态、不动进行中的下载。
+     */
+    public RepairResult repairLegacyNestedDirs() {
+        List<String> details = new ArrayList<>();
+        int repaired = 0;
+        for (String savePath : collectSubscriptionSavePaths()) {
+            repaired += repairNestedUnder(savePath, details);
+        }
+        return new RepairResult(repaired, details,
+                repaired == 0 ? "未发现需修复的遗留嵌套" : "遗留修复完成: 归位 " + repaired + " 个文件，清理 " + details.size() + " 处");
+    }
+
+    private List<String> collectSubscriptionSavePaths() {
+        List<String> paths = new ArrayList<>();
+        List<Ani> aniList;
+        try {
+            aniList = ani.rss.util.other.AniUtil.getAniList();
+        } catch (Exception e) {
+            aniList = List.of();
+        }
+        ani.rss.service.DownloadService downloadService = null;
+        try {
+            downloadService = cn.hutool.extra.spring.SpringUtil.getBean(ani.rss.service.DownloadService.class);
+        } catch (Exception ignored) {
+        }
+        for (Ani ani : aniList) {
+            if (ani == null || Boolean.FALSE.equals(ani.getEnable())) {
+                continue;
+            }
+            try {
+                if (StrUtil.isNotBlank(ani.getDownloadPath()) && Boolean.TRUE.equals(ani.getCustomDownloadPath())) {
+                    paths.add(ani.getDownloadPath());
+                } else if (downloadService != null) {
+                    paths.add(downloadService.getDownloadPath(ani));
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return paths.stream().filter(StrUtil::isNotBlank).distinct().toList();
+    }
+
+    /**
+     * 修复单个目录下的嵌套遗留：视频文件不在 dir 顶层（套在嵌套子目录里，
+     * 如 模板目录/文件名.mkv/文件）→ 移动到顶层（保留原文件名），并从深到浅
+     * 清理移动后遗留的空壳目录。包级便于测试。
+     *
+     * @return 归位文件数
+     */
+    int repairNestedUnder(String dir, List<String> details) {
+        if (StrUtil.isBlank(dir)) {
+            return 0;
+        }
+        int repaired = 0;
+        List<OpenListFileInfo> files;
+        try {
+            files = findFiles(dir);
+        } catch (Exception e) {
+            log.debug("遗留修复扫描失败 {}: {}", dir, ExceptionUtils.getMessage(e));
+            return 0;
+        }
+        String top = trimTrailingSlash(dir);
+        Set<String> topNames = fsList(dir, true).stream()
+                .map(OpenListFileInfo::getName)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        for (OpenListFileInfo file : files) {
+            if (!FileUtils.isVideoFormat(file.getName())) {
+                continue;
+            }
+            if (Objects.equals(trimTrailingSlash(file.getPath()), top)) {
+                continue; // 已在顶层：非遗留
+            }
+            String srcDir = trimTrailingSlash(file.getPath());
+            if (topNames.contains(file.getName())) {
+                continue; // 顶层已有同名：跳过，避免覆盖
+            }
+            try {
+                fsMove(srcDir, dir, List.of(file.getName()));
+                details.add("归位: " + srcDir + "/" + file.getName() + " -> " + dir);
+                repaired++;
+                cleanupEmptyChain(srcDir, dir, details);
+            } catch (Exception e) {
+                log.warn("遗留修复移动失败 {}/{}: {}", srcDir, file.getName(), ExceptionUtils.getMessage(e));
+            }
+        }
+        return repaired;
+    }
+
+    /**
+     * 从 dir 开始向上（不超过 topDir）清理空壳目录：空则删除，遇到非空即停。
+     */
+    private void cleanupEmptyChain(String dir, String topDir, List<String> details) {
+        String current = trimTrailingSlash(dir);
+        String top = trimTrailingSlash(topDir);
+        while (!current.isEmpty() && !current.equals(top) && !"/".equals(current)) {
+            try {
+                List<OpenListFileInfo> children = fsList(current, true);
+                if (!children.isEmpty()) {
+                    break;
+                }
+                int idx = current.lastIndexOf('/');
+                if (idx <= 0) {
+                    break;
+                }
+                String parent = current.substring(0, idx);
+                String name = current.substring(idx + 1);
+                fsRemove(parent, List.of(name));
+                details.add("清理空壳目录: " + current);
+                current = parent;
+            } catch (Exception e) {
+                log.debug("清理空壳目录失败 {}: {}", current, ExceptionUtils.getMessage(e));
+                break;
+            }
+        }
+    }
+
+    /**
      * 清理云下载兜底移动后的空壳源目录（115 云下载任务目录残留，名字通常=文件名含扩展名）。
      * 只删除「已空」的目录：先检查目录无任何子项才删，避免误删用户其它内容。
      *

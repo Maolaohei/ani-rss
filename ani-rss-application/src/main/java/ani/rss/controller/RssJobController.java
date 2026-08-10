@@ -179,6 +179,27 @@ public class RssJobController extends BaseController {
     }
 
     @Auth
+    @Operation(summary = "修复 OpenList 遗留嵌套目录（归位+清理空壳）")
+    @PostMapping("/rssJobLegacyRepair")
+    public Result<RssJobStatus> rssJobLegacyRepair() {
+        if (!RssTask.isOpenListTool()) {
+            Result<RssJobStatus> result = Result.success(RssTask.getJobStatus());
+            result.setMessage("当前下载工具不是 OpenList/Alist，无需遗留修复");
+            return result;
+        }
+        try {
+            OpenList.RepairResult repair = SpringUtil.getBean(OpenList.class).repairLegacyNestedDirs();
+            Result<RssJobStatus> result = Result.success(RssTask.getJobStatus());
+            result.setMessage(repair == null || StrUtil.isBlank(repair.message()) ? "遗留修复完成" : repair.message());
+            return result;
+        } catch (Exception e) {
+            Result<RssJobStatus> result = Result.error(RssTask.getJobStatus());
+            result.setMessage("遗留修复失败: " + StrUtil.blankToDefault(e.getMessage(), e.getClass().getSimpleName()));
+            return result;
+        }
+    }
+
+    @Auth
     @Operation(summary = "扫描 OpenList 临时目录残留")
     @PostMapping("/rssJobTempDirResidualScan")
     public Result<RssJobStatus> rssJobTempDirResidualScan() {

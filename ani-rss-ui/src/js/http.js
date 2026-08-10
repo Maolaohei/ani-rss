@@ -140,6 +140,12 @@ export let rssJobResidualScan = () => api.post('api/rssJobResidualScan')
 export let rssJobResidualClean = () => api.post('api/rssJobResidualClean')
 
 /**
+ * 修复 OpenList 遗留嵌套目录（归位+清理空壳）
+ * @returns {Promise<unknown>}
+ */
+export let rssJobLegacyRepair = () => api.post('api/rssJobLegacyRepair')
+
+/**
  * 扫描 OpenList 临时目录残留
  * @returns {Promise<unknown>}
  */

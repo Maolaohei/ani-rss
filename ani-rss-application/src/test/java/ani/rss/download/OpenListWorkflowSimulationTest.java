@@ -193,6 +193,31 @@ class OpenListWorkflowSimulationTest {
                 "自动发现应递归扫描到 /115/云下载，实际 fs/list 调用=" + server.fsListCalls);
     }
 
+    // ============ 场景 6：任务管理器「遗留问题修复」= 嵌套文件归位 + 空壳清理 ============
+
+    @Test
+    void legacy_repair_moves_nested_files_to_top_and_cleans_shells() {
+        String savePath = "/追番/Show/Season 1";
+        // 两层嵌套遗留：模板目录/文件名.mkv/文件
+        server.putFile(savePath + "/Show S01E03/" + RAW_FILE_NAME + "/" + RAW_FILE_NAME, 1000L);
+        // 简单嵌套遗留：模板目录/文件
+        server.putFile(savePath + "/Show S01E05/[LoliHouse] Show - 05 [1080p].mkv", 900L);
+
+        OpenList openList = openList(savePath);
+        java.util.List<String> details = new ArrayList<>();
+        int repaired = openList.repairNestedUnder(savePath, details);
+
+        assertTrue(repaired >= 2, "应归位 2 个嵌套文件，实际=" + repaired + "，details=" + details);
+        assertTrue(server.topLevel(savePath).contains(RAW_FILE_NAME),
+                "文件应归位到 savePath 顶层，实际=" + server.topLevel(savePath));
+        assertFalse(server.exists(savePath + "/Show S01E03"), "嵌套模板目录应被清理");
+        assertFalse(server.exists(savePath + "/Show S01E03/" + RAW_FILE_NAME), "文件名.mkv 空壳应被清理");
+        assertFalse(server.exists(savePath + "/Show S01E05"), "另一层嵌套也应被清理");
+        // 顶层已有同名的文件不应被再次移动（幂等）
+        assertEquals(0, openList.repairNestedUnder(savePath, new ArrayList<>()),
+                "再次修复应幂等（无新增归位）");
+    }
+
     // ============ 辅助 ============
 
     private OpenList openList(String savePath) {

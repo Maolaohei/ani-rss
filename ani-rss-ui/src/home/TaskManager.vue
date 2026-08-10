@@ -207,6 +207,14 @@
           >
             清理临时目录
           </el-button>
+          <el-button
+              bg
+              text
+              :loading="repairingLegacy"
+              @click="repairLegacy"
+          >
+            遗留问题修复
+          </el-button>
         </div>
         <div class="job-footer-spacer"></div>
         <div class="job-footer-group">
@@ -729,6 +737,22 @@ const cleanTempDir = async () => {
   } finally {
     actionInFlight--
     cleaningTemp.value = false
+  }
+}
+
+const repairingLegacy = ref(false)
+const repairLegacy = async () => {
+  const seq = nextRequestSeq()
+  actionInFlight++
+  repairingLegacy.value = true
+  try {
+    const res = await http.rssJobLegacyRepair()
+    ElMessage.success(res.message || '遗留修复完成')
+    applyResponseStatus(seq, res?.data)
+  } catch (_) {
+  } finally {
+    actionInFlight--
+    repairingLegacy.value = false
   }
 }
 
