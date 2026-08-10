@@ -641,6 +641,13 @@ public class Config implements Serializable {
     private Long alistDownloadRetryNumber;
 
     /**
+     * OpenList 兜底：115 云下载路径。离线任务文件可能落在 115 根目录"云下载"而非目标路径，
+     * 填此路径兜底扫描并自动移动/重命名；留空则自动发现（fsList 根目录找含"云下载"的目录）。
+     */
+    @Schema(description = "OpenList 兜底:115 云下载路径(留空自动发现)")
+    private String alistCloudDownloadDir;
+
+    /**
      * 设置备份
      */
     @Schema(description = "设置备份")

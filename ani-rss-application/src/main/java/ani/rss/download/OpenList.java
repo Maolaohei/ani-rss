@@ -858,7 +858,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                     }
                     // Error/Failed：仅当本集临时目录或最终目录命中本集文件时才当完成
                     if (hasEpisodeVideos(path, tempDirName, item.getEpisodeRange())
-                        || hasEpisodeVideos(savePath, finalRenameBase, item.getEpisodeRange())) {
+                        || hasEpisodeVideos(savePath, finalRenameBase, item.getEpisodeRange())
+                        || !findCloudDownloadEpisodeVideos(item.getEpisodeRange()).isEmpty()) {
                         log.info("本集资源已就绪，OpenList 任务状态异常但文件可用，继续后处理 {}", reName);
                         clearDuplicateMagnet(infoHash);
                         break;
@@ -896,7 +897,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
 
                 // 无 tid（10008）：低频轮询本集文件是否出现（勿扫整季其它集）
                 if (hasEpisodeVideos(path, tempDirName, item.getEpisodeRange())
-                        || hasEpisodeVideos(savePath, finalRenameBase, item.getEpisodeRange())) {
+                        || hasEpisodeVideos(savePath, finalRenameBase, item.getEpisodeRange())
+                        || !findCloudDownloadEpisodeVideos(item.getEpisodeRange()).isEmpty()) {
                     log.info("10008 本集任务文件已就绪 {}", reName);
                     clearDuplicateMagnet(infoHash);
                     break;
@@ -973,6 +975,23 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                                 .filter(f -> FileUtils.isSubtitleFormat(f.getName()))
                                 .toList();
                         openListFileInfos = fallback;
+                    }
+                }
+                if (videoList.isEmpty()) {
+                    // 115 离线完成后的文件可能落在根目录「云下载」而非目标路径：
+                    // 兜底扫描（原始标题命名，按集数匹配），走重命名/移动流程自动归位到 savePath
+                    List<OpenListFileInfo> cloudFiles = findCloudDownloadFiles();
+                    List<OpenListFileInfo> cloudVideos = expectedEpisodeVideos(cloudFiles, item.getEpisodeRange());
+                    if (!cloudVideos.isEmpty()) {
+                        log.info("115 云下载目录兜底扫描发现本集文件，进入后处理 {} videos={}",
+                                reName, cloudVideos.size());
+                        videoList = cloudVideos.stream()
+                                .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
+                                .toList();
+                        subtitleList = cloudFiles.stream()
+                                .filter(f -> FileUtils.isSubtitleFormat(f.getName()))
+                                .toList();
+                        openListFileInfos = cloudFiles;
                     }
                 }
                 if (!videoList.isEmpty()) {
@@ -1383,6 +1402,77 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             return false;
         }
         return name.contains(seasonKey);
+    }
+
+    /**
+     * 解析 115 云下载兜底目录（纯函数，便于单测）：
+     * - 配置非空：直接使用配置路径（归一化斜杠）
+     * - 配置为空：在根目录列表里找名字含"云下载"的目录（自动发现）
+     * - 找不到：返回 null（不启用兜底）
+     */
+    static String pickCloudDir(String configured, List<String> rootNames) {
+        if (StrUtil.isNotBlank(configured)) {
+            return configured.replace('\\', '/');
+        }
+        if (rootNames == null) {
+            return null;
+        }
+        return rootNames.stream()
+                .filter(name -> name != null && name.contains("云下载"))
+                .findFirst()
+                .map(name -> "/" + name.replace('\\', '/'))
+                .orElse(null);
+    }
+
+    /**
+     * 115 云下载兜底目录（进程内缓存一次自动发现结果；配置优先）
+     */
+    private String resolvedCloudDir;
+
+    private String resolveCloudDownloadDir() {
+        String configured = config == null ? null : config.getAlistCloudDownloadDir();
+        if (StrUtil.isNotBlank(configured)) {
+            return configured.replace('\\', '/');
+        }
+        if (resolvedCloudDir != null) {
+            return resolvedCloudDir;
+        }
+        try {
+            List<String> rootNames = fsList("/", true).stream()
+                    .map(OpenListFileInfo::getName)
+                    .toList();
+            resolvedCloudDir = pickCloudDir(null, rootNames);
+        } catch (Exception e) {
+            log.debug("自动发现 115 云下载目录失败: {}", ExceptionUtils.getMessage(e));
+            resolvedCloudDir = null;
+        }
+        return resolvedCloudDir;
+    }
+
+    /**
+     * 扫描 115 云下载目录全部文件（原始标题命名，供按集数匹配与后处理移动）。
+     * 未配置且自动发现失败时返回空列表。
+     */
+    private List<OpenListFileInfo> findCloudDownloadFiles() {
+        String cloudDir = resolveCloudDownloadDir();
+        if (StrUtil.isBlank(cloudDir)) {
+            return List.of();
+        }
+        try {
+            api.invalidateFindFilesCache();
+            return findFiles(cloudDir);
+        } catch (Exception e) {
+            log.debug("扫描 115 云下载目录失败 {}: {}", cloudDir, ExceptionUtils.getMessage(e));
+            return List.of();
+        }
+    }
+
+    /**
+     * 扫描 115 云下载目录，按本集声明范围匹配视频（原始标题命名，不能按 reName 模板过滤）。
+     * 找不到或未配置时返回空列表。
+     */
+    private List<OpenListFileInfo> findCloudDownloadEpisodeVideos(List<Double> expectedEpisodes) {
+        return expectedEpisodeVideos(findCloudDownloadFiles(), expectedEpisodes);
     }
 
     /**
@@ -2805,6 +2895,10 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             videos = expectedEpisodeVideos(findEpisodeFiles(savePath, reName), expectedEpisodes);
             if (videos.isEmpty()) {
                 videos = expectedEpisodeVideos(findFiles(savePath), expectedEpisodes);
+            }
+            if (videos.isEmpty()) {
+                // 115 离线完成后的文件可能落在根目录「云下载」而非目标路径：兜底扫描
+                videos = findCloudDownloadEpisodeVideos(expectedEpisodes);
             }
         }
         LinkedHashMap<String, Long> files = new LinkedHashMap<>();

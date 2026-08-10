@@ -89,6 +89,13 @@
           </template>
         </el-input-number>
       </el-form-item>
+      <el-form-item label="115 云下载路径">
+        <el-input v-model:model-value="props.config['alistCloudDownloadDir']" placeholder="/云下载（留空自动发现）"/>
+        <br/>
+        <el-text class="mx-1" size="small">
+          115 离线完成后的文件可能落在根目录「云下载」而非目标路径，填此路径兜底扫描并自动移动/重命名；留空自动发现
+        </el-text>
+      </el-form-item>
     </template>
     <template v-else>
       <el-form-item label="用户名">

@@ -507,6 +507,36 @@ class OpenListResidualPolicyTest {
     }
 
     @Test
+    void pickCloudDir_config_first_then_autodiscover() {
+        // 配置优先（归一化反斜杠）
+        assertEquals("/云下载", OpenList.pickCloudDir("/云下载", List.of()));
+        assertEquals("/115/云下载", OpenList.pickCloudDir("\\115\\云下载", List.of()));
+        // 配置为空：自动发现根目录里含"云下载"的目录（取第一个）
+        assertEquals("/云下载", OpenList.pickCloudDir("", List.of("图片", "云下载", "文档")));
+        assertEquals("/115/云下载", OpenList.pickCloudDir(null, List.of("115/云下载", "云下载")));
+        // 找不到：null（不启用兜底）
+        assertNull(OpenList.pickCloudDir(null, List.of("图片", "文档")));
+        assertNull(OpenList.pickCloudDir("  ", List.of("图片", "文档")));
+        assertNull(OpenList.pickCloudDir(null, List.of()));
+        assertNull(OpenList.pickCloudDir(null, null));
+        // 包含"云下载"即视为目标目录（如"云下载2号"）
+        assertEquals("/云下载2号", OpenList.pickCloudDir(null, List.of("云下载2号")));
+    }
+
+    @Test
+    void cloud_download_episode_matching_uses_episode_range_not_template() {
+        OpenList openList = new OpenList();
+        // 云下载目录里的文件是原始标题命名（不匹配 reName 模板），必须按集数匹配而非模板名
+        OpenList.TimeoutFileSnapshot snap = OpenList.snapshotTimeoutFiles(Map.of(
+                "/云下载/[LoliHouse] 乙女游戏世界对路人角色很不友好2/[LoliHouse] Otome Game Sekai wa Mob ni Kibishii Sekai - 05 [1080p].mkv", 1_000L,
+                "/云下载/[LoliHouse] 乙女游戏世界对路人角色很不友好2/[LoliHouse] Otome Game Sekai wa Mob ni Kibishii Sekai - 04 [1080p].mkv", 1_000L,
+                "/云下载/别的剧/别的剧 S01E05.mp4", 900L));
+        // 只认本集声明范围 5.0：04 不被误认，别的剧的 S01E05 按集数 5 也会命中（同集不同剧由上层 range 收敛）
+        assertTrue(openList.snapshotCoversExpectedEpisodes(snap, List.of(5.0)));
+        assertFalse(openList.snapshotCoversExpectedEpisodes(snap, List.of(4.0, 6.0)));
+    }
+
+    @Test
     void transient_openlist_failures_are_retried_but_business_errors_are_not() {
         AtomicInteger transientAttempts = new AtomicInteger();
         String result = OpenList.retryIdempotent("test", () -> {
