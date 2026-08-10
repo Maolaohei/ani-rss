@@ -938,10 +938,13 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             // 云下载兜底命中时记录文件源目录：移动成功后清理这些源目录残留的空壳（115 任务目录）
             Set<String> cloudSourceDirs = new HashSet<>();
             List<OpenListFileInfo> videoList = openListFileInfos.stream()
+                    // 防御：findFiles 缓存异常/实现差异下目录可能混入，目录名带扩展名会误判为视频
+                    .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
                     .filter(f -> FileUtils.isVideoFormat(f.getName()))
                     .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
                     .toList();
             List<OpenListFileInfo> subtitleList = openListFileInfos.stream()
+                    .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
                     .filter(f -> FileUtils.isSubtitleFormat(f.getName()))
                     .toList();
 
@@ -1130,8 +1133,9 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             for (Map.Entry<String, String> entry : renameMap.entrySet()) {
                 String srcName = entry.getKey();
                 String newName = rename ? entry.getValue() : srcName;
-                // 找到原始文件所在目录
+                // 找到原始文件所在目录（排除目录条目，避免把 115 任务目录当文件处理）
                 Optional<OpenListFileInfo> fileInfo = openListFileInfos.stream()
+                        .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
                         .filter(f -> f.getName().equals(srcName))
                         .findFirst();
                 String dirPath = fileInfo.map(OpenListFileInfo::getPath).orElse(videoList.get(0).getPath());
@@ -1145,6 +1149,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                     List<Map<String, String>> renameObjects = new ArrayList<>();
                     for (String srcName : renameMap.keySet()) {
                         Optional<OpenListFileInfo> fi = openListFileInfos.stream()
+                                .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
                                 .filter(f -> f.getName().equals(srcName)).findFirst();
                         if (fi.isPresent() && fi.get().getPath().equals(dirPath)) {
                             String newName = renameMap.get(srcName);
