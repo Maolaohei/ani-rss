@@ -1463,15 +1463,41 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             return resolvedCloudDir;
         }
         try {
-            List<String> rootNames = fsList("/", true).stream()
-                    .map(OpenListFileInfo::getName)
-                    .toList();
-            resolvedCloudDir = pickCloudDir(null, rootNames);
+            resolvedCloudDir = findCloudDownloadDirRecursive("/", 0);
         } catch (Exception e) {
             log.debug("自动发现 115 云下载目录失败: {}", ExceptionUtils.getMessage(e));
             resolvedCloudDir = null;
         }
         return resolvedCloudDir;
+    }
+
+    /**
+     * 递归自动发现"云下载"目录（深度上限 2）。
+     * 云下载可能位于根目录直接子项（/云下载），也可能位于挂载点下（如 /115/云下载、
+     * /115/MyCloud/云下载 等），只扫根目录会漏掉后者。
+     */
+    private String findCloudDownloadDirRecursive(String dir, int depth) {
+        if (depth > 2) {
+            return null;
+        }
+        List<OpenListFileInfo> entries = fsList(dir, true);
+        String direct = pickCloudDir(null, entries.stream()
+                .map(OpenListFileInfo::getName)
+                .toList());
+        if (direct != null) {
+            return "/".equals(dir) ? direct : dir + direct;
+        }
+        for (OpenListFileInfo entry : entries) {
+            if (!Boolean.TRUE.equals(entry.getIsDir())) {
+                continue;
+            }
+            String child = "/".equals(dir) ? "/" + entry.getName() : dir + "/" + entry.getName();
+            String found = findCloudDownloadDirRecursive(child, depth + 1);
+            if (found != null) {
+                return found;
+            }
+        }
+        return null;
     }
 
     /**

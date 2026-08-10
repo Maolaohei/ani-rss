@@ -47,12 +47,16 @@ class OpenListWorkflowSimulationTest {
     private static final String HASH1 = "1c6c6e863114b7191b4c66699f3be2e55f1254cf";
     private static final String HASH2 = "2c6c6e863114b7191b4c66699f3be2e55f1254cf";
     private static final String HASH3 = "3c6c6e863114b7191b4c66699f3be2e55f1254cf";
+    private static final String HASH4 = "4c6c6e863114b7191b4c66699f3be2e55f1254cf";
+    private static final String HASH5 = "5c6c6e863114b7191b4c66699f3be2e55f1254cf";
     private static final String RAW_FILE_NAME = "[LoliHouse] Show - 03 [1080p].mkv";
 
     @BeforeEach
     void setUp() throws IOException {
         server = new MockAlistServer();
         server.start();
+        // OpenListApi.findFilesCache 是静态的、跨测试共享：清掉上一个测试的缓存，避免路径串扰
+        new OpenListApi().invalidateFindFilesCache();
     }
 
     @AfterEach
@@ -152,7 +156,7 @@ class OpenListWorkflowSimulationTest {
         server.putFile(savePath + "/" + tempDirName + "/" + RAW_FILE_NAME + "/" + RAW_FILE_NAME, 1000L);
 
         OpenList openList = openList(savePath);
-        assertEquals(Boolean.TRUE, openList.download(ani(), item(HASH1), savePath, torrentFile(HASH1)));
+        assertEquals(Boolean.TRUE, openList.download(ani(), item(HASH4), savePath, torrentFile(HASH4)));
 
         awaitFinalTopLevel(savePath, List.of(tempDirName + ".mkv"), 30_000);
 
@@ -163,6 +167,30 @@ class OpenListWorkflowSimulationTest {
                 "遗留模板目录应被清理（不再残留嵌套）");
         assertFalse(server.exists(savePath + "/" + tempDirName + "/" + RAW_FILE_NAME),
                 "遗留 115 任务目录（名=文件名.mkv）应被清理");
+    }
+
+    // ============ 场景 5：云下载目录在挂载点下（/115/云下载），自动发现需递归 ============
+
+    @Test
+    void cloud_dir_under_mount_point_auto_discovered_recursively() throws Exception {
+        String savePath = "/追番/Show/Season 1";
+        String tempDirName = "Show S01E03";
+        server.placeTaskDirInTarget = false;
+        // 根目录 / 下只有 115 目录；云下载在 /115/云下载（真实环境形态）
+        server.putFile("/115/云下载/" + RAW_FILE_NAME + "/" + RAW_FILE_NAME, 1000L);
+
+        OpenList openList = openList(savePath);
+        assertEquals(Boolean.TRUE, openList.download(ani(), item(HASH5), savePath, torrentFile(HASH5)));
+
+        awaitFinalTopLevel(savePath, List.of(tempDirName + ".mkv"), 30_000);
+        // 挂载点下的云下载空壳应被清理
+        awaitFinalTopLevel("/115/云下载", List.of(), 30_000);
+        assertFalse(server.exists("/115/云下载/" + RAW_FILE_NAME),
+                "挂载点下云下载任务空壳应被清理");
+
+        // 正面证据：自动发现递归扫描到了挂载点下的云下载目录
+        assertTrue(server.fsListCalls.stream().anyMatch(p -> p.contains("/115/云下载")),
+                "自动发现应递归扫描到 /115/云下载，实际 fs/list 调用=" + server.fsListCalls);
     }
 
     // ============ 辅助 ============
