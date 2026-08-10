@@ -118,6 +118,14 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     private static final ConcurrentHashMap<String, Long> DUPLICATE_MAGNET_UNTIL = new ConcurrentHashMap<>();
 
     /**
+     * 10008 重提达上限后进入长冷却：115 云端对该 hash 存在去重记录，
+     * 且 AList 侧无任务可删（task/info 404 / 任务列表无记录），删除重提无效。
+     * 冷却期间跳过提交与等待，提示用户手动清理。
+     */
+    private static final long DUPLICATE_MAGNET_LONG_COOLDOWN_MS = TimeUnit.HOURS.toMillis(24);
+    private static final ConcurrentHashMap<String, Long> DUPLICATE_MAGNET_LONG_UNTIL = new ConcurrentHashMap<>();
+
+    /**
      * 卡住任务（115 中存在但不下载）单轮流程内最多删除并重新提交的次数。
      * 超过上限后按原有失败逻辑收尾，避免无限循环。
      */
@@ -436,8 +444,25 @@ public class OpenList implements BaseDownload, OfflineDownloader {
 
             boolean skipNewSubmit = isDuplicateMagnetCooling(infoHash);
             if (skipNewSubmit && StrUtil.isBlank(tid)) {
-                log.warn("磁力近期已报 10008/任务已存在，跳过重复提交，仅等待文件 {}", reName);
-                tid = findExistingTaskIdPreferActive(infoHash);
+                if (isDuplicateMagnetLongCooling(infoHash)) {
+                    // 115 云端 hash 去重残留（10008 重提仍失败）：24h 长冷却，快速失败不再等待
+                    String activeTid = findExistingTaskIdPreferActive(infoHash);
+                    if (StrUtil.isNotBlank(activeTid)
+                            && taskInfo(activeTid).map(t -> isActiveState(t.getState())).orElse(false)) {
+                        // 用户已手动处理（出现进行中任务）：解除长冷却，正常等待
+                        clearDuplicateMagnetLong(infoHash);
+                        tid = activeTid;
+                        log.info("检测到进行中任务，解除 10008 长冷却，等待完成 {}", reName);
+                    } else {
+                        log.warn("磁力处于 10008 长冷却（24h），跳过提交与等待；"
+                                + "请到 115/AList 手动清理该 hash 的历史离线任务后重试 {} hash={}",
+                                reName, infoHash);
+                        return shortCircuitResult(false);
+                    }
+                } else {
+                    log.warn("磁力近期已报 10008/任务已存在，跳过重复提交，仅等待文件 {}", reName);
+                    tid = findExistingTaskIdPreferActive(infoHash);
+                }
             }
 
             // 洗版：仅在即将新提交离线时做一次；复用/10008 等待路径禁止洗，避免重试风暴删掉目标
@@ -634,10 +659,26 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         return resubmitCount < MAX_STUCK_RESUBMIT && StrUtil.isNotBlank(magnet);
     }
 
+    /**
+     * 卡住重提已达上限且为 10008 语义：判定是否进入长冷却（纯函数，便于单测）。
+     * 仅 10008（115 云端 hash 去重残留、AList 侧无任务可删）需要长冷却；
+     * 终态失败/无进度卡住等场景重提失败是种子/网络问题，不应长冷却。
+     */
+    static boolean isStuckResubmitExhaustedAndDuplicate(int resubmitCount, String reason) {
+        return resubmitCount >= MAX_STUCK_RESUBMIT && reason != null && reason.contains("10008");
+    }
+
     private boolean resubmitStuckTask(OfflineDownloadContext ctx, String reason) {
         if (!canResubmitStuckTask(ctx.resubmitCount, ctx.magnet)) {
             if (ctx.resubmitCount >= MAX_STUCK_RESUBMIT) {
                 log.warn("卡住重提次数已达上限 {}，放弃重提 {}", ctx.resubmitCount, ctx.reName);
+                if (isStuckResubmitExhaustedAndDuplicate(ctx.resubmitCount, reason)) {
+                    // 10008 重提仍失败：115 云端对该 hash 有去重记录且 AList 侧无任务可删，
+                    // 进入 24h 长冷却，避免每轮 RSS 反复提交消耗 115 配额
+                    markDuplicateMagnetLong(ctx.infoHash);
+                    log.warn("115 云端存在该 hash 重复记录且重提仍 10008，进入 24h 长冷却；"
+                            + "请到 115/AList 手动清理该 hash 的历史离线任务后重试 hash={}", ctx.infoHash);
+                }
             } else {
                 log.warn("无法重提（无磁力） {}", ctx.reName);
             }
@@ -1662,7 +1703,11 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     private boolean isDuplicateMagnetCooling(String infoHash) {
         long now = System.currentTimeMillis();
         DUPLICATE_MAGNET_UNTIL.entrySet().removeIf(e -> e.getValue() == null || e.getValue() <= now);
-        return isDuplicateMagnetCooling(infoHash, now, DUPLICATE_MAGNET_UNTIL);
+        if (isDuplicateMagnetCooling(infoHash, now, DUPLICATE_MAGNET_UNTIL)) {
+            return true;
+        }
+        DUPLICATE_MAGNET_LONG_UNTIL.entrySet().removeIf(e -> e.getValue() == null || e.getValue() <= now);
+        return isDuplicateMagnetCooling(infoHash, now, DUPLICATE_MAGNET_LONG_UNTIL);
     }
 
     private void markDuplicateMagnet(String infoHash) {
@@ -1673,11 +1718,37 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 System.currentTimeMillis() + DUPLICATE_MAGNET_COOLDOWN_MS);
     }
 
+    /**
+     * 10008 重提达上限：标记 24h 长冷却（115 云端 hash 去重残留，AList 侧无任务可删）
+     */
+    private void markDuplicateMagnetLong(String infoHash) {
+        if (StrUtil.isBlank(infoHash)) {
+            return;
+        }
+        DUPLICATE_MAGNET_LONG_UNTIL.put(infoHash.toLowerCase(Locale.ROOT),
+                System.currentTimeMillis() + DUPLICATE_MAGNET_LONG_COOLDOWN_MS);
+    }
+
+    private boolean isDuplicateMagnetLongCooling(String infoHash) {
+        long now = System.currentTimeMillis();
+        DUPLICATE_MAGNET_LONG_UNTIL.entrySet().removeIf(e -> e.getValue() == null || e.getValue() <= now);
+        return isDuplicateMagnetCooling(infoHash, now, DUPLICATE_MAGNET_LONG_UNTIL);
+    }
+
+    private void clearDuplicateMagnetLong(String infoHash) {
+        if (StrUtil.isBlank(infoHash)) {
+            return;
+        }
+        DUPLICATE_MAGNET_LONG_UNTIL.remove(infoHash.toLowerCase(Locale.ROOT));
+    }
+
     private void clearDuplicateMagnet(String infoHash) {
         if (StrUtil.isBlank(infoHash)) {
             return;
         }
-        DUPLICATE_MAGNET_UNTIL.remove(infoHash.toLowerCase(Locale.ROOT));
+        String key = infoHash.toLowerCase(Locale.ROOT);
+        DUPLICATE_MAGNET_UNTIL.remove(key);
+        DUPLICATE_MAGNET_LONG_UNTIL.remove(key);
     }
 
     /**

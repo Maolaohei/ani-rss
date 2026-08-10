@@ -493,6 +493,20 @@ class OpenListResidualPolicyTest {
     }
 
     @Test
+    void long_cooldown_trigger_only_on_10008_exhausted() {
+        // 达上限且 10008 语义（无已有任务/已有任务卡住）→ 进入长冷却
+        assertTrue(OpenList.isStuckResubmitExhaustedAndDuplicate(2, "10008 无已有任务，重新提交"));
+        assertTrue(OpenList.isStuckResubmitExhaustedAndDuplicate(3, "10008 已有任务卡住"));
+        // 未达上限 → 不触发长冷却（仍有重提机会）
+        assertFalse(OpenList.isStuckResubmitExhaustedAndDuplicate(1, "10008 无已有任务，重新提交"));
+        // 达上限但非 10008 语义（终态失败/无进度卡住/未知）→ 不触发长冷却
+        assertFalse(OpenList.isStuckResubmitExhaustedAndDuplicate(2, "终态失败卡住"));
+        assertFalse(OpenList.isStuckResubmitExhaustedAndDuplicate(2, "无进度卡住"));
+        assertFalse(OpenList.isStuckResubmitExhaustedAndDuplicate(2, null));
+        assertFalse(OpenList.isStuckResubmitExhaustedAndDuplicate(2, ""));
+    }
+
+    @Test
     void transient_openlist_failures_are_retried_but_business_errors_are_not() {
         AtomicInteger transientAttempts = new AtomicInteger();
         String result = OpenList.retryIdempotent("test", () -> {
