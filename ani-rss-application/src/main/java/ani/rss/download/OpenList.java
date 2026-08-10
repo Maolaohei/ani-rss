@@ -935,6 +935,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             }
             // ① finally 前先扫描文件：临时目录优先；否则最终目录中本集相关文件
             List<OpenListFileInfo> openListFileInfos = findFiles(path);
+            // 云下载兜底命中时记录文件源目录：移动成功后清理这些源目录残留的空壳（115 任务目录）
+            Set<String> cloudSourceDirs = new HashSet<>();
             List<OpenListFileInfo> videoList = openListFileInfos.stream()
                     .filter(f -> FileUtils.isVideoFormat(f.getName()))
                     .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
@@ -947,6 +949,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 // 可能已在 savePath 落盘（历史完成/被其它路径移动）
                 // 必须排除临时目录内的文件，否则「还在临时目录」会被误判为已完成并跳过移动
                 List<OpenListFileInfo> saveFiles = findEpisodeFiles(savePath, finalRenameBase).stream()
+                        .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
                         .filter(f -> !isUnderPath(f, tempDownloadDir != null ? tempDownloadDir : null))
                         .toList();
                 videoList = saveFiles.stream()
@@ -972,6 +975,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                                 .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
                                 .toList();
                         subtitleList = fallback.stream()
+                                .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
                                 .filter(f -> FileUtils.isSubtitleFormat(f.getName()))
                                 .toList();
                         openListFileInfos = fallback;
@@ -989,9 +993,19 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                                 .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
                                 .toList();
                         subtitleList = cloudFiles.stream()
+                                .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
                                 .filter(f -> FileUtils.isSubtitleFormat(f.getName()))
                                 .toList();
                         openListFileInfos = cloudFiles;
+                        // 记录源目录（云下载下的原始目录/根），移动成功后用于清理空壳
+                        videoList.stream()
+                                .map(OpenListFileInfo::getPath)
+                                .filter(Objects::nonNull)
+                                .forEach(cloudSourceDirs::add);
+                        subtitleList.stream()
+                                .map(OpenListFileInfo::getPath)
+                                .filter(Objects::nonNull)
+                                .forEach(cloudSourceDirs::add);
                     }
                 }
                 if (!videoList.isEmpty()) {
@@ -1166,9 +1180,15 @@ public class OpenList implements BaseDownload, OfflineDownloader {
 
             if (!missingNames.isEmpty()) {
                 log.warn("部分文件未出现在最终目录顶层，保留临时目录: {}", missingNames);
-            } else if (tempDownloadDir != null) {
-                // 需要移动的视频/字幕已确认在最终目录顶层 → 强制删除临时目录
-                cleanupTempDownloadDir(savePath, tempDirName, true);
+            } else {
+                if (tempDownloadDir != null) {
+                    // 需要移动的视频/字幕已确认在最终目录顶层 → 强制删除临时目录
+                    cleanupTempDownloadDir(savePath, tempDirName, true);
+                }
+                // 云下载兜底：文件已全部移动归位，清理源目录残留的空壳（115 任务目录）
+                if (!cloudSourceDirs.isEmpty()) {
+                    cleanupCloudDownloadEmptyDirs(cloudSourceDirs);
+                }
             }
 
             // 缺集校验：扫描整季目录，但日志只报告本次声明范围的命中情况。
@@ -1473,6 +1493,38 @@ public class OpenList implements BaseDownload, OfflineDownloader {
      */
     private List<OpenListFileInfo> findCloudDownloadEpisodeVideos(List<Double> expectedEpisodes) {
         return expectedEpisodeVideos(findCloudDownloadFiles(), expectedEpisodes);
+    }
+
+    /**
+     * 清理云下载兜底移动后的空壳源目录（115 云下载任务目录残留，名字通常=文件名含扩展名）。
+     * 只删除「已空」的目录：先检查目录无任何子项才删，避免误删用户其它内容。
+     *
+     * @param sourceDirs 本次兜底移动涉及的源目录集合（OpenListFileInfo.getPath）
+     */
+    private void cleanupCloudDownloadEmptyDirs(Set<String> sourceDirs) {
+        for (String srcDir : sourceDirs) {
+            try {
+                String dir = trimTrailingSlash(srcDir);
+                if (StrUtil.isBlank(dir) || "/".equals(dir)) {
+                    continue;
+                }
+                List<OpenListFileInfo> children = fsList(dir, true);
+                if (!children.isEmpty()) {
+                    // 目录仍有内容（可能含其它剧集文件）：不动
+                    continue;
+                }
+                int idx = dir.lastIndexOf('/');
+                if (idx <= 0) {
+                    continue;
+                }
+                String parent = dir.substring(0, idx);
+                String name = dir.substring(idx + 1);
+                log.info("清理 115 云下载空壳目录 {}/{}", parent, name);
+                fsRemove(parent, List.of(name));
+            } catch (Exception e) {
+                log.debug("清理云下载空壳目录失败 {}: {}", srcDir, ExceptionUtils.getMessage(e));
+            }
+        }
     }
 
     /**
@@ -2912,6 +2964,9 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     private List<OpenListFileInfo> expectedEpisodeVideos(List<OpenListFileInfo> files, List<Double> expectedEpisodes) {
         Set<Double> expected = normalizedEpisodes(expectedEpisodes);
         return files.stream()
+                // 目录可能以 .mkv/.mp4 命名（如 115 云下载按文件名建目录）：必须排除，避免把目录当视频
+                // 重命名/移动后产生「文件夹.扩展名/同名文件」嵌套
+                .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
                 .filter(f -> FileUtils.isVideoFormat(f.getName()))
                 .filter(f -> expected.isEmpty() || expected.contains(parseEpisodeNumber(extractEpisodeFromFileName(f.getName()))))
                 .toList();
