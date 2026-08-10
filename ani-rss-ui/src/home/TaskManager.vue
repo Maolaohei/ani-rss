@@ -172,14 +172,6 @@
         <el-divider v-if="status.residualSupported" direction="vertical"/>
         <div v-if="status.residualSupported" class="job-footer-group">
           <el-button
-              bg
-              text
-              :loading="scanning"
-              @click="scanResidual"
-          >
-            扫描离线残留
-          </el-button>
-          <el-button
               type="warning"
               bg
               text
@@ -188,14 +180,6 @@
               @click="cleanResidual"
           >
             清理离线残留
-          </el-button>
-          <el-button
-              bg
-              text
-              :loading="scanningTemp"
-              @click="scanTempDir"
-          >
-            扫描临时目录
           </el-button>
           <el-button
               type="warning"
@@ -248,9 +232,7 @@ const loading = ref(false)
 const cancelingAll = ref(false)
 const rechecking = ref(false)
 const cancelingId = ref('')
-const scanning = ref(false)
 const cleaning = ref(false)
-const scanningTemp = ref(false)
 const cleaningTemp = ref(false)
 const failedLoading = ref(false)
 const failedClearing = ref(false)
@@ -639,21 +621,6 @@ const cancelItem = async (item) => {
   }
 }
 
-const scanResidual = async () => {
-  const seq = nextRequestSeq()
-  actionInFlight++
-  scanning.value = true
-  try {
-    const res = await http.rssJobResidualScan()
-    ElMessage.success(res.message || '扫描完成')
-    applyResponseStatus(seq, res?.data)
-  } catch (_) {
-  } finally {
-    actionInFlight--
-    scanning.value = false
-  }
-}
-
 const recheckDownloaded = async () => {
   const seq = nextRequestSeq()
   actionInFlight++
@@ -670,6 +637,16 @@ const recheckDownloaded = async () => {
 }
 
 const cleanResidual = async () => {
+  // 先扫描刷新最新残留数据，再展示确认框（合并原独立"扫描"按钮）
+  const seq0 = nextRequestSeq()
+  actionInFlight++
+  try {
+    const scanRes = await http.rssJobResidualScan()
+    applyResponseStatus(seq0, scanRes?.data)
+  } catch (_) {
+  } finally {
+    actionInFlight--
+  }
   const active = Number(status.value.residualActiveCount || 0)
   const terminal = Number(status.value.residualTerminalCount || 0)
   const previewN = residualPreview.value.length
@@ -699,22 +676,17 @@ const cleanResidual = async () => {
   }
 }
 
-const scanTempDir = async () => {
-  const seq = nextRequestSeq()
+const cleanTempDir = async () => {
+  // 先扫描刷新最新临时目录残留数据，再展示确认框（合并原独立"扫描"按钮）
+  const seq0 = nextRequestSeq()
   actionInFlight++
-  scanningTemp.value = true
   try {
-    const res = await http.rssJobTempDirResidualScan()
-    ElMessage.success(res.message || '临时目录扫描完成')
-    applyResponseStatus(seq, res?.data)
+    const scanRes = await http.rssJobTempDirResidualScan()
+    applyResponseStatus(seq0, scanRes?.data)
   } catch (_) {
   } finally {
     actionInFlight--
-    scanningTemp.value = false
   }
-}
-
-const cleanTempDir = async () => {
   const cleanable = Number(status.value.tempDirResidualCleanableCount || 0)
   const total = Number(status.value.tempDirResidualTotalCount || 0)
   try {
