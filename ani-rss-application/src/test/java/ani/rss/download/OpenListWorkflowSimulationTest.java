@@ -110,6 +110,10 @@ class OpenListWorkflowSimulationTest {
         // 云下载空壳清理同样是后处理的一部分，等待其完成
         awaitFinalTopLevel("/云下载", List.of(), 30_000);
 
+        // 正面证据：兜底路径真实触发——程序必须 fs/list 扫描过云下载目录
+        assertTrue(server.fsListCalls.stream().anyMatch(p -> p.contains("云下载")),
+                "云下载兜底应扫描 /云下载 目录（resolveCloudDownloadDir + findFiles），实际 fs/list 调用=" + server.fsListCalls);
+
         // 云下载目录空壳应被清理
         assertFalse(server.exists("/云下载/" + RAW_FILE_NAME),
                 "云下载目录下的任务空壳（名=文件名.mkv）应被清理");
@@ -234,6 +238,8 @@ class OpenListWorkflowSimulationTest {
         volatile boolean multiFileSeed = false;
         /** true: add_offline_download 返回 10008（任务已存在，模拟 115 云端去重残留） */
         volatile boolean forceDuplicateAdd = false;
+        /** 记录 fs/list 被访问过的路径（验证兜底路径真实触发） */
+        final java.util.Set<String> fsListCalls = ConcurrentHashMap.newKeySet();
 
         private final Gson gson = new Gson();
 
@@ -397,6 +403,7 @@ class OpenListWorkflowSimulationTest {
                         return ok(data -> data.addProperty("name", "mock"));
                     case "fs/list": {
                         String path = str(req, "path");
+                        fsListCalls.add(path);
                         JsonArray content = new JsonArray();
                         String parent = norm(path);
                         entries.forEach((p, e) -> {
