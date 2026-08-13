@@ -131,6 +131,12 @@ main() {
             envs+=("$v=${!v}")
         fi
     done
+    # 透传临时目录（缺失时 java.io.tmpdir 会落到 C:\WINDOWS 导致测试写入失败）
+    for v in TEMP TMP; do
+        if [ -n "${!v:-}" ]; then
+            envs+=("$v=${!v}")
+        fi
+    done
 
     echo "[mvn-env] JAVA_HOME=$(cygpath -w "$jdk_home")" >&2
     echo "[mvn-env] Maven    =$maven_home" >&2

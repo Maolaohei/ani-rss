@@ -14,6 +14,7 @@ import cn.hutool.core.util.ReUtil;
 import cn.hutool.core.util.StrUtil;
 import lombok.extern.slf4j.Slf4j;
 import wushuo.tmdb.api.entity.Tmdb;
+import wushuo.tmdb.api.entity.TmdbEpisode;
 
 import java.util.*;
 import java.util.function.Function;
@@ -720,7 +721,7 @@ public class RenameUtil {
     public static String replaceEpisodeTitle(String template, Double episode, Ani ani) {
         boolean is5 = ItemsUtil.is5(episode);
 
-        Map<Integer, String> episodeTitleMap = new HashMap<>();
+        Map<Integer, TmdbEpisode> episodeTitleMap = new HashMap<>();
         Map<Integer, Function<Boolean, String>> bgmEpisodeTitleMap = new HashMap<>();
 
         if (template.contains("${episodeTitle}")) {
@@ -733,16 +734,24 @@ public class RenameUtil {
 
         String defaultEpisodeTitle = "第" + NumberFormatUtils.format(episode, 1, 0) + "集";
 
-        String episodeTitle = is5 ? defaultEpisodeTitle :
-                episodeTitleMap.getOrDefault(episode.intValue(), defaultEpisodeTitle);
+        String episodeTitle = defaultEpisodeTitle,
+                bgmEpisodeTitle = defaultEpisodeTitle,
+                bgmJpEpisodeTitle = defaultEpisodeTitle;
 
-        String bgmEpisodeTitle = is5 ? defaultEpisodeTitle :
-                bgmEpisodeTitleMap.getOrDefault(episode.intValue(), jp -> defaultEpisodeTitle)
-                        .apply(false);
+        if (!is5) {
+            int episodeInt = episode.intValue();
+            if (episodeTitleMap.containsKey(episodeInt)) {
+                String name = episodeTitleMap.get(episodeInt).getName();
+                if (StrUtil.isNotBlank(name)) {
+                    episodeTitle = name;
+                }
+            }
 
-        String bgmJpEpisodeTitle = is5 ? defaultEpisodeTitle :
-                bgmEpisodeTitleMap.getOrDefault(episode.intValue(), jp -> defaultEpisodeTitle)
-                        .apply(true);
+            if (bgmEpisodeTitleMap.containsKey(episodeInt)) {
+                bgmEpisodeTitle = bgmEpisodeTitleMap.get(episodeInt).apply(false);
+                bgmJpEpisodeTitle = bgmEpisodeTitleMap.get(episodeInt).apply(true);
+            }
+        }
 
         template = template.replace("${episodeTitle}", episodeTitle);
         template = template.replace("${bgmEpisodeTitle}", bgmEpisodeTitle);
