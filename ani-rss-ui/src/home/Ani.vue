@@ -311,6 +311,25 @@
       </el-button>
     </div>
   </div>
+
+  <el-dialog v-model="searchThemoviedbVisible" title="选择 TMDB" width="720px" append-to-body>
+    <div v-loading="searchThemoviedbLoading">
+      <el-table :data="searchThemoviedbList" highlight-current-row
+                max-height="420" style="cursor: pointer;">
+        <el-table-column prop="name" label="名称" min-width="180"/>
+        <el-table-column prop="originalName" label="原名" min-width="160"/>
+        <el-table-column prop="date" label="日期" width="110"/>
+        <el-table-column prop="voteAverage" label="评分" width="70"/>
+        <el-table-column prop="id" label="ID" width="80"/>
+        <el-table-column label="操作" width="80">
+          <template #default="{row}">
+            <el-button bg text size="small" @click.stop="selectThemoviedb(row)">选择</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <el-text type="info" size="small">点击行或「选择」按钮应用所选条目（当前类型：{{ props.ani.ova ? '电影' : '剧集' }}）</el-text>
+    </div>
+  </el-dialog>
 </template>
 
 <script setup>
@@ -366,22 +385,51 @@ let getThemoviedbName = () => {
 }
 
 let searchThemoviedb = () => {
-  ElMessageBox.prompt('输入 TmdbId', {
-    confirmButtonText: 'OK',
+  ElMessageBox.prompt('输入标题搜索 TMDB', {
+    confirmButtonText: '搜索',
     confirmButtonClass: 'is-text is-has-bg el-button--primary',
     cancelButtonText: 'Cancel',
     cancelButtonClass: 'is-text is-has-bg',
+    inputValue: props.ani.title,
   })
       .then(value => {
-        http.getThemoviedbName({
-          tmdbId: value.value,
+        let title = value.value.trim()
+        if (!title.length) {
+          return
+        }
+        searchThemoviedbLoading.value = true
+        http.searchThemoviedb({
+          title: title,
           ova: props.ani.ova
         })
             .then(res => {
-              ElMessage.success(res.message)
-              props.ani['themoviedbName'] = res.data['themoviedbName']
-              props.ani['tmdb'] = res.data['tmdb']
+              searchThemoviedbList.value = res.data || []
+              if (!searchThemoviedbList.value.length) {
+                ElMessage.warning('未搜索到相关结果')
+                return
+              }
+              searchThemoviedbVisible.value = true
             })
+            .finally(() => {
+              searchThemoviedbLoading.value = false
+            })
+      })
+}
+
+let searchThemoviedbLoading = ref(false)
+let searchThemoviedbVisible = ref(false)
+let searchThemoviedbList = ref([])
+
+let selectThemoviedb = (tmdb) => {
+  searchThemoviedbVisible.value = false
+  http.getThemoviedbName({
+    tmdbId: tmdb.id,
+    ova: props.ani.ova
+  })
+      .then(res => {
+        ElMessage.success(res.message)
+        props.ani['themoviedbName'] = res.data['themoviedbName']
+        props.ani['tmdb'] = res.data['tmdb']
       })
 }
 

@@ -202,6 +202,13 @@ export let clearLogs = () => api.post('api/clearLogs')
 export let getThemoviedbName = (ani) => api.post('api/getThemoviedbName', ani)
 
 /**
+ * 搜索TMDB（返回候选列表）
+ * @param ani 标题/ova
+ * @returns {Promise<unknown>}
+ */
+export let searchThemoviedb = (ani) => api.post('api/searchThemoviedb', ani)
+
+/**
  * 获取TMDB剧集组
  * @param ani 订阅
  * @returns {Promise<unknown>}

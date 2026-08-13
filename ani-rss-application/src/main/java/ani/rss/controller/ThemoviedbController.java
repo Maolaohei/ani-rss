@@ -70,6 +70,24 @@ public class ThemoviedbController extends BaseController {
     }
 
     @Auth
+    @Operation(summary = "搜索TMDB")
+    @PostMapping("/searchThemoviedb")
+    public Result<List<Tmdb>> searchThemoviedb(@RequestBody ThemoviedbDTO dto) {
+        String title = dto.getTitle();
+        Boolean ova = dto.getOva();
+
+        Assert.isTrue(StrUtil.isNotBlank(title), "标题不能为空");
+
+        title = RenameUtil.renameDel(title, false);
+
+        TmdbTypeEnum tmdbType = ova ? TmdbTypeEnum.MOVIE : TmdbTypeEnum.TV;
+
+        List<Tmdb> list = TmdbUtils.search(title, tmdbType);
+
+        return Result.success(list);
+    }
+
+    @Auth
     @Operation(summary = "获取TMDB剧集组")
     @PostMapping("/getThemoviedbGroup")
     public Result<List<TmdbGroup>> getThemoviedbGroup(@RequestBody Ani ani) {

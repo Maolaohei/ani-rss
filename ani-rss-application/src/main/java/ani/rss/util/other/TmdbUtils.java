@@ -227,6 +227,27 @@ public class TmdbUtils {
     }
 
     /**
+     * 根据标题搜索tmdb（返回候选列表，供用户手动选择）
+     *
+     * @param titleName 标题名
+     * @param tmdbType  类型
+     * @return 过滤掉完全无关结果后的候选列表
+     */
+    public static List<Tmdb> search(String titleName, TmdbTypeEnum tmdbType) {
+        if (StrUtil.isBlank(titleName)) {
+            return new ArrayList<>();
+        }
+        List<Tmdb> list = TMDB_UTIL.search(titleName, tmdbType);
+        if (list.isEmpty() || !isChineseSearch(titleName)) {
+            return list;
+        }
+        // 手动选择场景：仅剔除完全无关的结果，保留弱相关候选供用户判断
+        return list.stream()
+                .filter(t -> isRelated(t, titleName))
+                .toList();
+    }
+
+    /**
      * 根据名称获取tmdb信息
      *
      * @param titleName 标题名
