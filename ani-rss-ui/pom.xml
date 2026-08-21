@@ -35,6 +35,8 @@
                     <arguments>
                         <argument>-rf</argument>
                         <argument>./dist</argument>
+                        <argument>pnpm-lock.yaml</argument>
+                        <argument>pnpm-workspace.yaml</argument>
                     </arguments>
                     <workingDirectory>${project.basedir}</workingDirectory>
                 </configuration>
@@ -52,8 +54,8 @@
                             <goal>install-node-and-pnpm</goal>
                         </goals>
                         <configuration>
-                            <nodeVersion>v26.4.0</nodeVersion>
-                            <pnpmVersion>11.9.0</pnpmVersion>
+                            <nodeVersion>v26.5.1</nodeVersion>
+                            <pnpmVersion>11.21.0</pnpmVersion>
                         </configuration>
                     </execution>
                     <execution>
