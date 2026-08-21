@@ -397,7 +397,16 @@ public class qBittorrent implements BaseDownload {
         String reName = torrentsInfo.getName();
 
         if (StrUtil.isBlank(reName) || !ReUtil.contains(StringEnum.SEASON_REG, reName)) {
-            // 剧场版 OR OVA 直接开始任务
+            // 磁力种子元数据未到达时种子名仍是 40 位 hash（不含 SxxExx）：
+            // 此时不能直接 start+return true——TorrentUtil 会据此打上 RENAME 标签，
+            // 元数据到达后本轮已结束、下轮被标签跳过，文件永远不被重命名（目录名=规则名、文件=原名）。
+            // 必须先确认文件列表已就绪，空列表表示元数据仍在获取，交由下轮重试。
+            List<FileEntity> metaFiles = files(torrentsInfo, true, config);
+            if (metaFiles.isEmpty()) {
+                log.debug("{} 磁力链接还在获取元数据中，暂不开始/打标签", torrentsInfo.getHash());
+                return false;
+            }
+            // 真正的剧场版 OR OVA（文件列表已就绪）直接开始任务
             Boolean start = start(torrentsInfo, config);
             Assert.isTrue(start, "开始任务失败 {}", reName);
             if (start) {

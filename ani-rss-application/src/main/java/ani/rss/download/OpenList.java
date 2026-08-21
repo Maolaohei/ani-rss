@@ -1261,7 +1261,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 String name = sub.getName();
                 String ext = FileUtil.extName(name);
                 String newName = videoReName;
-                String lang = FileUtil.extName(FileUtil.mainName(name));
+                String lang = extractSubtitleLangSuffix(name);
                 if (StrUtil.isNotBlank(lang)) {
                     newName = newName + "." + lang;
                 }
@@ -1304,9 +1304,12 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 String subBase = FileUtil.mainName(subName);
                 String subExt = FileUtil.extName(subName);
                 String subBaseClean = subBase;
-                String lang = FileUtil.extName(subBase);
-                if (StrUtil.isNotBlank(lang) && !FileUtils.isVideoFormat(lang)) {
-                    subBaseClean = FileUtil.mainName(subBase);
+                String lang = extractSubtitleLangSuffix(subName);
+                if (StrUtil.isNotBlank(lang)) {
+                    // 剥离已知语言段后再比较主名
+                    for (String part : lang.split("\\.")) {
+                        subBaseClean = FileUtil.mainName(subBaseClean);
+                    }
                 }
                 boolean matched = videoBase.equals(subBase) || videoBase.equals(subBaseClean);
                 // 主名不一致时按集数配对（如 "Show - 03.ass" 对 "Show - 03.mkv"，或语言后缀导致主名错位）
@@ -1316,7 +1319,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 }
                 if (matched) {
                     String subReName = videoReName;
-                    if (StrUtil.isNotBlank(lang) && !FileUtils.isVideoFormat(lang)) {
+                    if (StrUtil.isNotBlank(lang)) {
                         subReName = subReName + "." + lang;
                     }
                     renameMap.put(subName, subReName + "." + subExt);
@@ -1334,7 +1337,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                     ? FileUtil.mainName(firstVideoTarget)
                     : FileUtil.mainName(videoList.get(0).getName());
             String newName = videoBase;
-            String lang = FileUtil.extName(FileUtil.mainName(name));
+            String lang = extractSubtitleLangSuffix(name);
             if (StrUtil.isNotBlank(lang)) {
                 newName = newName + "." + lang;
             }

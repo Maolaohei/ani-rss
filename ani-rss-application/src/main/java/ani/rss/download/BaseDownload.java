@@ -118,7 +118,7 @@ public interface BaseDownload {
         if (FileUtils.isVideoFormat(ext)) {
             newPath = newPath + "." + ext;
         } else if (FileUtils.isSubtitleFormat(ext)) {
-            String s = FileUtil.extName(FileUtil.mainName(name));
+            String s = extractSubtitleLangSuffix(name);
             if (StrUtil.isNotBlank(s)) {
                 newPath = newPath + "." + s;
             }
@@ -165,7 +165,7 @@ public interface BaseDownload {
         }
 
         if (isSubtitle) {
-            String s = FileUtil.extName(FileUtil.mainName(name));
+            String s = extractSubtitleLangSuffix(name);
             if (StrUtil.isNotBlank(s)) {
                 newPath = newPath + "." + s;
             }
@@ -180,7 +180,8 @@ public interface BaseDownload {
     }
 
     /**
-     * 从文件名中提取集数 (EP01, - 01, [01] 等格式), 过滤年份/日期
+     * 从文件名中提取集数 (EP01, - 01, [01], 第01话, Vol.1, BD01, 裸数字 等格式), 过滤年份/日期/分辨率。
+     * 与 RenameUtil.REG_LOOSE 的能力对齐，避免「RSS 标题算出 A 集、文件落成 B 集」的两套口径脱节。
      */
     default String extractEpisodeFromFileName(String name) {
         String mainName = FileUtil.mainName(name);
@@ -204,7 +205,93 @@ public interface BaseDownload {
         // [01], 【01】, [710-711], [01-02] (排除 [160226] 日期、[20221208] 日期、[1080P] 分辨率)
         m = java.util.regex.Pattern.compile("[\\[【](\\d+(?:\\.5)?)(?:-\\d+)?[\\]】]").matcher(mainName);
         if (m.find()) return filterNonEpisodeNumber(m.group(1));
+        // 第01话/第01話/第01集/第1-2话（取起始集）
+        m = java.util.regex.Pattern.compile("第\\s*(\\d+(?:\\.5)?)[话話集]").matcher(mainName);
+        if (m.find()) return filterNonEpisodeNumber(m.group(1));
+        // Vol.1 / Vol 1 / vol1
+        m = java.util.regex.Pattern.compile("(?:vol\\.?|Vol)\\s*(\\d{1,3}(?:\\.5)?)(?![\\dPpXx])",
+                java.util.regex.Pattern.CASE_INSENSITIVE).matcher(mainName);
+        if (m.find()) return filterNonEpisodeNumber(m.group(1));
+        // BD-01 / BD01 / BD 01
+        m = java.util.regex.Pattern.compile("BD[- ]?(\\d{1,3}(?:\\.5)?)(?![\\dPpXx])",
+                java.util.regex.Pattern.CASE_INSENSITIVE).matcher(mainName);
+        if (m.find()) return filterNonEpisodeNumber(m.group(1));
+        // OVA2 / OAD 2
+        m = java.util.regex.Pattern.compile("(?:OVA|OAD)[- ]?(\\d{1,3}(?:\\.5)?)(?![\\dPpXx])",
+                java.util.regex.Pattern.CASE_INSENSITIVE).matcher(mainName);
+        if (m.find()) return filterNonEpisodeNumber(m.group(1));
+        // 裸数字（边界约束）: "标题 05.mkv"、"01.zh.ass"、柯南 "1049" 等长番。
+        // 排除: 紧邻字母(H264/x265/SP01)、后跟 P/p/X/x(分辨率)、日期/年份由 filterNonEpisodeNumber 兜底
+        m = java.util.regex.Pattern.compile("(?<![A-Za-z0-9])(?<!Season\\s)(\\d{1,4}(?:\\.5)?)(?![\\dPpXx])").matcher(mainName);
+        if (m.find()) return filterNonEpisodeNumber(m.group(1));
         return null;
+    }
+
+    /**
+     * 提取字幕语言后缀（可多级，如 xx.chs&eng.simplified.ass → "chs&eng.simplified"）。
+     * 仅识别已知语言/轨道 token，避免把文件主名中的数字段当语言（如 Vol.1.ass → 1）。
+     */
+    default String extractSubtitleLangSuffix(String name) {
+        String base = FileUtil.mainName(name);
+        java.util.List<String> parts = new ArrayList<>();
+        while (StrUtil.isNotBlank(base)) {
+            String cur = FileUtil.extName(base);
+            if (StrUtil.isBlank(cur) || !isKnownSubtitleLangToken(cur)) {
+                break;
+            }
+            parts.add(0, cur);
+            String next = FileUtil.mainName(base);
+            if (next.equals(base)) {
+                break;
+            }
+            base = next;
+        }
+        return parts.isEmpty() ? null : String.join(".", parts);
+    }
+
+    /**
+     * 是否为已知字幕语言/轨道 token
+     */
+    default boolean isKnownSubtitleLangToken(String token) {
+        if (StrUtil.isBlank(token)) {
+            return false;
+        }
+        switch (token.toLowerCase()) {
+            case "zh":
+            case "zh-hans":
+            case "zh-hant":
+            case "sc":
+            case "tc":
+            case "chs":
+            case "cht":
+            case "chinese":
+            case "cn":
+            case "jp":
+            case "jpn":
+            case "ja":
+            case "eng":
+            case "en":
+            case "english":
+            case "kor":
+            case "kr":
+            case "krn":
+            case "korean":
+            case "chs&eng":
+            case "cht&eng":
+            case "zh&en":
+            case "simplified":
+            case "traditional":
+            case "default":
+            case "full":
+            case "forced":
+            case "sign":
+            case "signs":
+            case "songs":
+            case "comment":
+                return true;
+            default:
+                return false;
+        }
     }
 
     /**
@@ -212,6 +299,13 @@ public interface BaseDownload {
      */
     default String filterNonEpisodeNumber(String num) {
         if (num == null) return null;
+        // 常见分辨率（"1080 x265" 这类「数字+空格+编码」场景下的裸 1080/720 等）
+        switch (num) {
+            case "360": case "480": case "720":
+            case "1080": case "1440": case "2160": case "4320":
+                return null;
+            default:
+        }
         if (num.length() == 4) {
             try {
                 int v = Integer.parseInt(num);

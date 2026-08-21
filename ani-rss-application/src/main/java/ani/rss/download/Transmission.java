@@ -227,8 +227,12 @@ public class Transmission implements BaseDownload {
             return false;
         }
 
+        // TR 的 rename 只作用于种子根（多文件种子=顶层目录）。
+        // 种子名可能是目录名：目录名常含点（如 Show.Vol.01），不能对「目录名」取 extName 追加后缀，
+        // 否则目录会被改名为「标题 S01E01.01」。仅当根是文件（单文件种子）且扩展名真实时才追加。
         String extName = FileUtil.extName(name);
-        if (StrUtil.isNotBlank(extName)) {
+        if (StrUtil.isNotBlank(extName)
+                && (FileUtils.isVideoFormat(extName) || FileUtils.isSubtitleFormat(extName))) {
             reName = reName + "." + extName;
         }
 
