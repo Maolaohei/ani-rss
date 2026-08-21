@@ -1259,11 +1259,19 @@ public class DownloadService {
      * 订阅或配置变更（AniUtil.sync / ConfigUtil.sync）时置空失效，miss 时自动重建自愈。
      */
     private static volatile Map<String, Ani> DOWNLOAD_PATH_INDEX;
+    private static volatile long DOWNLOAD_PATH_INDEX_BUILT_AT = 0L;
+
+    /**
+     * miss 重建的最小间隔：下载器中存在非本程序任务时，RenameTask 每轮对每个 miss 任务
+     * 全量重建索引（O(任务×订阅) 重算风暴）。间隔内的 miss 直接返回空，等下一周期再重建。
+     */
+    private static final long DOWNLOAD_PATH_INDEX_MIN_REBUILD_MS = 60_000L;
 
     private static final Object INDEX_LOCK = new Object();
 
     public static void invalidateDownloadPathIndex() {
         DOWNLOAD_PATH_INDEX = null;
+        DOWNLOAD_PATH_INDEX_BUILT_AT = 0L;
     }
 
     private Map<String, Ani> buildDownloadPathIndex() {
@@ -1278,6 +1286,7 @@ public class DownloadService {
                 log.debug("构建下载路径索引失败: {} {}", ani.getTitle(), ExceptionUtils.getMessage(e));
             }
         }
+        DOWNLOAD_PATH_INDEX_BUILT_AT = System.currentTimeMillis();
         return index;
     }
 
@@ -1305,8 +1314,10 @@ public class DownloadService {
         }
 
         Ani ani = index.get(downloadDir);
-        if (ani == null) {
-            // 缓存可能过期（BGM/JP 标题等外部数据变化）：重建后重查一次，避免误判未下载
+        if (ani == null
+                && System.currentTimeMillis() - DOWNLOAD_PATH_INDEX_BUILT_AT >= DOWNLOAD_PATH_INDEX_MIN_REBUILD_MS) {
+            // 缓存可能过期（BGM/JP 标题等外部数据变化）：重建后重查一次，避免误判未下载；
+            // 负缓存限频：间隔内不重建，防止下载器中无关任务触发 O(任务×订阅) 重算风暴
             synchronized (INDEX_LOCK) {
                 index = buildDownloadPathIndex();
                 DOWNLOAD_PATH_INDEX = index;

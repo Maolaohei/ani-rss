@@ -61,7 +61,9 @@ public final class FailedDownloadQueue {
             }
             loaded = true;
         } catch (Exception e) {
-            log.warn("加载失败队列失败: {}", e.getMessage());
+            // 解析失败保留内存现状（首次加载则为空）且不清空原文件：
+            // 原实现坏文件会导致整个失败队列被静默丢弃，用户无感知地丢失失败记录
+            log.warn("加载失败队列失败(保留原文件): {}", e.getMessage());
             loaded = true;
         }
     }
@@ -69,7 +71,11 @@ public final class FailedDownloadQueue {
     public static synchronized void save() {
         ensureLoaded();
         try {
-            FileUtil.writeString(GsonStatic.toJson(new ArrayList<>(ITEMS)), file(), StandardCharsets.UTF_8);
+            // 原子写：temp + rename，避免写盘瞬间崩溃/磁盘满留下截断的 json
+            File file = file();
+            File temp = new File(file.getPath() + ".temp");
+            FileUtil.writeString(GsonStatic.toJson(new ArrayList<>(ITEMS)), temp, StandardCharsets.UTF_8);
+            FileUtil.move(temp, file, true);
         } catch (Exception e) {
             log.warn("保存失败队列失败: {}", e.getMessage());
         }

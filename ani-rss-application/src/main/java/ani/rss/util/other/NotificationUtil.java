@@ -94,7 +94,8 @@ public class NotificationUtil {
             Class<? extends BaseNotification> aClass = NOTIFICATION_MAP.get(notificationType);
 
             BaseNotification baseNotification = ReflectUtil.newInstance(aClass);
-            EXECUTOR_SERVICE.execute(() -> {
+            try {
+                EXECUTOR_SERVICE.execute(() -> {
                 int currentRetry = 0;
                 do {
                     if (currentRetry > 0) {
@@ -110,6 +111,11 @@ public class NotificationUtil {
                     ThreadUtil.sleep(1000);
                 } while (currentRetry < retry);
             });
+            } catch (java.util.concurrent.RejectedExecutionException e) {
+                // 队列满(256)时丢弃本条通知并计数，绝不让 RejectedExecutionException
+                // 上抛中断调用方（download() 中 send 无捕获，曾会中断订阅下载处理）
+                log.warn("通知队列已满，丢弃通知 {} {}", aClass.getName(), text);
+            }
         }
     }
 }

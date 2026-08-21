@@ -33,6 +33,13 @@ import java.util.stream.Collectors;
 @Slf4j
 public class OpenListUploadNotification implements BaseNotification {
     /**
+     * 复用的上传 HttpClient（Java 17 HttpClient 无 close，逐文件新建会泄漏 selector 线程）
+     */
+    private static final java.net.http.HttpClient SHARED_HTTP_CLIENT = java.net.http.HttpClient.newBuilder()
+            .connectTimeout(java.time.Duration.ofSeconds(30))
+            .build();
+
+    /**
      * 上传配置
      */
     private final HttpConfig httpConfig = new HttpConfig()
@@ -289,9 +296,8 @@ public class OpenListUploadNotification implements BaseNotification {
         String filename = FileUtil.getName(localFilePath);
 
         try {
-            java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
-                    .connectTimeout(java.time.Duration.ofSeconds(30))
-                    .build();
+            // 复用单例 HttpClient：原实现每文件 new 一个且从不关闭（Java 17 无 close），
+            // 批量上传会累积 selector 线程/连接
             java.net.http.HttpRequest request = java.net.http.HttpRequest.newBuilder()
                     .uri(java.net.URI.create(url))
                     .timeout(java.time.Duration.ofMinutes(5))
@@ -302,7 +308,7 @@ public class OpenListUploadNotification implements BaseNotification {
                     .PUT(java.net.http.HttpRequest.BodyPublishers.ofFile(java.nio.file.Path.of(localFilePath)))
                     .build();
 
-            java.net.http.HttpResponse<String> response = client.send(request,
+            java.net.http.HttpResponse<String> response = SHARED_HTTP_CLIENT.send(request,
                     java.net.http.HttpResponse.BodyHandlers.ofString());
 
             Assert.isTrue(response.statusCode() == 200,

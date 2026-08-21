@@ -417,6 +417,9 @@ public class ItemsUtil {
                 if (StrUtil.isNotBlank(lastSuccess)) {
                     log.warn("RSS获取重试耗尽，临时使用最近成功结果 ({}): {}",
                             url, lastError == null ? "unknown" : ExceptionUtils.getMessage(lastError));
+                    // 回退结果写入短 TTL 缓存：源持续故障时，锁外/后续调用方在 45s 内
+                    // 直接复用本次回退，不再各自跑满 3×timeout 的全量重试（请求放大/接口阻塞）
+                    CacheUtils.put(cacheKey, lastSuccess, RSS_CACHE_TTL_MS);
                     return lastSuccess;
                 }
                 if (lastError instanceof RuntimeException runtimeException) {
