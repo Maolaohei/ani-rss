@@ -540,11 +540,11 @@ public class AniController extends BaseController {
         List<Map<String, String>> washPreview = new ArrayList<>();
         try {
             Optional<Item> washItem = items.stream()
-                    .filter(it -> it != null && !Boolean.TRUE.equals(it.getLocal()))
+                    .filter(it -> it != null && !Boolean.TRUE.equals(it.getHasDownloaded()))
                     .filter(it -> Boolean.TRUE.equals(it.getMaster()) || it.getMaster() == null)
                     .findFirst();
             if (washItem.isEmpty()) {
-                washItem = items.stream().filter(it -> it != null && !Boolean.TRUE.equals(it.getLocal())).findFirst();
+                washItem = items.stream().filter(it -> it != null && !Boolean.TRUE.equals(it.getHasDownloaded())).findFirst();
             }
             if (washItem.isPresent()) {
                 for (WashPreview.Candidate c : downloadService.previewStandbyDeletes(ani, washItem.get())) {
