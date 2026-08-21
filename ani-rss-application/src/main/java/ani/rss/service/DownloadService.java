@@ -31,6 +31,7 @@ import wushuo.tmdb.api.entity.Tmdb;
 import java.io.File;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
@@ -253,6 +254,26 @@ public class DownloadService {
                 if (now.getTime() < pubDate.getTime()) {
                     log.info("延迟下载 {}", reName);
                     continue;
+                }
+            }
+
+            // 新种子下载等待：发布时间距今不足 N 小时的种子暂缓下载（离线场景云端无人做种，
+            // 立即提交只会超时失败并反复重提）。到期由下一轮 RSS 自然重查，无需新定时器。
+            // pubDate 为 null 放行（部分 RSS 源无该字段，不能永远卡住）；
+            // 洗版条目（v2 高版本）不拦截——修正版通常来自已有种子的重新发布。
+            Integer newTorrentWaitHours = ObjectUtil.defaultIfNull(config.getNewTorrentWaitHours(), 2);
+            boolean washingItem = v2 && item.getVersion() != null && item.getVersion() > 1;
+            if (Objects.nonNull(pubDate) && newTorrentWaitHours > 0 && !washingItem) {
+                long earliest = System.currentTimeMillis() - TimeUnit.HOURS.toMillis(newTorrentWaitHours);
+                if (pubDate.getTime() > earliest) {
+                    // 站点时钟偏移导致 pubDate 在未来：按已过期处理，避免长期卡住
+                    if (pubDate.getTime() <= System.currentTimeMillis()) {
+                        long waitMinutes = Math.max(1,
+                                (pubDate.getTime() - earliest) / TimeUnit.MINUTES.toMillis(1));
+                        log.info("新种子等待: {} 发布不足 {} 小时，约 {} 分钟后到期待重试",
+                                reName, newTorrentWaitHours, waitMinutes);
+                        continue;
+                    }
                 }
             }
 

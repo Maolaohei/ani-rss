@@ -127,6 +127,7 @@ public class ConfigUtil {
                 .setRssTimeout(20)
                 .setCustomTags(new ArrayList<>())
                 .setDelayedDownload(0)
+                .setNewTorrentWaitHours(2)
                 .setFileExist(false)
                 .setAwaitStalledUP(true)
                 .setDelete(false)

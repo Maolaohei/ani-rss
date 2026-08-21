@@ -111,6 +111,7 @@ export let configData = {
     "updateTotalEpisodeNumber": false,
     "forceUpdateTotalEpisodeNumber": false,
     "alistDownloadTimeout": 60,
+    "newTorrentWaitHours": 2,
     "alistDownloadRetryNumber": 5,
     "configBackup": false,
     "configBackupDay": 7,

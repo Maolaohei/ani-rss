@@ -140,6 +140,13 @@ public class Config implements Serializable {
     private Integer delayedDownload;
 
     /**
+     * 新种子下载等待(小时)：发布时间距今不足该值的种子暂缓下载。
+     * 离线下载场景下刚发布的新种子云端无人做种，立即提交只会超时失败并反复重提。
+     */
+    @Schema(description = "新种子下载等待(小时)")
+    private Integer newTorrentWaitHours;
+
+    /**
      * RSS 间隔(分钟)
      */
     @Schema(description = "RSS 间隔(分钟)")

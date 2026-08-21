@@ -89,6 +89,19 @@
           </template>
         </el-input-number>
       </el-form-item>
+      <el-form-item label="新种子下载等待">
+        <div>
+          <el-input-number v-model:model-value="props.config['newTorrentWaitHours']" :min="0">
+            <template #suffix>
+              <span>小时</span>
+            </template>
+          </el-input-number>
+          <br/>
+          <el-text class="mx-1" size="small">
+            发布时间距今不足该值的种子暂缓下载：新种子云端常无人做种，立即提交只会离线超时失败并反复重提；0 为关闭
+          </el-text>
+        </div>
+      </el-form-item>
       <el-form-item label="115 云下载路径">
         <el-input v-model:model-value="props.config['alistCloudDownloadDir']" placeholder="/云下载（留空自动发现）"/>
         <br/>
