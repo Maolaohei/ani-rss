@@ -73,8 +73,14 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     private static final ConcurrentHashMap<String, Object> DOWNLOAD_LOCKS = new ConcurrentHashMap<>();
     /** 当前正在等待的离线 hash 集合（任务管理器展示 / 取消清理 / 残留保护）；多 hash 并行时需记录全部 */
     private static final Set<String> currentInfoHashes = ConcurrentHashMap.newKeySet();
-    /** 当前离线等待进度（任务管理器） */
+    /** 当前离线等待进度（任务管理器，仅展示用——多任务并行时只显示最后更新的一个） */
     private static final AtomicReference<OfflineWaitSnapshot> offlineWaitSnapshot = new AtomicReference<>();
+    /**
+     * 每个「进行中」离线任务占用的临时目录名（hash → 目录名集合）。
+     * 残留清理的保护判定必须用这个多槽集合：单槽快照在并行离线时只保护最后一个任务，
+     * 一键清理会整树删掉其它在途下载目录（含未完成媒体）。
+     */
+    private static final ConcurrentHashMap<String, Set<String>> ACTIVE_TEMP_DIRS_BY_HASH = new ConcurrentHashMap<>();
     /** 用户取消时置位，打断 sleep 与轮询 */
     private static final AtomicBoolean offlineCancelRequested = new AtomicBoolean(false);
     /** 进程内仅启动回扫一次（login 成功后异步） */
@@ -109,6 +115,19 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     }
 
     private static final long TIMEOUT_FILE_STABILITY_WAIT_MS = 2000L;
+
+    /**
+     * 任务 SUCCESS/文件就绪后，115 落盘可能滞后于任务状态：扫描为空时不立即判失败，
+     * 在该宽限窗口内绕缓存重扫，避免「先记失败→文件后到→下一轮被递归已存在判定认领→文件滞留子目录」。
+     */
+    private static final long POST_SUCCESS_FILE_GRACE_MS = TimeUnit.MINUTES.toMillis(5);
+    private static final long POST_SUCCESS_FILE_GRACE_POLL_MS = TimeUnit.SECONDS.toMillis(15);
+
+    /**
+     * fsMove 后顶层校验失败时的重试次数与间隔（990009 异步移动/并发冲突下 move 可能假成功）
+     */
+    private static final int MOVE_VERIFY_MAX_ATTEMPTS = 3;
+    private static final long MOVE_VERIFY_RETRY_DELAY_MS = TimeUnit.SECONDS.toMillis(5);
 
     /**
      * 115/OpenList 返回「任务已存在(10008)」后，短时间内禁止对同一 magnet 再 add。
@@ -934,190 +953,48 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 }
             }
             // ① finally 前先扫描文件：临时目录优先；否则最终目录中本集相关文件
-            List<OpenListFileInfo> openListFileInfos = findFiles(path);
             // 云下载兜底命中时记录文件源目录：移动成功后清理这些源目录残留的空壳（115 任务目录）
             Set<String> cloudSourceDirs = new HashSet<>();
-            List<OpenListFileInfo> videoList = openListFileInfos.stream()
-                    // 防御：findFiles 缓存异常/实现差异下目录可能混入，目录名带扩展名会误判为视频
-                    .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
-                    .filter(f -> FileUtils.isVideoFormat(f.getName()))
-                    .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
-                    .toList();
-            List<OpenListFileInfo> subtitleList = openListFileInfos.stream()
-                    .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
-                    .filter(f -> FileUtils.isSubtitleFormat(f.getName()))
-                    .toList();
-
-            if (videoList.isEmpty()) {
-                // 可能已在 savePath 落盘（历史完成/被其它路径移动）
-                // 必须排除临时目录内的文件，否则「还在临时目录」会被误判为已完成并跳过移动
-                List<OpenListFileInfo> saveFiles = findEpisodeFiles(savePath, finalRenameBase).stream()
-                        .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
-                        .filter(f -> !isUnderPath(f, tempDownloadDir != null ? tempDownloadDir : null))
-                        .toList();
-                videoList = saveFiles.stream()
-                        .filter(f -> FileUtils.isVideoFormat(f.getName()))
-                        .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
-                        .toList();
-                subtitleList = saveFiles.stream()
-                        .filter(f -> FileUtils.isSubtitleFormat(f.getName()))
-                        .toList();
-                openListFileInfos = saveFiles;
-                if (videoList.isEmpty()) {
-                    // 与超时终检 inspectTimeoutFiles 的兜底一致：savePath 递归下可能已存在本集视频
-                    // 但未按模板命名（合集原始标题目录/非模板命名），按集数匹配而非模板名，
-                    // 避免「终检通过 → 后处理判失败 → 清标记 → 下轮重提交」死循环
-                    List<OpenListFileInfo> fallback = findFiles(savePath).stream()
-                            .filter(f -> !isUnderPath(f, tempDownloadDir != null ? tempDownloadDir : null))
-                            .toList();
-                    List<OpenListFileInfo> fallbackVideos = expectedEpisodeVideos(fallback, item.getEpisodeRange());
-                    if (!fallbackVideos.isEmpty()) {
-                        log.info("savePath 兜底扫描发现本集文件，进入后处理 {} videos={}",
-                                reName, fallbackVideos.size());
-                        videoList = fallbackVideos.stream()
-                                .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
-                                .toList();
-                        subtitleList = fallback.stream()
-                                .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
-                                .filter(f -> FileUtils.isSubtitleFormat(f.getName()))
-                                .toList();
-                        openListFileInfos = fallback;
+            List<OpenListFileInfo> openListFileInfos = null;
+            List<OpenListFileInfo> videoList = null;
+            List<OpenListFileInfo> subtitleList = null;
+            long fileGraceDeadlineMs = Math.min(deadlineMs,
+                    System.currentTimeMillis() + POST_SUCCESS_FILE_GRACE_MS);
+            while (true) {
+                EpisodeScanResult scan = scanEpisodeFilesOnce(path, savePath, tempDownloadDir,
+                        finalRenameBase, item.getEpisodeRange());
+                cloudSourceDirs.addAll(scan.cloudSourceDirs());
+                if (scan.alreadyFinal()) {
+                    // 已在最终目录顶层：不要再 rename/move 到自己，直接成功；
+                    // 视频/字幕已确认落盘，强制清掉临时目录（含嵌套残留）
+                    log.info("本集文件已在最终目录，视为下载完成 {}", reName);
+                    if (tempDownloadDir != null) {
+                        cleanupTempDownloadDir(savePath, tempDirName, true);
                     }
+                    clearDuplicateMagnet(infoHash);
+                    NotificationUtil.send(config, ani,
+                            StrFormatter.format("{} 下载完成", item.getReName()),
+                            NotificationStatusEnum.DOWNLOAD_END);
+                    return true;
                 }
-                if (videoList.isEmpty()) {
-                    // 115 离线完成后的文件可能落在根目录「云下载」而非目标路径：
-                    // 兜底扫描（原始标题命名，按集数匹配），走重命名/移动流程自动归位到 savePath
-                    List<OpenListFileInfo> cloudFiles = findCloudDownloadFiles();
-                    List<OpenListFileInfo> cloudVideos = expectedEpisodeVideos(cloudFiles, item.getEpisodeRange());
-                    if (!cloudVideos.isEmpty()) {
-                        log.info("115 云下载目录兜底扫描发现本集文件，进入后处理 {} videos={}",
-                                reName, cloudVideos.size());
-                        videoList = cloudVideos.stream()
-                                .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
-                                .toList();
-                        subtitleList = cloudFiles.stream()
-                                .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
-                                .filter(f -> FileUtils.isSubtitleFormat(f.getName()))
-                                .toList();
-                        openListFileInfos = cloudFiles;
-                        // 记录源目录（云下载下的原始目录/根），移动成功后用于清理空壳
-                        videoList.stream()
-                                .map(OpenListFileInfo::getPath)
-                                .filter(Objects::nonNull)
-                                .forEach(cloudSourceDirs::add);
-                        subtitleList.stream()
-                                .map(OpenListFileInfo::getPath)
-                                .filter(Objects::nonNull)
-                                .forEach(cloudSourceDirs::add);
-                    }
+                if (!scan.videoList().isEmpty()) {
+                    openListFileInfos = scan.openListFileInfos();
+                    videoList = scan.videoList();
+                    subtitleList = scan.subtitleList();
+                    break;
                 }
-                if (!videoList.isEmpty()) {
-                    if (!saveFiles.isEmpty() || videoList.stream()
-                            .allMatch(f -> Objects.equals(trimTrailingSlash(f.getPath()), trimTrailingSlash(savePath)))) {
-                        // 已在最终目录：不要再 rename/move 到自己，直接成功；
-                        // 视频/字幕已确认落盘，强制清掉临时目录（含嵌套残留）
-                        log.info("本集文件已在最终目录，视为下载完成 {}", reName);
-                        if (tempDownloadDir != null) {
-                            cleanupTempDownloadDir(savePath, tempDirName, true);
-                        }
-                        clearDuplicateMagnet(infoHash);
-                        NotificationUtil.send(config, ani,
-                                StrFormatter.format("{} 下载完成", item.getReName()),
-                                NotificationStatusEnum.DOWNLOAD_END);
-                        return true;
-                    }
-                    // 兜底文件位于 savePath 子目录（如合集原始标题目录）：继续走下方重命名/移动流程
-                    log.info("本集文件位于 savePath 子目录，继续重命名/移动 {}", reName);
+                if (System.currentTimeMillis() >= fileGraceDeadlineMs) {
+                    return false;
                 }
-            }
-
-            if (videoList.isEmpty()) {
-                return false;
+                log.info("任务已完成但本集文件尚未可见，{}s 后重扫 {}",
+                        POST_SUCCESS_FILE_GRACE_POLL_MS / 1000, reName);
+                api.invalidateFindFilesCache();
+                ThreadUtil.sleep(POST_SUCCESS_FILE_GRACE_POLL_MS);
             }
 
             Boolean rename = config.getRename();
-            Map<String, String> renameMap = new HashMap<>();
-
-            if (videoList.size() == 1) {
-                OpenListFileInfo videoFile = videoList.get(0);
-                String videoReName = isCollection
-                        ? collectionEpisodeReName(videoFile.getName(), finalRenameBase, ani.getSeason())
-                        : finalRenameBase;
-                renameMap.put(videoFile.getName(), videoReName + "." + FileUtil.extName(videoFile.getName()));
-                for (OpenListFileInfo sub : subtitleList) {
-                    String name = sub.getName();
-                    String ext = FileUtil.extName(name);
-                    String newName = videoReName;
-                    String lang = FileUtil.extName(FileUtil.mainName(name));
-                    if (StrUtil.isNotBlank(lang)) {
-                        newName = newName + "." + lang;
-                    }
-                    renameMap.put(name, newName + "." + ext);
-                }
-            } else {
-                for (OpenListFileInfo video : videoList) {
-                    String videoName = video.getName();
-                    String videoBase = FileUtil.mainName(videoName);
-                    String videoExt = FileUtil.extName(videoName);
-                    String videoReName;
-                    if (isCollection) {
-                        videoReName = collectionEpisodeReName(videoName, finalRenameBase, ani.getSeason());
-                    } else {
-                        String episode = extractEpisodeFromFileName(videoName);
-                        if (episode == null) {
-                            // 特典/无集数文件([Character PV 01]、[CM]、[Menu]、SPs 等): 保留原名, 避免与正片重命名冲突
-                            videoReName = videoBase;
-                        } else if (finalRenameBase.contains(".E")) {
-                            videoReName = finalRenameBase.replaceAll("\\.E\\d+(\\.5)?", ".E" + episode);
-                        } else if (finalRenameBase.matches(".*[Ss]\\d+.*E\\d+.*")) {
-                            videoReName = finalRenameBase.replaceAll("E\\d+(\\.5)?", "E" + episode);
-                        } else {
-                            videoReName = finalRenameBase;
-                        }
-                    }
-                    String videoTarget = videoReName + "." + videoExt;
-                    // 同集多版本/多语言(如柯南同集 CHT/CHS/MKV): 目标名冲突时保留原名, 避免互相覆盖
-                    if (!renameMap.containsValue(videoTarget)) {
-                        renameMap.put(videoName, videoTarget);
-                    } else {
-                        log.info("同集多版本, 保留原名: {}", videoName);
-                        renameMap.put(videoName, videoBase + "." + videoExt);
-                    }
-
-                    for (OpenListFileInfo sub : subtitleList) {
-                        String subName = sub.getName();
-                        String subBase = FileUtil.mainName(subName);
-                        String subExt = FileUtil.extName(subName);
-                        String subBaseClean = subBase;
-                        String lang = FileUtil.extName(subBase);
-                        if (StrUtil.isNotBlank(lang) && !FileUtils.isVideoFormat(lang)) {
-                            subBaseClean = FileUtil.mainName(subBase);
-                        }
-                        if (videoBase.equals(subBase) || videoBase.equals(subBaseClean)) {
-                            String subReName = videoReName;
-                            if (StrUtil.isNotBlank(lang) && !FileUtils.isVideoFormat(lang)) {
-                                subReName = subReName + "." + lang;
-                            }
-                            renameMap.put(subName, subReName + "." + subExt);
-                        }
-                    }
-                }
-                // 处理未匹配的字幕文件 - 确保它们也被移动
-                for (OpenListFileInfo sub : subtitleList) {
-                    if (renameMap.containsKey(sub.getName())) continue;
-                    String name = sub.getName();
-                    String ext = FileUtil.extName(name);
-                    // 使用视频文件名作为基础名，而不是统一的 reName
-                    String videoBase = videoList.isEmpty() ? finalRenameBase : FileUtil.mainName(videoList.get(0).getName());
-                    String newName = videoBase;
-                    String lang = FileUtil.extName(FileUtil.mainName(name));
-                    if (StrUtil.isNotBlank(lang)) {
-                        newName = newName + "." + lang;
-                    }
-                    renameMap.put(name, newName + "." + ext);
-                    log.info("未匹配字幕文件: {} -> {}", name, newName + "." + ext);
-                }
-            }
+            Map<String, String> renameMap = buildEpisodeRenameMap(
+                    videoList, subtitleList, finalRenameBase, isCollection, ani.getSeason());
 
             // ② renameMap 目标名冲突检测
             Set<String> targetNames = new HashSet<>();
@@ -1163,42 +1040,64 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 }
             }
 
-            // 移动：从每个子目录分别移动
+            // 移动：从每个子目录分别移动；已在 savePath 顶层的（兜底扫描发现的原始命名文件）仅就地重命名，无需移动
             Set<String> allMovedNames = new HashSet<>();
+            String savePathNorm = trimTrailingSlash(savePath);
             for (Map.Entry<String, List<String>> entry : pathToNames.entrySet()) {
                 String dirPath = entry.getKey();
                 List<String> names = entry.getValue();
+                if (Objects.equals(trimTrailingSlash(dirPath), savePathNorm)) {
+                    allMovedNames.addAll(names);
+                    continue;
+                }
                 fsMove(dirPath, savePath, names);
                 allMovedNames.addAll(names);
             }
 
             // 验证必须落在最终目录顶层；findFiles(savePath) 会递归进临时目录，
             // 若仍用它判定，未真正移出的文件也会被当成「已移动」，随后清理失败留下空壳。
-            Set<String> topLevelNames = fsList(savePath, true).stream()
-                    .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
-                    .map(OpenListFileInfo::getName)
-                    .filter(Objects::nonNull)
-                    .collect(Collectors.toSet());
-            List<String> missingNames = allMovedNames.stream()
-                    .filter(name -> !topLevelNames.contains(name))
-                    .toList();
-
+            // 990009 异步移动/并发冲突下 fsMove 可能假成功：校验失败先重试移动，仍失败则判失败，
+            // 禁止「warn 后照常发完成通知」——那是「已存在但文件不在顶层」的直接来源。
+            List<String> missingNames = verifyTopLevelNames(savePath, allMovedNames);
+            int verifyAttempt = 0;
+            while (!missingNames.isEmpty() && verifyAttempt < MOVE_VERIFY_MAX_ATTEMPTS) {
+                verifyAttempt++;
+                log.warn("第{}次校验：文件未出现在最终目录顶层，重试移动 {}", verifyAttempt, missingNames);
+                ThreadUtil.sleep(MOVE_VERIFY_RETRY_DELAY_MS);
+                api.invalidateFindFilesCache();
+                for (Map.Entry<String, List<String>> entry : pathToNames.entrySet()) {
+                    String dirPath = entry.getKey();
+                    if (Objects.equals(trimTrailingSlash(dirPath), savePathNorm)) {
+                        continue;
+                    }
+                    List<String> retryNames = entry.getValue().stream()
+                            .filter(missingNames::contains)
+                            .toList();
+                    if (!retryNames.isEmpty()) {
+                        fsMove(dirPath, savePath, retryNames);
+                    }
+                }
+                missingNames = verifyTopLevelNames(savePath, allMovedNames);
+            }
             if (!missingNames.isEmpty()) {
-                log.warn("部分文件未出现在最终目录顶层，保留临时目录: {}", missingNames);
-            } else {
-                if (tempDownloadDir != null) {
-                    // 需要移动的视频/字幕已确认在最终目录顶层 → 强制删除临时目录
-                    cleanupTempDownloadDir(savePath, tempDirName, true);
-                }
-                // 云下载兜底：文件已全部移动归位，清理源目录残留的空壳（115 任务目录）
-                if (!cloudSourceDirs.isEmpty()) {
-                    cleanupCloudDownloadEmptyDirs(cloudSourceDirs);
-                }
+                log.error("归位失败：文件未出现在最终目录顶层，判定本次下载失败（不发完成通知）: {}", missingNames);
+                return false;
+            }
+
+            if (tempDownloadDir != null) {
+                // 需要移动的视频/字幕已确认在最终目录顶层 → 强制删除临时目录
+                cleanupTempDownloadDir(savePath, tempDirName, true);
+            }
+            // 云下载兜底：文件已全部移动归位，清理源目录残留的空壳（115 任务目录）
+            if (!cloudSourceDirs.isEmpty()) {
+                cleanupCloudDownloadEmptyDirs(cloudSourceDirs);
             }
 
             // 缺集校验：扫描整季目录，但日志只报告本次声明范围的命中情况。
             if (item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty()) {
                 List<OpenListFileInfo> actualVideos = findFiles(savePath).stream()
+                        // 115 会按文件名建同名目录（可能带 .mkv），必须排除目录
+                        .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
                         .filter(f -> FileUtils.isVideoFormat(f.getName()))
                         .toList();
                 EpisodeValidation validation = validateCollectionEpisodes(item.getEpisodeRange(), actualVideos);
@@ -1224,6 +1123,239 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         } finally {
             releaseOfflinePlaceholder(ctx.infoHash, ctx.tid, ctx.claimedInFlight, delete, ctx.newlySubmittedTid);
         }
+    }
+
+    /**
+     * 单次本集文件扫描结果。
+     * alreadyFinal=true 表示本集文件已全部位于 savePath 顶层，可直接判完成（调用方负责通知/清理）。
+     */
+    private record EpisodeScanResult(List<OpenListFileInfo> videoList,
+                                     List<OpenListFileInfo> subtitleList,
+                                     List<OpenListFileInfo> openListFileInfos,
+                                     Set<String> cloudSourceDirs,
+                                     boolean alreadyFinal) {
+        static EpisodeScanResult empty(Set<String> cloudSourceDirs) {
+            return new EpisodeScanResult(List.of(), List.of(), List.of(), cloudSourceDirs, false);
+        }
+    }
+
+    /**
+     * 扫描一次本集文件：临时目录 → savePath（模板名）→ savePath 递归（按集数）→ 云下载目录（按集数）。
+     * 只读不移动；alreadyFinal 判定要求视频全部位于 savePath 顶层（递归子目录命中不算，继续走重命名/移动）。
+     */
+    private EpisodeScanResult scanEpisodeFilesOnce(String path, String savePath, String tempDownloadDir,
+                                                   String finalRenameBase, List<Double> episodeRange) {
+        List<OpenListFileInfo> openListFileInfos = findFiles(path);
+        Set<String> cloudSourceDirs = new HashSet<>();
+        List<OpenListFileInfo> videoList = openListFileInfos.stream()
+                // 防御：findFiles 缓存异常/实现差异下目录可能混入，目录名带扩展名会误判为视频
+                .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
+                .filter(f -> FileUtils.isVideoFormat(f.getName()))
+                .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
+                .toList();
+        List<OpenListFileInfo> subtitleList = openListFileInfos.stream()
+                .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
+                .filter(f -> FileUtils.isSubtitleFormat(f.getName()))
+                .toList();
+
+        if (videoList.isEmpty()) {
+            // 可能已在 savePath 落盘（历史完成/被其它路径移动）
+            // 必须排除临时目录内的文件，否则「还在临时目录」会被误判为已完成并跳过移动
+            List<OpenListFileInfo> saveFiles = findEpisodeFiles(savePath, finalRenameBase).stream()
+                    .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
+                    .filter(f -> !isUnderPath(f, tempDownloadDir != null ? tempDownloadDir : null))
+                    .toList();
+            videoList = saveFiles.stream()
+                    .filter(f -> FileUtils.isVideoFormat(f.getName()))
+                    .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
+                    .toList();
+            subtitleList = saveFiles.stream()
+                    .filter(f -> FileUtils.isSubtitleFormat(f.getName()))
+                    .toList();
+            openListFileInfos = saveFiles;
+            if (videoList.isEmpty()) {
+                // 与超时终检 inspectTimeoutFiles 的兜底一致：savePath 递归下可能已存在本集视频
+                // 但未按模板命名（合集原始标题目录/非模板命名），按集数匹配而非模板名，
+                // 避免「终检通过 → 后处理判失败 → 清标记 → 下轮重提交」死循环
+                List<OpenListFileInfo> fallback = findFiles(savePath).stream()
+                        .filter(f -> !isUnderPath(f, tempDownloadDir != null ? tempDownloadDir : null))
+                        .toList();
+                List<OpenListFileInfo> fallbackVideos = expectedEpisodeVideos(fallback, episodeRange);
+                if (!fallbackVideos.isEmpty()) {
+                    log.info("savePath 兜底扫描发现本集文件，进入后处理 videos={}", fallbackVideos.size());
+                    videoList = fallbackVideos.stream()
+                            .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
+                            .toList();
+                    subtitleList = fallback.stream()
+                            .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
+                            .filter(f -> FileUtils.isSubtitleFormat(f.getName()))
+                            .toList();
+                    openListFileInfos = fallback;
+                }
+            }
+            if (videoList.isEmpty()) {
+                // 115 离线完成后的文件可能落在根目录「云下载」而非目标路径：
+                // 兜底扫描（原始标题命名，按集数匹配），走重命名/移动流程自动归位到 savePath
+                List<OpenListFileInfo> cloudFiles = findCloudDownloadFiles();
+                List<OpenListFileInfo> cloudVideos = expectedEpisodeVideos(cloudFiles, episodeRange);
+                if (!cloudVideos.isEmpty()) {
+                    log.info("115 云下载目录兜底扫描发现本集文件，进入后处理 videos={}", cloudVideos.size());
+                    videoList = cloudVideos.stream()
+                            .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
+                            .toList();
+                    subtitleList = cloudFiles.stream()
+                            .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
+                            .filter(f -> FileUtils.isSubtitleFormat(f.getName()))
+                            .toList();
+                    openListFileInfos = cloudFiles;
+                    // 记录源目录（云下载下的原始目录/根），移动成功后用于清理空壳
+                    videoList.stream()
+                            .map(OpenListFileInfo::getPath)
+                            .filter(Objects::nonNull)
+                            .forEach(cloudSourceDirs::add);
+                    subtitleList.stream()
+                            .map(OpenListFileInfo::getPath)
+                            .filter(Objects::nonNull)
+                            .forEach(cloudSourceDirs::add);
+                }
+            }
+            if (!videoList.isEmpty()) {
+                // 快速路径收紧：仅当视频「全部」位于 savePath 顶层才视为已归位。
+                // 此前用 !saveFiles.isEmpty() 短路，递归扫描会把其它子目录中的本集文件误判为已归位。
+                boolean allAtTopLevel = videoList.stream()
+                        .allMatch(f -> Objects.equals(trimTrailingSlash(f.getPath()), trimTrailingSlash(savePath)));
+                if (allAtTopLevel) {
+                    return new EpisodeScanResult(videoList, subtitleList, openListFileInfos,
+                            cloudSourceDirs, true);
+                }
+                // 兜底文件位于 savePath 子目录（如合集原始标题目录）或顶层非模板命名：继续走重命名/移动
+                log.info("本集文件未全部位于最终目录顶层，继续重命名/移动");
+            }
+        }
+        return new EpisodeScanResult(videoList, subtitleList, openListFileInfos, cloudSourceDirs, false);
+    }
+
+    /**
+     * 构建视频/字幕 → 目标名 的重命名映射（离线完成后归位用）。
+     * 单视频：以模板基名（合集按文件集数替换）命名；字幕继承视频名+语言后缀。
+     * 多视频：按文件名提取集数替换模板集数；字幕优先按主名配对，其次按集数配对；
+     * 仍未匹配的字幕以「首个视频的重命名后主名」为基名（而非原始文件名），
+     * 避免视频已改模板名、字幕仍是原始名导致播放器配对失败。
+     */
+    private Map<String, String> buildEpisodeRenameMap(List<OpenListFileInfo> videoList,
+                                                      List<OpenListFileInfo> subtitleList,
+                                                      String finalRenameBase,
+                                                      boolean isCollection,
+                                                      Integer season) {
+        Map<String, String> renameMap = new HashMap<>();
+        if (videoList.isEmpty()) {
+            return renameMap;
+        }
+        if (videoList.size() == 1) {
+            OpenListFileInfo videoFile = videoList.get(0);
+            String videoReName = isCollection
+                    ? collectionEpisodeReName(videoFile.getName(), finalRenameBase, season)
+                    : finalRenameBase;
+            renameMap.put(videoFile.getName(), videoReName + "." + FileUtil.extName(videoFile.getName()));
+            for (OpenListFileInfo sub : subtitleList) {
+                String name = sub.getName();
+                String ext = FileUtil.extName(name);
+                String newName = videoReName;
+                String lang = FileUtil.extName(FileUtil.mainName(name));
+                if (StrUtil.isNotBlank(lang)) {
+                    newName = newName + "." + lang;
+                }
+                renameMap.put(name, newName + "." + ext);
+            }
+            return renameMap;
+        }
+        for (OpenListFileInfo video : videoList) {
+            String videoName = video.getName();
+            String videoBase = FileUtil.mainName(videoName);
+            String videoExt = FileUtil.extName(videoName);
+            String videoReName;
+            if (isCollection) {
+                videoReName = collectionEpisodeReName(videoName, finalRenameBase, season);
+            } else {
+                String episode = extractEpisodeFromFileName(videoName);
+                if (episode == null) {
+                    // 特典/无集数文件([Character PV 01]、[CM]、[Menu]、SPs 等): 保留原名, 避免与正片重命名冲突
+                    videoReName = videoBase;
+                } else if (finalRenameBase.contains(".E")) {
+                    videoReName = finalRenameBase.replaceAll("\\.E\\d+(\\.5)?", ".E" + episode);
+                } else if (finalRenameBase.matches(".*[Ss]\\d+.*E\\d+.*")) {
+                    videoReName = finalRenameBase.replaceAll("E\\d+(\\.5)?", "E" + episode);
+                } else {
+                    videoReName = finalRenameBase;
+                }
+            }
+            String videoTarget = videoReName + "." + videoExt;
+            // 同集多版本/多语言(如柯南同集 CHT/CHS/MKV): 目标名冲突时保留原名, 避免互相覆盖
+            if (!renameMap.containsValue(videoTarget)) {
+                renameMap.put(videoName, videoTarget);
+            } else {
+                log.info("同集多版本, 保留原名: {}", videoName);
+                renameMap.put(videoName, videoBase + "." + videoExt);
+            }
+
+            String videoEpisode = extractEpisodeFromFileName(videoName);
+            for (OpenListFileInfo sub : subtitleList) {
+                String subName = sub.getName();
+                String subBase = FileUtil.mainName(subName);
+                String subExt = FileUtil.extName(subName);
+                String subBaseClean = subBase;
+                String lang = FileUtil.extName(subBase);
+                if (StrUtil.isNotBlank(lang) && !FileUtils.isVideoFormat(lang)) {
+                    subBaseClean = FileUtil.mainName(subBase);
+                }
+                boolean matched = videoBase.equals(subBase) || videoBase.equals(subBaseClean);
+                // 主名不一致时按集数配对（如 "Show - 03.ass" 对 "Show - 03.mkv"，或语言后缀导致主名错位）
+                if (!matched && videoEpisode != null
+                        && videoEpisode.equals(extractEpisodeFromFileName(subName))) {
+                    matched = true;
+                }
+                if (matched) {
+                    String subReName = videoReName;
+                    if (StrUtil.isNotBlank(lang) && !FileUtils.isVideoFormat(lang)) {
+                        subReName = subReName + "." + lang;
+                    }
+                    renameMap.put(subName, subReName + "." + subExt);
+                }
+            }
+        }
+        // 处理未匹配的字幕文件 - 确保它们也被移动。
+        // 基名用「首个视频重命名后的主名」而非原始视频主名，保证与视频最终名一致。
+        for (OpenListFileInfo sub : subtitleList) {
+            if (renameMap.containsKey(sub.getName())) continue;
+            String name = sub.getName();
+            String ext = FileUtil.extName(name);
+            String firstVideoTarget = renameMap.get(videoList.get(0).getName());
+            String videoBase = StrUtil.isNotBlank(firstVideoTarget)
+                    ? FileUtil.mainName(firstVideoTarget)
+                    : FileUtil.mainName(videoList.get(0).getName());
+            String newName = videoBase;
+            String lang = FileUtil.extName(FileUtil.mainName(name));
+            if (StrUtil.isNotBlank(lang)) {
+                newName = newName + "." + lang;
+            }
+            renameMap.put(name, newName + "." + ext);
+            log.info("未匹配字幕文件: {} -> {}", name, newName + "." + ext);
+        }
+        return renameMap;
+    }
+
+    /**
+     * 校验文件是否出现在 savePath 顶层，返回缺失名单
+     */
+    private List<String> verifyTopLevelNames(String savePath, Set<String> expectedNames) {
+        Set<String> topLevelNames = fsList(savePath, true).stream()
+                .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
+                .map(OpenListFileInfo::getName)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        return expectedNames.stream()
+                .filter(name -> !topLevelNames.contains(name))
+                .toList();
     }
 
     /**
@@ -1350,37 +1482,223 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     }
 
     /**
-     * 强制下载用: 删除网盘目录下与 reName 匹配的已有文件/目录(主名相等或包含)。
+     * 强制下载用: 删除网盘目录下与 reName 匹配的已有文件。
+     * 递归列举（子目录/临时目录中的原始命名文件也要删，否则强下重提交被 115 去重挡住，
+     * 只能等满离线超时才被终检救回）；仅删文件不删目录（目录交给临时目录残留清理），
+     * 避免把与 reName 同名的目录（115 按文件名建目录）误当文件整树删除。
      */
     public void forceDeleteFiles(String dirPath, String reName) {
         if (StrUtil.isBlank(dirPath) || StrUtil.isBlank(reName)) {
             return;
         }
         String target = reName.trim().toUpperCase();
-        List<String> toRemove = new ArrayList<>();
+        String episodeKey = ReUtil.contains(StringEnum.SEASON_REG, reName)
+                ? ReUtil.get(StringEnum.SEASON_REG, reName, 0).toLowerCase(Locale.ROOT)
+                : null;
+        Map<String, List<String>> toRemoveByDir = new LinkedHashMap<>();
         try {
-            for (OpenListFileInfo entry : fsList(dirPath, true)) {
+            for (OpenListFileInfo entry : findFiles(dirPath)) {
+                if (Boolean.TRUE.equals(entry.getIsDir())) {
+                    continue;
+                }
                 String name = entry.getName();
                 if (StrUtil.isBlank(name)) {
                     continue;
                 }
                 String main = FileUtil.mainName(new File(name)).trim().toUpperCase();
-                if (main.equals(target) || main.contains(target)) {
-                    toRemove.add(name);
+                boolean matched = main.equals(target) || main.contains(target);
+                // 原始命名文件（如 "[字幕组] 标题 - 01 [1080p].mkv"）按 SxxExx 集数匹配
+                if (!matched && episodeKey != null && FileUtils.isVideoFormat(name)
+                        && ReUtil.contains(StringEnum.SEASON_REG, name)
+                        && episodeKey.equalsIgnoreCase(ReUtil.get(StringEnum.SEASON_REG, name, 0))) {
+                    matched = true;
+                }
+                if (matched) {
+                    String dir = StrUtil.blankToDefault(entry.getPath(), dirPath);
+                    toRemoveByDir.computeIfAbsent(dir, k -> new ArrayList<>()).add(name);
                 }
             }
         } catch (Exception e) {
             log.warn("强制下载: 列出网盘目录失败 {}: {}", dirPath, ExceptionUtils.getMessage(e));
             return;
         }
-        if (!toRemove.isEmpty()) {
+        for (Map.Entry<String, List<String>> entry : toRemoveByDir.entrySet()) {
             try {
-                fsRemove(dirPath, toRemove);
-                log.info("强制下载: 删除网盘已有文件 {}/{}", dirPath, toRemove);
+                fsRemove(entry.getKey(), entry.getValue());
+                log.info("强制下载: 删除网盘已有文件 {}/{}", entry.getKey(), entry.getValue());
             } catch (Exception e) {
-                log.warn("强制下载: 删除网盘文件失败 {}/{}: {}", dirPath, toRemove, ExceptionUtils.getMessage(e));
+                log.warn("强制下载: 删除网盘文件失败 {}/{}: {}",
+                        entry.getKey(), entry.getValue(), ExceptionUtils.getMessage(e));
             }
         }
+    }
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * 安全约束：仅从「临时目录样」的一级子目录（looksLikeTempEpisodeDir）或云下载残留目录归位，
+     * 不碰用户自组织的普通目录；顶层已有本集视频时直接返回 ALREADY_AT_TOP 不重复动作。
+     */
+    @Override
+    public RelocateResult relocateEpisodeFiles(Ani ani, Item item, String downloadPath) {
+        if (config == null || ani == null || item == null || StrUtil.isBlank(downloadPath)) {
+            return RelocateResult.NOT_FOUND;
+        }
+        String savePath = normalizeOpenListPath(downloadPath);
+        String finalRenameBase = item.getReName();
+        if (StrUtil.isBlank(finalRenameBase)) {
+            return RelocateResult.NOT_FOUND;
+        }
+        List<Double> episodeRange = item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty()
+                ? item.getEpisodeRange()
+                : (item.getEpisode() != null ? List.of(item.getEpisode()) : List.of());
+        try {
+            List<OpenListFileInfo> files = findFiles(savePath).stream()
+                    .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
+                    .toList();
+            String saveNorm = trimTrailingSlash(savePath);
+            List<OpenListFileInfo> topVideos = files.stream()
+                    .filter(f -> FileUtils.isVideoFormat(f.getName()))
+                    .filter(f -> Objects.equals(trimTrailingSlash(f.getPath()), saveNorm))
+                    .toList();
+            if (!expectedEpisodeVideos(topVideos, episodeRange).isEmpty()) {
+                return RelocateResult.ALREADY_AT_TOP;
+            }
+            // 云下载残留目录兜底（115 完成后文件可能落在根「云下载」而非目标路径）
+            List<OpenListFileInfo> source = new ArrayList<>(files.stream()
+                    .filter(f -> !Objects.equals(trimTrailingSlash(f.getPath()), saveNorm))
+                    .toList());
+            List<OpenListFileInfo> cloudFiles = findCloudDownloadFiles();
+            Set<String> cloudSourceDirs = new HashSet<>();
+            List<OpenListFileInfo> videoList = expectedEpisodeVideos(source, episodeRange).stream()
+                    .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
+                    .toList();
+            if (videoList.isEmpty()) {
+                videoList = expectedEpisodeVideos(cloudFiles, episodeRange).stream()
+                        .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
+                        .toList();
+                if (videoList.isEmpty()) {
+                    return RelocateResult.NOT_FOUND;
+                }
+                source = cloudFiles.stream().filter(f -> !Boolean.TRUE.equals(f.getIsDir())).toList();
+                videoList.stream().map(OpenListFileInfo::getPath)
+                        .filter(Objects::nonNull).forEach(cloudSourceDirs::add);
+                log.info("归位对账: 云下载目录发现本集文件 {}", item.getReName());
+            } else {
+                // 安全过滤：仅从「临时目录样」的一级子目录归位，避免搬动用户自组织目录
+                String seasonKey = ani.getSeason() != null
+                        ? String.format(Locale.ROOT, "S%02d", ani.getSeason()) : null;
+                videoList = videoList.stream()
+                        .filter(f -> {
+                            String parent = firstPathSegmentUnder(f, savePath);
+                            return StrUtil.isBlank(parent)
+                                    || TempDirResidualPolicy.looksLikeTempEpisodeDir(parent, seasonKey);
+                        })
+                        .toList();
+                if (videoList.isEmpty()) {
+                    return RelocateResult.NOT_FOUND;
+                }
+                log.info("归位对账: 子目录发现本集文件 {} videos={}", item.getReName(), videoList.size());
+            }
+
+            // 字幕：与视频同目录的字幕
+            Set<String> videoDirs = videoList.stream()
+                    .map(OpenListFileInfo::getPath)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toSet());
+            List<OpenListFileInfo> subtitleList = source.stream()
+                    .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
+                    .filter(f -> FileUtils.isSubtitleFormat(f.getName()))
+                    .filter(f -> f.getPath() == null || videoDirs.contains(f.getPath())
+                            || cloudSourceDirs.contains(f.getPath()))
+                    .toList();
+
+            boolean isCollection = item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty();
+            Map<String, String> renameMap = buildEpisodeRenameMap(
+                    videoList, subtitleList, finalRenameBase, isCollection, ani.getSeason());
+
+            // 按源目录分组：重命名 + 移动到顶层
+            Map<String, List<String>> pathToNames = new LinkedHashMap<>();
+            for (Map.Entry<String, String> entry : renameMap.entrySet()) {
+                String srcName = entry.getKey();
+                String newName = Boolean.TRUE.equals(config.getRename()) ? entry.getValue() : srcName;
+                String dirPath = files.stream()
+                        .filter(f -> srcName.equals(f.getName()))
+                        .findFirst()
+                        .map(OpenListFileInfo::getPath)
+                        .orElse(null);
+                if (StrUtil.isBlank(dirPath)) {
+                    dirPath = source.stream()
+                            .filter(f -> srcName.equals(f.getName()))
+                            .findFirst()
+                            .map(OpenListFileInfo::getPath)
+                            .orElse(null);
+                }
+                if (StrUtil.isBlank(dirPath)) {
+                    continue;
+                }
+                pathToNames.computeIfAbsent(dirPath, k -> new ArrayList<>()).add(newName);
+            }
+            if (pathToNames.isEmpty()) {
+                return RelocateResult.NOT_FOUND;
+            }
+            for (Map.Entry<String, List<String>> entry : pathToNames.entrySet()) {
+                String dirPath = entry.getKey();
+                List<String> names = entry.getValue();
+                if (Boolean.TRUE.equals(config.getRename()) && !names.isEmpty()) {
+                    List<Map<String, String>> renameObjects = new ArrayList<>();
+                    for (Map.Entry<String, String> re : renameMap.entrySet()) {
+                        if (names.contains(re.getValue())) {
+                            renameObjects.add(Map.of("src_name", re.getKey(), "new_name", re.getValue()));
+                        }
+                    }
+                    if (!renameObjects.isEmpty()) {
+                        fsBatchRename(renameObjects, dirPath);
+                    }
+                }
+                if (!Objects.equals(trimTrailingSlash(dirPath), trimTrailingSlash(savePath))) {
+                    fsMove(dirPath, savePath, names);
+                }
+            }
+
+            Set<String> allNames = pathToNames.values().stream()
+                    .flatMap(List::stream).collect(Collectors.toSet());
+            List<String> missing = verifyTopLevelNames(savePath, allNames);
+            if (!missing.isEmpty()) {
+                log.warn("归位对账: 部分文件未出现在顶层 {}", missing);
+                return RelocateResult.NOT_FOUND;
+            }
+            if (!cloudSourceDirs.isEmpty()) {
+                cleanupCloudDownloadEmptyDirs(cloudSourceDirs);
+            }
+            log.info("归位对账完成: {} 已移动到顶层", item.getReName());
+            return RelocateResult.RELOCATED;
+        } catch (Exception e) {
+            log.warn("归位对账失败 {}: {}", item.getReName(), ExceptionUtils.getMessage(e));
+            return RelocateResult.NOT_FOUND;
+        }
+    }
+
+    /**
+     * 文件相对 base 的一级子目录名（文件直接在 base 下时返回 null/空）
+     */
+    private static String firstPathSegmentUnder(OpenListFileInfo file, String base) {
+        if (file == null || StrUtil.isBlank(base)) {
+            return null;
+        }
+        String p = StrUtil.blankToDefault(file.getPath(), "").replace('\\', '/');
+        String b = trimTrailingSlash(base);
+        if (StrUtil.isBlank(p) || p.equalsIgnoreCase(b)) {
+            return null;
+        }
+        String lowerP = p.toLowerCase(Locale.ROOT);
+        String lowerB = b.toLowerCase(Locale.ROOT);
+        if (!lowerP.startsWith(lowerB + "/")) {
+            return null;
+        }
+        String rel = p.substring(b.length() + 1);
+        int idx = rel.indexOf('/');
+        return idx < 0 ? rel : rel.substring(0, idx);
     }
 
     /**
@@ -2563,6 +2881,10 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             throw new IllegalStateException("OpenList 未登录");
         }
         Set<String> activeTempDirs = new HashSet<>();
+        // 多槽保护集合：并行离线时所有在途任务的临时目录都受保护（单槽快照只覆盖最后一个任务）
+        for (Set<String> dirs : ACTIVE_TEMP_DIRS_BY_HASH.values()) {
+            activeTempDirs.addAll(dirs);
+        }
         OfflineWaitSnapshot wait = offlineWaitSnapshot.get();
         if (wait != null) {
             if (StrUtil.isNotBlank(wait.getTempDirName())) {
@@ -2693,6 +3015,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 boolean hasProtectedMedia = false;
                 boolean junkOnly = true;
                 boolean empty = true;
+                Set<String> innerEpisodeKeys = new HashSet<>();
                 try {
                     // 浅层 list：残留分类只需一级信号，避免递归 findFiles 打爆 API
                     List<OpenListFileInfo> inside = fsList(tempPath, false);
@@ -2713,6 +3036,13 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                         } else if (!isJunkTempFile(f)) {
                             junkOnly = false;
                         }
+                        if (FileUtils.isVideoFormat(f.getName())
+                                && ReUtil.contains(StringEnum.SEASON_REG, f.getName())) {
+                            String ek = ReUtil.get(StringEnum.SEASON_REG, f.getName(), 0);
+                            if (StrUtil.isNotBlank(ek)) {
+                                innerEpisodeKeys.add(ek.toLowerCase(Locale.ROOT));
+                            }
+                        }
                     }
                 } catch (Exception e) {
                     junkOnly = false;
@@ -2728,8 +3058,11 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                         hasFinalSibling = true;
                     }
                 } else if (!topVideoNames.isEmpty()) {
-                    hasFinalSibling = topVideoNames.stream()
-                            .anyMatch(n -> !n.equalsIgnoreCase(dirName) && FileUtils.isVideoFormat(n));
+                    // 收紧：顶层必须存在「同集」最终视频才算有成片兄弟，才能 FORCE_CLEAN。
+                    // 此前顶层任意视频即判定成立，合集临时目录（目录名不含 SxxExx）内
+                    // 未完成媒体会被一键清理整树误删。
+                    hasFinalSibling = !innerEpisodeKeys.isEmpty()
+                            && topVideoEpisodeKeys.stream().anyMatch(innerEpisodeKeys::contains);
                 }
                 TempDirResidualPolicy.Decision decision = TempDirResidualPolicy.decide(
                         dirName, hasFinalSibling, hasProtectedMedia, junkOnly, activeTempDirs);
@@ -2973,12 +3306,24 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 .setState(state)
                 .setDeadlineMs(deadlineMs)
                 .setUpdatedAt(System.currentTimeMillis()));
+        // 多槽保护：并行离线时每个任务占用的临时目录都要登记，清理判定据此放行
+        Set<String> dirs = ACTIVE_TEMP_DIRS_BY_HASH.computeIfAbsent(hash, k -> ConcurrentHashMap.newKeySet());
+        if (StrUtil.isNotBlank(title)) {
+            dirs.add(title);
+        }
+        String dir = StrUtil.blankToDefault(tempDirName, title);
+        if (StrUtil.isNotBlank(dir)) {
+            dirs.add(dir);
+        }
     }
 
     private static void clearOfflineWait(String hash) {
         OfflineWaitSnapshot snap = offlineWaitSnapshot.get();
         if (snap != null && (hash == null || hash.equalsIgnoreCase(snap.getHash()))) {
             offlineWaitSnapshot.compareAndSet(snap, null);
+        }
+        if (StrUtil.isNotBlank(hash)) {
+            ACTIVE_TEMP_DIRS_BY_HASH.remove(hash);
         }
     }
 
@@ -3169,7 +3514,9 @@ public class OpenList implements BaseDownload, OfflineDownloader {
      * 快速判断目录下是否已有视频（走 findFiles 缓存）
      */
     private boolean hasVideoFile(String path) {
-        return findFiles(path).stream().anyMatch(f -> FileUtils.isVideoFormat(f.getName()));
+        return findFiles(path).stream()
+                .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
+                .anyMatch(f -> FileUtils.isVideoFormat(f.getName()));
     }
 
     /**

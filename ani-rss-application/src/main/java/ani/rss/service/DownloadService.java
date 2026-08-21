@@ -165,6 +165,16 @@ public class DownloadService {
                     boolean recordValid;
                     if (isOpenListTool() || !Boolean.TRUE.equals(config.getRename())) {
                         recordValid = true;
+                        // 周期对账（仅离线工具）：记录存在但文件滞留子目录/云下载目录时自动归位到顶层，
+                        // 修复「显示已存在但文件不在预期位置」且无任何自动纠正机制的问题。
+                        // 尽力而为：失败不影响记录信任，仅等待下一轮重试。
+                        if (isOpenListTool() && TorrentUtil.DOWNLOAD instanceof OfflineDownloader offline) {
+                            try {
+                                offline.relocateEpisodeFiles(ani, item, savePath);
+                            } catch (Exception e) {
+                                log.debug("离线归位对账失败 {}: {}", reName, ExceptionUtils.getMessage(e));
+                            }
+                        }
                     } else {
                         recordValid = itemDownloaded(ani, item, true, localEpisodeIndex);
                     }
@@ -760,6 +770,21 @@ public class DownloadService {
             // 2. 删除已有文件: 离线网盘用 API 删文件, 本地直接删文件
             String downloadPath = getDownloadPath(ani);
             if (TorrentUtil.DOWNLOAD instanceof OfflineDownloader offline) {
+                // 预检归位：子目录/云下载目录已有本集文件时直接归位并恢复记录，
+                // 免去「重提交被 115 去重挡住 → 等满离线超时 → 终检救回」的漫长自愈路径。
+                // 注意：顶层已有文件（用户确实想重新下载）不在此短路，走正常强下流程。
+                try {
+                    if (offline.relocateEpisodeFiles(ani, item, downloadPath)
+                            == OfflineDownloader.RelocateResult.RELOCATED) {
+                        TorrentUtil.saveTorrent(ani, item);
+                        NotificationUtil.send(ConfigUtil.CONFIG, ani,
+                                StrFormatter.format("{} 已归位（发现已有文件，无需重新下载）", item.getReName()),
+                                NotificationStatusEnum.DOWNLOAD_END);
+                        return "已归位（发现已有文件）：" + item.getReName();
+                    }
+                } catch (Exception e) {
+                    log.debug("强制下载预检归位失败 {}: {}", item.getReName(), ExceptionUtils.getMessage(e));
+                }
                 offline.forceDeleteFiles(downloadPath, item.getReName());
             } else {
                 deleteLocalFilesByReName(downloadPath, item.getReName());
