@@ -228,7 +228,7 @@ public class FileController extends BaseController {
 
         try {
             if (hasRange) {
-                long length = end - start;
+                long length = end - start + 1;
                 response.setStatus(206);
                 @Cleanup
                 OutputStream out = response.getOutputStream();
