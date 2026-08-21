@@ -745,7 +745,7 @@ public class ItemsUtil {
                 .setInfoHash(item.getInfoHash())
                 .setFormatSize(item.getFormatSize())
                 .setLength(item.getLength())
-                .setLocal(item.getLocal())
+                .setHasDownloaded(item.getHasDownloaded())
                 .setMaster(item.getMaster())
                 .setSubgroup(item.getSubgroup())
                 .setPubDate(item.getPubDate())
@@ -854,7 +854,7 @@ public class ItemsUtil {
                 parent.setInfoHash(item.getInfoHash());
                 parent.setFormatSize(item.getFormatSize());
                 parent.setLength(item.getLength());
-                parent.setLocal(item.getLocal());
+                parent.setHasDownloaded(item.getHasDownloaded());
                 parent.setMaster(item.getMaster());
                 parent.setSubgroup(item.getSubgroup());
                 parent.setPubDate(item.getPubDate());

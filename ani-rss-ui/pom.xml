@@ -94,7 +94,7 @@
                         </goals>
                         <configuration>
                             <outputDirectory>
-                                ${project.build.outputDirectory}/META-INF/dist
+                                ${project.build.outputDirectory}/META-INF/resources
                             </outputDirectory>
                             <resources>
                                 <resource>

@@ -62,7 +62,7 @@ public class Item implements Serializable {
      * 本地已存在
      */
     @Schema(description = "本地已存在")
-    private Boolean local;
+    private Boolean hasDownloaded;
 
     /**
      * 主 rss

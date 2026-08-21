@@ -18,7 +18,7 @@
         <popconfirm @confirm="delTorrent" :title="`删除${selectViews.filter(it => it['hasDownloaded']).length}个种子缓存?`">
           <template #reference>
             <el-button icon="Remove" bg text type="danger"
-                       :disabled="!selectViews.filter(it => it.local).length">
+                       :disabled="!selectViews.filter(it => it['hasDownloaded']).length">
               删除种子
             </el-button>
           </template>
@@ -49,7 +49,7 @@
           </el-table-column>
           <el-table-column label="本地存在" min-width="100">
             <template #default="it">
-              <el-tag v-if="!it.row.local" type="info">否</el-tag>
+              <el-tag v-if="!it.row['hasDownloaded']" type="info">否</el-tag>
               <el-tag v-else>是</el-tag>
             </template>
           </el-table-column>
