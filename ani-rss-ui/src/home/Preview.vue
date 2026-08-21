@@ -163,11 +163,11 @@ const selectItems = ref([
     fun: () => true
   },
   {
-    label: '本地已存在',
+    label: '已下载',
     fun: it => it['hasDownloaded']
   },
   {
-    label: '本地不存在',
+    label: '未下载',
     fun: it => !it['hasDownloaded']
   }
 ])
