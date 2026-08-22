@@ -224,9 +224,19 @@ public interface BaseDownload {
                 java.util.regex.Pattern.CASE_INSENSITIVE).matcher(mainName);
         if (m.find()) return filterNonEpisodeNumber(m.group(1));
         // 裸数字（边界约束）: "标题 05.mkv"、"01.zh.ass"、柯南 "1049" 等长番。
-        // 排除: 紧邻字母(H264/x265/SP01)、后跟 P/p/X/x(分辨率)、日期/年份由 filterNonEpisodeNumber 兜底
+        // 排除: 紧邻字母(H264/x265/SP01)、后跟 P/p/X/x(分辨率)、日期/年份由 filterNonEpisodeNumber 兜底。
+        // 特典词 + 空格 + 数字（"Character PV 01"、"Menu 01"、"Teaser 2" 等）不是集数：
+        // VCB 整季包特典编号会被误判成集数并与真集数冲突（PV 01 → 覆盖正片第 1 集）
         m = java.util.regex.Pattern.compile("(?<![A-Za-z0-9])(?<!Season\\s)(\\d{1,4}(?:\\.5)?)(?![\\dPpXx])").matcher(mainName);
-        if (m.find()) return filterNonEpisodeNumber(m.group(1));
+        while (m.find()) {
+            // 命中的裸数字前面若紧邻特典词（允许空格/下划线分隔），视为特典编号，继续找下一个候选
+            String before = mainName.substring(Math.max(0, m.start() - 20), m.start())
+                    .toUpperCase(java.util.Locale.ROOT);
+            if (before.matches(".*(?:PV|CM|MENU|NCOP|NCED|TEASER|ANNOUNCEMENT|SPECIAL|SP|OVA|OAD|OP|ED)[\\s_]+$")) {
+                continue;
+            }
+            return filterNonEpisodeNumber(m.group(1));
+        }
         return null;
     }
 
