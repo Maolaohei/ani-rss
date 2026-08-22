@@ -882,9 +882,9 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                         continue;
                     }
                     // Error/Failed：仅当本集临时目录或最终目录命中本集文件时才当完成
-                    if (hasEpisodeVideos(path, tempDirName, item.getEpisodeRange())
-                        || hasEpisodeVideos(savePath, finalRenameBase, item.getEpisodeRange())
-                        || !findCloudDownloadEpisodeVideos(item.getEpisodeRange()).isEmpty()) {
+                    if (hasEpisodeVideos(path, tempDirName, expectedEpisodesOf(item))
+                        || hasEpisodeVideos(savePath, finalRenameBase, expectedEpisodesOf(item))
+                        || !findCloudDownloadEpisodeVideos(expectedEpisodesOf(item)).isEmpty()) {
                         log.info("本集资源已就绪，OpenList 任务状态异常但文件可用，继续后处理 {}", reName);
                         clearDuplicateMagnet(infoHash);
                         break;
@@ -921,9 +921,9 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 }
 
                 // 无 tid（10008）：低频轮询本集文件是否出现（勿扫整季其它集）
-                if (hasEpisodeVideos(path, tempDirName, item.getEpisodeRange())
-                        || hasEpisodeVideos(savePath, finalRenameBase, item.getEpisodeRange())
-                        || !findCloudDownloadEpisodeVideos(item.getEpisodeRange()).isEmpty()) {
+                if (hasEpisodeVideos(path, tempDirName, expectedEpisodesOf(item))
+                        || hasEpisodeVideos(savePath, finalRenameBase, expectedEpisodesOf(item))
+                        || !findCloudDownloadEpisodeVideos(expectedEpisodesOf(item)).isEmpty()) {
                     log.info("10008 本集任务文件已就绪 {}", reName);
                     clearDuplicateMagnet(infoHash);
                     break;
@@ -935,7 +935,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             if (DateTime.now().getTime() >= deadlineMs) {
                 // 最终兜底：绕过缓存并确认文件大小稳定，避免状态更新滞后导致误判失败。
                 TimeoutFileInspection inspection = inspectTimeoutFiles(
-                        path, savePath, tempDirName, item.getEpisodeRange());
+                        path, savePath, tempDirName, expectedEpisodesOf(item));
                 String finalState = tid == null
                         ? "no-tid"
                         : taskInfo(tid).map(info -> String.valueOf(info.getState())).orElse("unknown");
@@ -968,7 +968,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                     System.currentTimeMillis() + POST_SUCCESS_FILE_GRACE_MS);
             while (true) {
                 EpisodeScanResult scan = scanEpisodeFilesOnce(path, savePath, tempDownloadDir,
-                        finalRenameBase, item.getEpisodeRange());
+                        finalRenameBase, expectedEpisodesOf(item));
                 cloudSourceDirs.addAll(scan.cloudSourceDirs());
                 if (scan.alreadyFinal()) {
                     // 已在最终目录顶层：不要再 rename/move 到自己，直接成功；
@@ -1850,6 +1850,22 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             log.debug("扫描 115 云下载目录失败 {}: {}", cloudDir, ExceptionUtils.getMessage(e));
             return List.of();
         }
+    }
+
+    /**
+     * 期望集数归一化：合集用 episodeRange；单集条目 episodeRange 为空（集数在 episode 字段），
+     * 必须回退到 List.of(episode)。否则 expectedEpisodeVideos 的 expected.isEmpty() 分支会放行
+     * 同目录下任意其它集的视频冒充本集，导致「误判完成→清临时目录→本集永久漏下」
+     * （实测：骸骨骑士 S02E06 被同目录 E01~E05/E07 冒充）。
+     */
+    private static List<Double> expectedEpisodesOf(Item item) {
+        if (item == null) {
+            return List.of();
+        }
+        if (item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty()) {
+            return item.getEpisodeRange();
+        }
+        return item.getEpisode() != null ? List.of(item.getEpisode()) : List.of();
     }
 
     /**
