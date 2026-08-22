@@ -1188,7 +1188,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                         .toList();
                 List<OpenListFileInfo> fallbackVideos = expectedEpisodeVideos(fallback, episodeRange);
                 if (!fallbackVideos.isEmpty()) {
-                    log.info("savePath 兜底扫描发现本集文件，进入后处理 videos={}", fallbackVideos.size());
+                    log.info("savePath 兜底扫描发现本集文件，进入后处理 videos={} 详情={}",
+                            fallbackVideos.size(), describeVideos(fallbackVideos));
                     videoList = fallbackVideos.stream()
                             .sorted(FILE_SIZE_DESC)
                             .toList();
@@ -1205,7 +1206,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 List<OpenListFileInfo> cloudFiles = findCloudDownloadFiles();
                 List<OpenListFileInfo> cloudVideos = expectedEpisodeVideos(cloudFiles, episodeRange);
                 if (!cloudVideos.isEmpty()) {
-                    log.info("115 云下载目录兜底扫描发现本集文件，进入后处理 videos={}", cloudVideos.size());
+                    log.info("115 云下载目录兜底扫描发现本集文件，进入后处理 videos={} 详情={}",
+                            cloudVideos.size(), describeVideos(cloudVideos));
                     videoList = cloudVideos.stream()
                             .sorted(FILE_SIZE_DESC)
                             .toList();
@@ -3485,6 +3487,18 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 .filter(f -> FileUtils.isVideoFormat(f.getName()))
                 .filter(f -> expected.isEmpty() || expected.contains(parseEpisodeNumber(extractEpisodeFromFileName(f.getName()))))
                 .toList();
+    }
+
+    /**
+     * 兜底扫描命中文件的诊断描述：路径/名称/大小/isDir，用于排查「幻影文件」（列表接口
+     * 返回了条目但实际不存在/实为空目录壳）。
+     */
+    private static String describeVideos(List<OpenListFileInfo> videos) {
+        return videos.stream()
+                .map(f -> StrUtil.blankToDefault(f.getPath(), "?") + "/" + f.getName()
+                        + " size=" + ObjectUtil.defaultIfNull(f.getSize(), -1L)
+                        + " isDir=" + f.getIsDir())
+                .collect(Collectors.joining("; "));
     }
 
     boolean snapshotCoversExpectedEpisodes(TimeoutFileSnapshot snapshot, List<Double> expectedEpisodes) {
