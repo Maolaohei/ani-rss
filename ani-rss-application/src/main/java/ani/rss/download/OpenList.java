@@ -155,6 +155,12 @@ public class OpenList implements BaseDownload, OfflineDownloader {
      */
     private static final long STALL_DETECT_MS = TimeUnit.MINUTES.toMillis(10);
 
+    /**
+     * 视频文件按大小降序（多版本取最大者为本体）
+     */
+    private static final Comparator<OpenListFileInfo> FILE_SIZE_DESC =
+            Comparator.comparingLong(OpenListFileInfo::getSize).reversed();
+
     @Override
     public boolean isOffline() {
         return true;
@@ -1151,7 +1157,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 // 防御：findFiles 缓存异常/实现差异下目录可能混入，目录名带扩展名会误判为视频
                 .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
                 .filter(f -> FileUtils.isVideoFormat(f.getName()))
-                .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
+                .sorted(FILE_SIZE_DESC)
                 .toList();
         List<OpenListFileInfo> subtitleList = openListFileInfos.stream()
                 .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
@@ -1167,7 +1173,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                     .toList();
             videoList = saveFiles.stream()
                     .filter(f -> FileUtils.isVideoFormat(f.getName()))
-                    .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
+                    .sorted(FILE_SIZE_DESC)
                     .toList();
             subtitleList = saveFiles.stream()
                     .filter(f -> FileUtils.isSubtitleFormat(f.getName()))
@@ -1184,7 +1190,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 if (!fallbackVideos.isEmpty()) {
                     log.info("savePath 兜底扫描发现本集文件，进入后处理 videos={}", fallbackVideos.size());
                     videoList = fallbackVideos.stream()
-                            .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
+                            .sorted(FILE_SIZE_DESC)
                             .toList();
                     subtitleList = fallback.stream()
                             .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
@@ -1201,7 +1207,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 if (!cloudVideos.isEmpty()) {
                     log.info("115 云下载目录兜底扫描发现本集文件，进入后处理 videos={}", cloudVideos.size());
                     videoList = cloudVideos.stream()
-                            .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
+                            .sorted(FILE_SIZE_DESC)
                             .toList();
                     subtitleList = cloudFiles.stream()
                             .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
@@ -1419,6 +1425,11 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     }
 
     private static Double parseEpisodeNumber(String episode) {
+        // 提不出集数的文件名会传入 null：Double.parseDouble(null) 在 JDK 内部
+        // (FloatingDecimal.parseDouble) 执行 in.trim() 抛 NPE 且不被 NumberFormatException 捕获
+        if (StrUtil.isBlank(episode)) {
+            return null;
+        }
         try {
             return Double.parseDouble(episode);
         } catch (NumberFormatException ignored) {
@@ -1574,11 +1585,11 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             List<OpenListFileInfo> cloudFiles = findCloudDownloadFiles();
             Set<String> cloudSourceDirs = new HashSet<>();
             List<OpenListFileInfo> videoList = expectedEpisodeVideos(source, episodeRange).stream()
-                    .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
+                    .sorted(FILE_SIZE_DESC)
                     .toList();
             if (videoList.isEmpty()) {
                 videoList = expectedEpisodeVideos(cloudFiles, episodeRange).stream()
-                        .sorted(Comparator.comparingLong(OpenListFileInfo::getSize).reversed())
+                        .sorted(FILE_SIZE_DESC)
                         .toList();
                 if (videoList.isEmpty()) {
                     return RelocateResult.NOT_FOUND;

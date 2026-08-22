@@ -184,6 +184,9 @@ public interface BaseDownload {
      * 与 RenameUtil.REG_LOOSE 的能力对齐，避免「RSS 标题算出 A 集、文件落成 B 集」的两套口径脱节。
      */
     default String extractEpisodeFromFileName(String name) {
+        if (StrUtil.isBlank(name)) {
+            return null;
+        }
         String mainName = FileUtil.mainName(name);
         // 特典/菜单/CM/PV/OP/ED 等不参与集数提取
         String upper = mainName.toUpperCase();

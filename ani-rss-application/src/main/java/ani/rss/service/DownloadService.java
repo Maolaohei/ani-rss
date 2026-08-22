@@ -162,18 +162,44 @@ public class DownloadService {
                 } else {
                     // 记录有效性校验: 下载器有对应任务 或 本地有对应文件 才视为已下载;
                     // OpenList/Alist: 下载目录是网盘虚拟路径, 本地文件不可见且任务列表恒空,
-                    // 无法可靠校验, 信任种子记录, 避免误删有效记录导致无限重下
+                    // 先归位对账, 对账未确认再兜底检查, 兜底也没找到才清理记录触发重新下载
                     boolean recordValid;
-                    if (isOpenListTool() || !Boolean.TRUE.equals(config.getRename())) {
+                    if (!Boolean.TRUE.equals(config.getRename())) {
                         recordValid = true;
-                        // 周期对账（仅离线工具）：记录存在但文件滞留子目录/云下载目录时自动归位到顶层，
-                        // 修复「显示已存在但文件不在预期位置」且无任何自动纠正机制的问题。
-                        // 尽力而为：失败不影响记录信任，仅等待下一轮重试。
-                        if (isOpenListTool() && TorrentUtil.DOWNLOAD instanceof OfflineDownloader offline) {
+                    } else if (isOpenListTool() && TorrentUtil.DOWNLOAD instanceof OfflineDownloader offline) {
+                        String failKey = FailedDownloadQueue.keyOf(ani.getId(), item.getInfoHash(), reName);
+                        boolean alreadyQueued = FailedDownloadQueue.list().stream()
+                                .anyMatch(f -> Objects.equals(f.getId(), failKey));
+                        if (alreadyQueued) {
+                            // 失败队列已有本集记录: 跳过二次对账, 直接兜底校验, 避免每轮重复对账
+                            recordValid = itemDownloaded(ani, item, true, localEpisodeIndex);
+                            if (recordValid) {
+                                // 文件已实际就位(如手动归位/上轮重下成功): 清掉过期失败记录
+                                FailedDownloadQueue.remove(failKey);
+                            }
+                        } else {
+                            // 周期对账（仅离线工具）：记录存在但文件滞留子目录/云下载目录时自动归位到顶层，
+                            // 修复「显示已存在但文件不在预期位置」且无任何自动纠正机制的问题。
+                            OfflineDownloader.RelocateResult relocated = null;
                             try {
-                                offline.relocateEpisodeFiles(ani, item, savePath);
+                                relocated = offline.relocateEpisodeFiles(ani, item, savePath);
                             } catch (Exception e) {
-                                log.debug("离线归位对账失败 {}: {}", reName, ExceptionUtils.getMessage(e));
+                                log.warn("离线归位对账失败 {}: {}", reName, ExceptionUtils.getMessage(e));
+                                recordRelocateFailure(ani, item, e);
+                            }
+                            if (relocated == OfflineDownloader.RelocateResult.RELOCATED
+                                    || relocated == OfflineDownloader.RelocateResult.ALREADY_AT_TOP) {
+                                recordValid = true;
+                            } else {
+                                // 对账没找到/失败：兜底检查（下载器任务 + 网盘视频文件按需检查）
+                                recordValid = itemDownloaded(ani, item, true, localEpisodeIndex);
+                                if (!recordValid) {
+                                    log.warn("归位对账未找到且兜底检查无文件，清理过期种子记录并重新下载 {}", reName);
+                                    if (relocated != null) {
+                                        recordRelocateFailure(ani, item, new IllegalStateException(
+                                                "归位对账未发现本集文件(" + relocated + ")"));
+                                    }
+                                }
                             }
                         }
                     } else {
@@ -824,6 +850,20 @@ public class DownloadService {
     }
 
     /**
+     * 归位对账失败/未找到 → 同步到失败队列（任务管理器可见），便于用户感知与手动处理。
+     */
+    private void recordRelocateFailure(Ani ani, Item item, Exception cause) {
+        try {
+            FailedDownloadQueue.record(
+                    ani.getId(), ani.getTitle(), item.getReName(), item.getInfoHash(),
+                    "归位对账失败 " + item.getReName() + ": "
+                            + ExceptionUtils.getMessage(cause));
+        } catch (Exception e) {
+            log.debug("记录归位对账失败到失败队列异常: {}", e.getMessage());
+        }
+    }
+
+    /**
      * 删除本地下载目录下与 reName 匹配的文件(主名相等或包含)
      */
     private void deleteLocalFilesByReName(String downloadPath, String reName) {
@@ -1096,8 +1136,14 @@ public class DownloadService {
         boolean movieStyle = RenameUtil.isMovie(ani) || ovaLegacy;
 
         if (TorrentUtil.DOWNLOAD instanceof OfflineDownloader offline) {
-            // 网盘虚拟路径, 本地文件系统不可见, 用离线网盘 API 列出文件
+            // 网盘虚拟路径, 本地文件系统不可见, 用离线网盘 API 列出文件。
+            // 只认视频文件: 空目录/临时目录(如「标题 SxxExx」文件夹壳)/字幕或其它杂文件
+            // 不能证明本集已下载, 否则种子太新长时间无视频时会误判已存在而永远不重下
             for (String name : offline.listFileNames(downloadPath)) {
+                String extName = FileUtil.extName(name);
+                if (StrUtil.isBlank(extName) || !FileUtils.isVideoFormat(extName)) {
+                    continue;
+                }
                 addFileToIndex(index, name, movieStyle);
             }
             return index;
