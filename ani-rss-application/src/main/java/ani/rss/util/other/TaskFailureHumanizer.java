@@ -79,6 +79,12 @@ public final class TaskFailureHumanizer {
                     "可删种子缓存后等下轮 RSS；若持续失败检查源站链接。",
                     raw);
         }
+        if (containsAny(lower, "去重死锁", "10008")) {
+            return new HumanizedFailure(ErrorCode.DUPLICATE_TASK,
+                    "115 云端存在该磁力的历史任务（去重死锁）",
+                    "已进入24h长冷却。请打开 115 App「离线下载列表」删除同名旧任务，下一轮 RSS 会自动重试。",
+                    raw);
+        }
         if (containsAny(lower, "timed out", "connection", "network", "reset", "unreachable", "503", "502", "504")) {
             return new HumanizedFailure(ErrorCode.NETWORK,
                     "网络或服务暂时不可用",
