@@ -922,7 +922,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                     if (hasEpisodeVideos(path, tempDirName, expectedEpisodesOf(item))
                         || hasEpisodeVideos(savePath, finalRenameBase, expectedEpisodesOf(item))
                         || !findCloudDownloadEpisodeVideos(
-                                expectedEpisodesOf(item), expectedSeasonOf(finalRenameBase)).isEmpty()) {
+                                expectedEpisodesOf(item), expectedSeasonOf(finalRenameBase),
+                                titleTokensOf(ani, item)).isEmpty()) {
                         log.info("本集资源已就绪，OpenList 任务状态异常但文件可用，继续后处理 {}", reName);
                         clearDuplicateMagnet(infoHash);
                         break;
@@ -962,7 +963,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 if (hasEpisodeVideos(path, tempDirName, expectedEpisodesOf(item))
                         || hasEpisodeVideos(savePath, finalRenameBase, expectedEpisodesOf(item))
                         || !findCloudDownloadEpisodeVideos(
-                                expectedEpisodesOf(item), expectedSeasonOf(finalRenameBase)).isEmpty()) {
+                                expectedEpisodesOf(item), expectedSeasonOf(finalRenameBase),
+                                titleTokensOf(ani, item)).isEmpty()) {
                     log.info("10008 本集任务文件已就绪 {}", reName);
                     clearDuplicateMagnet(infoHash);
                     break;
@@ -974,7 +976,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             if (DateTime.now().getTime() >= deadlineMs) {
                 // 最终兜底：绕过缓存并确认文件大小稳定，避免状态更新滞后导致误判失败。
                 TimeoutFileInspection inspection = inspectTimeoutFiles(
-                        path, savePath, tempDirName, expectedEpisodesOf(item));
+                        path, savePath, tempDirName, expectedEpisodesOf(item),
+                        titleTokensOf(ani, item));
                 String finalState = tid == null
                         ? "no-tid"
                         : taskInfo(tid).map(info -> String.valueOf(info.getState())).orElse("unknown");
@@ -1645,6 +1648,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                     .toList();
             if (videoList.isEmpty()) {
                 videoList = expectedEpisodeVideos(cloudFiles, episodeRange, expectedSeason).stream()
+                        // 云下载共享目录：标题守卫防 A/B 番同季同集数互认
+                        .filter(f -> !lacksTitleToken(f.getName(), titleTokensOf(ani, item)))
                         .sorted(FILE_SIZE_DESC)
                         .toList();
                 if (videoList.isEmpty()) {
@@ -1923,15 +1928,65 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     }
 
     /**
-     * 扫描 115 云下载目录，按本集声明范围匹配视频（原始标题命名，不能按 reName 模板过滤）。
-     * 找不到或未配置时返回空列表。
+     * 标题候选词：订阅标题/TMDB 名/日文原名/字幕组原始命名（item.title），清洗后大写，
+     * 供云下载共享目录的标题校验。云下载是所有离线任务的公共落点，仅凭季数+集数无法
+     * 区分 A 番 S01E06 与 B 番 S01E06；要求文件名含任一标题别名可封死跨番认领。
+     * 文件名完全不带标题（纯 S01E06.mkv）会漏认领，走正常失败路径——宁可漏不可错拿。
      */
+    private static List<String> titleTokensOf(Ani ani, Item item) {
+        List<String> raws = new ArrayList<>();
+        if (ani != null) {
+            raws.add(ani.getTitle());
+            raws.add(ani.getThemoviedbName());
+            raws.add(ani.getJpTitle());
+        }
+        if (item != null && StrUtil.isNotBlank(item.getTitle())) {
+            // 字幕组原始命名：去掉 [组名] 【】括号段与扩展名，留标题主体
+            String raw = item.getTitle().replaceAll("[\\[【][^\\]】]*[\\]】]", " ").trim();
+            String mainName = FileUtil.mainName(raw).trim();
+            if (StrUtil.isNotBlank(mainName)) {
+                raws.add(mainName);
+            }
+        }
+        List<String> tokens = new ArrayList<>();
+        for (String rawTitle : raws) {
+            if (StrUtil.isBlank(rawTitle)) {
+                continue;
+            }
+            String cleaned = RenameUtil.getName(RenameUtil.renameDel(rawTitle)).trim();
+            if (cleaned.length() >= 2) {
+                tokens.add(cleaned.toUpperCase(Locale.ROOT));
+            }
+        }
+        return tokens;
+    }
+
+    /**
+     * 云下载共享目录守卫：文件名不含本订阅任一标题别名 → 视为其它任务的文件。
+     * tokens 为空（订阅无可用标题）时不收紧，保持原行为。
+     */
+    static boolean lacksTitleToken(String fileName, List<String> titleTokens) {
+        if (titleTokens == null || titleTokens.isEmpty() || StrUtil.isBlank(fileName)) {
+            return false;
+        }
+        String upper = fileName.toUpperCase(Locale.ROOT);
+        return titleTokens.stream().noneMatch(upper::contains);
+    }
+
     private List<OpenListFileInfo> findCloudDownloadEpisodeVideos(List<Double> expectedEpisodes) {
-        return findCloudDownloadEpisodeVideos(expectedEpisodes, null);
+        return findCloudDownloadEpisodeVideos(expectedEpisodes, null, List.of());
     }
 
     private List<OpenListFileInfo> findCloudDownloadEpisodeVideos(List<Double> expectedEpisodes, Integer expectedSeason) {
-        return expectedEpisodeVideos(findCloudDownloadFiles(), expectedEpisodes, expectedSeason);
+        return findCloudDownloadEpisodeVideos(expectedEpisodes, expectedSeason, List.of());
+    }
+
+    private List<OpenListFileInfo> findCloudDownloadEpisodeVideos(List<Double> expectedEpisodes, Integer expectedSeason,
+                                                                  List<String> titleTokens) {
+        return expectedEpisodeVideos(findCloudDownloadFiles(), expectedEpisodes, expectedSeason).stream()
+                // 云下载共享目录：再要求文件名含本订阅标题别名，防 A/B 番同季同集数互认
+                .filter(f -> !lacksTitleToken(f.getName(), titleTokens))
+                .toList();
     }
 
     /**
@@ -3516,21 +3571,22 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     }
 
     private TimeoutFileInspection inspectTimeoutFiles(String tempPath, String savePath, String reName,
-                                                       List<Double> expectedEpisodes) {
+                                                       List<Double> expectedEpisodes, List<String> titleTokens) {
         Integer expectedSeason = expectedSeasonOf(reName);
-        TimeoutFileSnapshot first = freshEpisodeVideoSnapshot(tempPath, savePath, reName, expectedEpisodes, expectedSeason);
+        TimeoutFileSnapshot first = freshEpisodeVideoSnapshot(tempPath, savePath, reName, expectedEpisodes, expectedSeason, titleTokens);
         if (!snapshotCoversExpectedEpisodes(first, expectedEpisodes) || first.totalBytes() <= 0) {
             return new TimeoutFileInspection(false, first.videoCount(), first.totalBytes(), false);
         }
         ThreadUtil.sleep(TIMEOUT_FILE_STABILITY_WAIT_MS);
-        TimeoutFileSnapshot second = freshEpisodeVideoSnapshot(tempPath, savePath, reName, expectedEpisodes, expectedSeason);
+        TimeoutFileSnapshot second = freshEpisodeVideoSnapshot(tempPath, savePath, reName, expectedEpisodes, expectedSeason, titleTokens);
         boolean stable = first.files().equals(second.files()) && second.totalBytes() > 0;
         boolean ready = stable && snapshotCoversExpectedEpisodes(second, expectedEpisodes);
         return new TimeoutFileInspection(ready, second.videoCount(), second.totalBytes(), stable);
     }
 
     private TimeoutFileSnapshot freshEpisodeVideoSnapshot(String tempPath, String savePath, String reName,
-                                                          List<Double> expectedEpisodes, Integer expectedSeason) {
+                                                          List<Double> expectedEpisodes, Integer expectedSeason,
+                                                          List<String> titleTokens) {
         api.invalidateFindFilesCache();
         List<OpenListFileInfo> videos = expectedEpisodeVideos(findEpisodeFiles(tempPath, reName), expectedEpisodes, expectedSeason);
         if (videos.isEmpty() && !Objects.equals(tempPath, savePath)) {
@@ -3542,7 +3598,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             }
             if (videos.isEmpty()) {
                 // 115 离线完成后的文件可能落在根目录「云下载」而非目标路径：兜底扫描
-                videos = findCloudDownloadEpisodeVideos(expectedEpisodes, expectedSeason);
+                videos = findCloudDownloadEpisodeVideos(expectedEpisodes, expectedSeason, titleTokens);
             }
         }
         LinkedHashMap<String, Long> files = new LinkedHashMap<>();
