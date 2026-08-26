@@ -193,11 +193,13 @@ public class qBittorrent implements BaseDownload {
         Long upLimit = config.getUpLimit() * 1024;
         Long dlLimit = config.getDlLimit() * 1024;
 
+        String qbContentLayout = config.getQbContentLayout();
+
         HttpRequest httpRequest = postApi("/api/v2/torrents/add")
                 .form("addToTopOfQueue", false)
                 .form("autoTMM", false)
                 .form("category", TorrentsTags.ANI_RSS.getValue())
-                .form("contentLayout", "Original")
+                .form("contentLayout", qbContentLayout)
                 .form("dlLimit", dlLimit)
                 .form("firstLastPiecePrio", false)
                 .form("rename", name)

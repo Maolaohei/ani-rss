@@ -1,6 +1,6 @@
 # 更新日志（本 Fork）
 
-基线版本号：对齐上游 **3.2.15**（仅版本号；代码为本 fork 增量，已选择性移植上游 3.2.10~3.2.15 有价值提交，未完整合入全部行为变更）。
+基线版本号：对齐上游 **3.2.22**（仅版本号；代码为本 fork 增量，已选择性移植上游 3.2.10~3.2.22 有价值提交，未完整合入全部行为变更）。
 
 下列为相对该基线后的主要增量；更细提交见 git log。
 
@@ -15,6 +15,26 @@
 | 通知与体验 | Bark 通知（含 Level/Volume）；默认禁用自动检查更新；通知反压不阻塞下载 |
 | 运维 UX | 失败人话化/失败队列原子写+精确重下、列表健康分（含缓存漏集）、临时目录残留扫描优化 |
 | TMDB 匹配 | 中文标题误匹配防御 + 日文原名兜底 + 候选列表手动选择弹窗 |
+
+---
+
+## 3.2.22-fork 增量（2026-08）
+
+### 版本
+- chore: 同步上游版本号至 **3.2.22**（`pom.xml` / 子模块 parent version）；选择性移植 3.2.16~3.2.22 中的三个有价值提交（db1295ca / e497071f / 94afa0b1），未合入 3.2.19「全新的页面」等 UI 大改。
+
+### qBittorrent 内容布局
+- 新增 `qbContentLayout` 配置项：原硬编码 `contentLayout="Original"` 改为配置，前端下拉可选 原始 / 创建子文件夹 / 不创建子文件夹（`qBittorrent.vue` + `Config` + `ConfigUtil` 默认 `"Original"`；`qBittorrent.java` / `CollectionController.java` 两处提交点均改为读配置）。
+
+### WebUI 更新 / 上传（新子系统）
+- 新增 `WebUIController` / `WebUIService` / `GithubService` / `UpdateInfo` / `WebUI`：读取 `configDir/webui/webui.json` 元数据（owner/repo/version/filename）。
+  - `/webui/getUpdate`：检查对应 GitHub release，返回更新信息（sha256 / size / 跨小版本自动更新判定）。
+  - `/webui/update`：下载并校验 sha256 后解压覆盖 `webui/` 目录（与既有「备用 webui」覆盖机制兼容）。
+  - `/webui/upload`：上传 zip（须含 `webui.json`）替换；`/webui/delete`：删除。
+- 设置页新增 WebUI 上传入口（`Page.vue`）。
+
+### 说明
+- 上游 `9721fa7b`（日志自动刷新 onMounted→onActivated）**未搬入**：fork 的日志是 `el-dialog` 常驻挂载、`show()` 每次显式 `getLogs()` 重拉，无 keep-alive，onActivated 不生效且强搬会回归。
 
 ---
 

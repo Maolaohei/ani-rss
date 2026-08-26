@@ -6,7 +6,7 @@
     <parent>
         <groupId>ani.rss</groupId>
         <artifactId>ani-rss</artifactId>
-        <version>3.2.15</version>
+        <version>3.2.22</version>
     </parent>
 
     <artifactId>ani-rss-ui</artifactId>
@@ -55,7 +55,7 @@
                         </goals>
                         <configuration>
                             <nodeVersion>v26.5.1</nodeVersion>
-                            <pnpmVersion>11.21.0</pnpmVersion>
+                            <pnpmVersion>11.22.0</pnpmVersion>
                         </configuration>
                     </execution>
                     <execution>
