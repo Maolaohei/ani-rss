@@ -33,6 +33,12 @@
   - `/webui/upload`：上传 zip（须含 `webui.json`）替换；`/webui/delete`：删除。
 - 设置页新增 WebUI 上传入口（`Page.vue`）。
 
+### OpenList 云下载兜底（原样下载结构支持）
+- **标题守卫目录链感知**：115 原样下载（保留种子文件夹结构）时文件可能落在 `云下载/[组名] 番剧名/番剧名 XX.XX 13.mp4` —— 标题只在任务子目录名上，文件名是纯 `S01E03.mkv`；原守卫只看文件名导致这类文件永远不被认领，兜底形同虚设直至超时失败。新增 `cloudEntryLacksTitleToken`：文件名不含标题时再查「云下载根之下、文件所在目录之上」的目录链，任一含标题别名即放行；Error/Failed 检查、10008 无 tid 等待、超时终检、归位对账四条路径全部接入。
+- **字幕随行修复**：`relocateEpisodeFiles` 云分支原字幕收集只递归 `savePath`，云下载目录下的字幕永不随视频移动（`cloudSourceDirs.contains` 过滤是死代码）；现从云下载源目录补充收集并按路径+名称去重，同样受目录链标题守卫约束。
+- **残留深度清理**：原清理仅删除「单层完全为空」的直接源目录；现自底向上清理任务目录内的残留垃圾（`.aria2`/`.tmp`/`thumbs.db` 等）、删除清空后的空子目录（如 `Subs/`），再向上回溯删除空壳目录链（有内容即停；云下载根目录本身与根外路径受保护，仅限源目录链内）。
+- 测试：`OpenListWorkflowSimulationTest` 新增原样结构端到端场景（视频归位 + 垃圾/空子目录/空壳链深度清理 + 相邻任务内容不受影响）与 10008 无 tid 路径目录链认领场景；`OpenListResidualPolicyTest` 新增守卫/相对路径纯函数单测。
+
 ### 说明
 - 上游 `9721fa7b`（日志自动刷新 onMounted→onActivated）**未搬入**：fork 的日志是 `el-dialog` 常驻挂载、`show()` 每次显式 `getLogs()` 重拉，无 keep-alive，onActivated 不生效且强搬会回归。
 

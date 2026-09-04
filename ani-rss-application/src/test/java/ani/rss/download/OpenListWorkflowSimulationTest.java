@@ -49,6 +49,8 @@ class OpenListWorkflowSimulationTest {
     private static final String HASH3 = "3c6c6e863114b7191b4c66699f3be2e55f1254cf";
     private static final String HASH4 = "4c6c6e863114b7191b4c66699f3be2e55f1254cf";
     private static final String HASH5 = "5c6c6e863114b7191b4c66699f3be2e55f1254cf";
+    private static final String HASH6 = "6c6c6e863114b7191b4c66699f3be2e55f1254cf";
+    private static final String HASH7 = "7c6c6e863114b7191b4c66699f3be2e55f1254cf";
     private static final String RAW_FILE_NAME = "[LoliHouse] Show - 03 [1080p].mkv";
 
     @BeforeEach
@@ -218,9 +220,70 @@ class OpenListWorkflowSimulationTest {
                 "再次修复应幂等（无新增归位）");
     }
 
+    // ============ 场景 7：原样下载（保留种子文件夹结构）落在云下载 ============
+
+    /**
+     * 用户报告的形态：云下载/[GROUP] Title/Title - 13.mp4 —— 标题只在任务子目录名上，
+     * 文件名是纯 S01E03.mkv（不含标题）；目录内还有垃圾文件与空字幕子目录。
+     * 要求：兜底能认领（目录链守卫）、归位、并深度清理任务目录（垃圾+空子目录+空壳链）。
+     */
+    @Test
+    void cloud_original_structure_with_bare_episode_name_is_relocated_and_deep_cleaned() throws Exception {
+        String savePath = "/追番/Show2/Season 1";
+        String tempDirName = "Show2 S01E03";
+        String torrentDirName = "[VCB] Show2";
+        String cloudRoot = "/云下载A";
+        server.placeTaskDirInTarget = false;
+        // 相邻的其它任务内容（清理不应触碰）
+        server.putFile(cloudRoot + "/[Other] Show2/[Other] Show2 - 09.mkv", 900L);
+        // 原样结构：云下载/种子目录/S01E03.mkv + 垃圾 + 空字幕目录
+        server.putFile(cloudRoot + "/" + torrentDirName + "/S01E03.mkv", 1000L);
+        server.putFile(cloudRoot + "/" + torrentDirName + "/thumbs.db", 100L);
+        server.mkdir(cloudRoot + "/" + torrentDirName + "/Subs");
+
+        OpenList openList = openList(savePath, cloudRoot);
+        File torrent = torrentFile(HASH6);
+
+        assertEquals(Boolean.TRUE, openList.download(ani("Show2"), item(HASH6, "Show2", 3.0), savePath, torrent));
+
+        // 视频按集数认领并归位重命名
+        awaitFinalTopLevel(savePath, List.of(tempDirName + ".mkv"), 30_000);
+        // 深度清理：任务目录（含垃圾文件/空子目录）整体消失
+        awaitGone(cloudRoot + "/" + torrentDirName, 30_000);
+        // 其它任务的文件不受清理影响
+        assertTrue(server.exists(cloudRoot + "/[Other] Show2/[Other] Show2 - 09.mkv"),
+                "其它任务的文件应不受清理影响");
+    }
+
+    /**
+     * 10008（无 tid）等待路径：文件原样结构落在云下载且文件名无标题
+     * （用户实测形态 云下载/[XXXX] A/A XX.XX 13.mp4），
+     * 之前因标题守卫只看文件名而永不就绪，直到超时失败。
+     */
+    @Test
+    void cloud_original_structure_10008_wait_recognizes_dir_chain_title() throws Exception {
+        String savePath = "/追番/Show3/Season 1";
+        String torrentDirName = "[XXXX] A季";
+        String cloudRoot = "/云下载B";
+        server.forceDuplicateAdd = true;
+        server.placeTaskDirInTarget = false;
+        server.putFile(cloudRoot + "/" + torrentDirName + "/A XX.XX 13.mp4", 1000L);
+
+        OpenList openList = openList(savePath, cloudRoot);
+        File torrent = torrentFile(HASH7);
+
+        // 10008 下走轮询等待路径：文件被目录链标题认领后异步归位
+        assertEquals(Boolean.TRUE, openList.download(ani("A季"), item(HASH7, "A季", 13.0), savePath, torrent));
+        awaitFinalTopLevel(savePath, List.of("A季 S01E13.mp4"), 30_000);
+    }
+
     // ============ 辅助 ============
 
     private OpenList openList(String savePath) {
+        return openList(savePath, null);
+    }
+
+    private OpenList openList(String savePath, String cloudDownloadDir) {
         Config config = new Config()
                 .setDownloadToolHost("http://127.0.0.1:" + server.port())
                 .setDownloadToolPassword("mock-token")
@@ -233,24 +296,40 @@ class OpenListWorkflowSimulationTest {
                 .setAlistDownloadTimeout(1)
                 .setAlistDownloadRetryNumber(3L)
                 .setNotificationConfigList(List.of());
+        if (cloudDownloadDir != null) {
+            config.setAlistCloudDownloadDir(cloudDownloadDir);
+        }
         OpenList openList = new OpenList();
         assertEquals(Boolean.TRUE, openList.login(true, config), "mock login 应成功");
         return openList;
     }
 
     private Ani ani() {
+        return ani("Show");
+    }
+
+    private Ani ani(String title) {
         return new Ani()
                 .setId("ani-1")
-                .setTitle("Show")
+                .setTitle(title)
                 .setMessage(false);
     }
 
     private Item item(String hash) {
-        return new Item()
-                .setTitle("Show")
-                .setReName("Show S01E03")
+        return item(hash, "Show", null);
+    }
+
+    private Item item(String hash, String title, Double episode) {
+        String ep = episode == null ? "03" : String.format("%02d", episode.intValue());
+        Item it = new Item()
+                .setTitle(title)
+                .setReName(title + " S01E" + ep)
                 .setEpisodeRange(List.of())
                 .setInfoHash(hash);
+        if (episode != null) {
+            it.setEpisode(episode);
+        }
+        return it;
     }
 
     private File torrentFile(String hash) throws IOException {
@@ -274,6 +353,18 @@ class OpenListWorkflowSimulationTest {
         }
         fail("等待超时：" + dir + " 顶层应为 " + expected + "，当前=" + server.topLevel(dir)
                 + "，全树=" + server.allPaths());
+    }
+
+    /** 等待指定路径被清理消失（原样结构深度清理：垃圾+空子目录+空壳链） */
+    private void awaitGone(String path, long timeoutMs) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            if (!server.exists(path)) {
+                return;
+            }
+            Thread.sleep(200);
+        }
+        fail("等待超时：" + path + " 应被清理，全树=" + server.allPaths());
     }
 
     // ============ AList/115 mock server ============

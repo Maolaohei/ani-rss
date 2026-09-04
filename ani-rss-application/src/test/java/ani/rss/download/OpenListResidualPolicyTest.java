@@ -18,6 +18,46 @@ import static org.junit.jupiter.api.Assertions.*;
 class OpenListResidualPolicyTest {
 
     @Test
+    void cloud_title_guard_falls_back_to_dir_chain() {
+        List<String> tokens = List.of("SHOW", "我的番剧");
+
+        // 文件名含标题：直接放行
+        assertFalse(OpenList.cloudEntryLacksTitleToken(
+                "[LoliHouse] Show - 03 [1080p].mkv", "/云下载/[VCB] Show", "/云下载", tokens));
+        // 原样结构：文件名无标题但目录链含标题 → 放行（本次修复的核心场景）
+        assertFalse(OpenList.cloudEntryLacksTitleToken(
+                "S01E03.mkv", "/云下载/[VCB] Show", "/云下载", tokens));
+        assertFalse(OpenList.cloudEntryLacksTitleToken(
+                "13.mp4", "/云下载/[XXXX] A", "/云下载", List.of("A")));
+        // 文件名与目录链都无标题 → 拒绝（防 A/B 番互认）
+        assertTrue(OpenList.cloudEntryLacksTitleToken(
+                "S01E03.mkv", "/云下载/[VCB] Other", "/云下载", tokens));
+        assertTrue(OpenList.cloudEntryLacksTitleToken(
+                "S01E03.mkv", "/云下载", "/云下载", tokens));
+        // 不在云下载根下 / 路径缺失：只按文件名判定
+        assertTrue(OpenList.cloudEntryLacksTitleToken(
+                "S01E03.mkv", "/其他/[VCB] Show", "/云下载", tokens));
+        assertFalse(OpenList.cloudEntryLacksTitleToken(
+                "Show - 03.mkv", null, "/云下载", tokens));
+        // tokens 为空：不收紧
+        assertFalse(OpenList.cloudEntryLacksTitleToken(
+                "S01E03.mkv", "/云下载/[VCB] Other", "/云下载", List.of()));
+        // 大小写不敏感（生产 tokens 由 titleTokensOf 统一大写）
+        assertFalse(OpenList.cloudEntryLacksTitleToken(
+                "S01E03.mkv", "/云下载/show Season 1", "/云下载", List.of("SHOW")));
+    }
+
+    @Test
+    void relative_under_cloud_root_basic() {
+        assertEquals("a/b", OpenList.relativeUnderCloudRoot("/云下载/a/b", "/云下载"));
+        assertEquals("a", OpenList.relativeUnderCloudRoot("/云下载/a/", "/云下载"));
+        assertNull(OpenList.relativeUnderCloudRoot("/other/a", "/云下载"));
+        assertNull(OpenList.relativeUnderCloudRoot("/云下载", "/云下载"));
+        assertNull(OpenList.relativeUnderCloudRoot(null, "/云下载"));
+        assertNull(OpenList.relativeUnderCloudRoot("/云下载-x/a", "/云下载"));
+    }
+
+    @Test
     void adopt_running_states() {
         for (OpenListTaskInfo.State state : new OpenListTaskInfo.State[]{
                 OpenListTaskInfo.State.Pending,

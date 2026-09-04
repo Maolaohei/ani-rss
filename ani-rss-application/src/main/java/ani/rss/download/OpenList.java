@@ -1642,14 +1642,17 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                     .filter(f -> !Objects.equals(trimTrailingSlash(f.getPath()), saveNorm))
                     .toList());
             List<OpenListFileInfo> cloudFiles = findCloudDownloadFiles();
+            String cloudDirForGuard = resolveCloudDownloadDir();
             Set<String> cloudSourceDirs = new HashSet<>();
             List<OpenListFileInfo> videoList = expectedEpisodeVideos(source, episodeRange, expectedSeason).stream()
                     .sorted(FILE_SIZE_DESC)
                     .toList();
             if (videoList.isEmpty()) {
                 videoList = expectedEpisodeVideos(cloudFiles, episodeRange, expectedSeason).stream()
-                        // 云下载共享目录：标题守卫防 A/B 番同季同集数互认
-                        .filter(f -> !lacksTitleToken(f.getName(), titleTokensOf(ani, item)))
+                        // 云下载共享目录：标题守卫防 A/B 番同季同集数互认；
+                        // 兼容原样下载结构（标题只在任务子目录名上，文件名可能是纯 S01E03.mkv）
+                        .filter(f -> !cloudEntryLacksTitleToken(
+                                f.getName(), f.getPath(), cloudDirForGuard, titleTokensOf(ani, item)))
                         .sorted(FILE_SIZE_DESC)
                         .toList();
                 if (videoList.isEmpty()) {
@@ -1676,17 +1679,28 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 log.info("归位对账: 子目录发现本集文件 {} videos={}", item.getReName(), videoList.size());
             }
 
-            // 字幕：与视频同目录的字幕
+            // 字幕：与视频同目录的字幕（savePath 子目录 + 云下载源目录）
             Set<String> videoDirs = videoList.stream()
                     .map(OpenListFileInfo::getPath)
                     .filter(Objects::nonNull)
                     .collect(Collectors.toSet());
-            List<OpenListFileInfo> subtitleList = source.stream()
+            List<OpenListFileInfo> subtitleList = new ArrayList<>(source.stream()
                     .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
                     .filter(f -> FileUtils.isSubtitleFormat(f.getName()))
                     .filter(f -> f.getPath() == null || videoDirs.contains(f.getPath())
                             || cloudSourceDirs.contains(f.getPath()))
-                    .toList();
+                    .toList());
+            // 云下载原样结构下字幕与视频同目录，但 source 只覆盖 savePath 递归范围，需从 cloudFiles 补齐
+            String cloudDirForSubs = cloudDirForGuard;
+            cloudFiles.stream()
+                    .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
+                    .filter(f -> FileUtils.isSubtitleFormat(f.getName()))
+                    .filter(f -> videoDirs.contains(f.getPath()) || cloudSourceDirs.contains(f.getPath()))
+                    .filter(f -> !cloudEntryLacksTitleToken(
+                            f.getName(), f.getPath(), cloudDirForSubs, titleTokensOf(ani, item)))
+                    .filter(f -> subtitleList.stream().noneMatch(s -> Objects.equals(s.getPath(), f.getPath())
+                            && Objects.equals(s.getName(), f.getName())))
+                    .forEach(subtitleList::add);
 
             boolean isCollection = item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty();
             Map<String, String> renameMap = buildEpisodeRenameMap(
@@ -1973,6 +1987,42 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         return titleTokens.stream().noneMatch(upper::contains);
     }
 
+    /**
+     * 云下载守卫的扩展判定：原样下载（保留种子文件夹结构）时标题可能只出现在
+     * 任务子目录名上（如 云下载/[XXXX] A/A XX.XX 13.mp4 的 [XXXX] A），
+     * 文件名本身可能是纯 S01E03.mkv。守卫需同时看「文件名 + 任务目录名」，
+     * 否则这类文件永远不被认领，兜底形同虚设。
+     * cloudEntryPath 形如 /云下载/[XXXX] A（OpenListFileInfo.path，即文件所在目录）。
+     */
+    static boolean cloudEntryLacksTitleToken(String fileName, String cloudEntryPath,
+                                             String cloudRoot, List<String> titleTokens) {
+        if (!lacksTitleToken(fileName, titleTokens)) {
+            return false;
+        }
+        // 文件名不含标题：若目录链（云下载根之下、文件所在目录之上）含标题别名则放行
+        String rel = relativeUnderCloudRoot(cloudEntryPath, cloudRoot);
+        if (StrUtil.isBlank(rel)) {
+            return true;
+        }
+        String upperRel = rel.toUpperCase(Locale.ROOT);
+        return titleTokens.stream().noneMatch(upperRel::contains);
+    }
+
+    /**
+     * path 相对 cloudRoot 的目录链（不含 cloudRoot 前缀）；无法判定/不在根下时返回 null。
+     */
+    static String relativeUnderCloudRoot(String path, String cloudRoot) {
+        if (StrUtil.isBlank(path) || StrUtil.isBlank(cloudRoot)) {
+            return null;
+        }
+        String p = trimTrailingSlash(path).toLowerCase(Locale.ROOT);
+        String r = trimTrailingSlash(cloudRoot).toLowerCase(Locale.ROOT);
+        if (!p.startsWith(r + "/")) {
+            return null;
+        }
+        return p.substring(r.length() + 1);
+    }
+
     private List<OpenListFileInfo> findCloudDownloadEpisodeVideos(List<Double> expectedEpisodes) {
         return findCloudDownloadEpisodeVideos(expectedEpisodes, null, List.of());
     }
@@ -1983,9 +2033,11 @@ public class OpenList implements BaseDownload, OfflineDownloader {
 
     private List<OpenListFileInfo> findCloudDownloadEpisodeVideos(List<Double> expectedEpisodes, Integer expectedSeason,
                                                                   List<String> titleTokens) {
+        String cloudDir = resolveCloudDownloadDir();
         return expectedEpisodeVideos(findCloudDownloadFiles(), expectedEpisodes, expectedSeason).stream()
-                // 云下载共享目录：再要求文件名含本订阅标题别名，防 A/B 番同季同集数互认
-                .filter(f -> !lacksTitleToken(f.getName(), titleTokens))
+                // 云下载共享目录：再要求「文件名+所在目录链」含本订阅标题别名，防 A/B 番同季同集数互认；
+                // 目录链校验兼容原样下载结构（标题只出现在任务子目录名上，文件名可能是纯 S01E03.mkv）
+                .filter(f -> !cloudEntryLacksTitleToken(f.getName(), f.getPath(), cloudDir, titleTokens))
                 .toList();
     }
 
@@ -2115,34 +2167,136 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     }
 
     /**
-     * 清理云下载兜底移动后的空壳源目录（115 云下载任务目录残留，名字通常=文件名含扩展名）。
-     * 只删除「已空」的目录：先检查目录无任何子项才删，避免误删用户其它内容。
+     * 清理云下载兜底移动后的源目录残留（115 任务目录）。
+     * 原样下载（保留种子文件夹结构）的源目录内常有空子目录（Subs/）、垃圾（thumbs.db/.aria2），
+     * 或多层嵌套（云下载/种子名/子目录/文件）；只删「完全为空」的直接源目录会留下永久残留。
+     * 处理顺序：
+     * 1) 自底向上清理源目录子树内的垃圾文件与空子目录（普通文件与非空目录一律保留）；
+     * 2) 源目录清空后删除，并沿空目录链向上清理到云下载根目录为止
+     *    （根目录自身与云下载之外的路径一律不动；未解析到根目录时仅删源目录自身，保持旧行为）。
      *
      * @param sourceDirs 本次兜底移动涉及的源目录集合（OpenListFileInfo.getPath）
      */
     private void cleanupCloudDownloadEmptyDirs(Set<String> sourceDirs) {
+        String cloudRoot = null;
+        try {
+            cloudRoot = resolveCloudDownloadDir();
+        } catch (Exception ignored) {
+        }
         for (String srcDir : sourceDirs) {
             try {
                 String dir = trimTrailingSlash(srcDir);
                 if (StrUtil.isBlank(dir) || "/".equals(dir)) {
                     continue;
                 }
-                List<OpenListFileInfo> children = fsList(dir, true);
-                if (!children.isEmpty()) {
-                    // 目录仍有内容（可能含其它剧集文件）：不动
-                    continue;
-                }
-                int idx = dir.lastIndexOf('/');
-                if (idx <= 0) {
-                    continue;
-                }
-                String parent = dir.substring(0, idx);
-                String name = dir.substring(idx + 1);
-                log.info("清理 115 云下载空壳目录 {}/{}", parent, name);
-                fsRemove(parent, List.of(name));
+                purgeJunkAndEmptyDirsBottomUp(dir);
+                deleteEmptyChainUnderCloudRoot(dir, cloudRoot);
             } catch (Exception e) {
                 log.debug("清理云下载空壳目录失败 {}: {}", srcDir, ExceptionUtils.getMessage(e));
             }
+        }
+    }
+
+    /**
+     * 自底向上清理 dir 子树内的垃圾文件与空子目录；视频/字幕等普通内容一律保留。
+     */
+    private void purgeJunkAndEmptyDirsBottomUp(String dir) {
+        String current = trimTrailingSlash(dir);
+        if (StrUtil.isBlank(current) || "/".equals(current)) {
+            return;
+        }
+        List<OpenListFileInfo> children;
+        try {
+            children = fsList(current, true);
+        } catch (Exception e) {
+            log.debug("清理云下载残留列目录失败 {}: {}", current, e.getMessage());
+            return;
+        }
+        // 先递归子目录（自底向上）
+        for (OpenListFileInfo entry : children) {
+            if (Boolean.TRUE.equals(entry.getIsDir())) {
+                purgeJunkAndEmptyDirsBottomUp(current + "/" + entry.getName());
+            }
+        }
+        try {
+            // 删本层垃圾文件
+            for (OpenListFileInfo child : fsList(current, true)) {
+                if (Boolean.TRUE.equals(child.getIsDir()) || !isJunkTempFile(child)) {
+                    continue;
+                }
+                try {
+                    log.info("清理 115 云下载残留垃圾 {}/{}", current, child.getName());
+                    fsRemove(current, List.of(child.getName()));
+                } catch (Exception e) {
+                    log.debug("清理云下载残留垃圾失败 {}/{}: {}", current, child.getName(), e.getMessage());
+                }
+            }
+            // 删已空的子目录
+            for (OpenListFileInfo child : fsList(current, true)) {
+                if (!Boolean.TRUE.equals(child.getIsDir())) {
+                    continue;
+                }
+                String childPath = current + "/" + child.getName();
+                if (!fsList(childPath, true).isEmpty()) {
+                    continue;
+                }
+                try {
+                    log.info("清理 115 云下载空子目录 {}/{}", current, child.getName());
+                    fsRemove(current, List.of(child.getName()));
+                } catch (Exception e) {
+                    log.debug("清理云下载空子目录失败 {}/{}: {}", current, child.getName(), e.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            log.debug("清理云下载残留失败 {}: {}", current, e.getMessage());
+        }
+    }
+
+    /**
+     * 目录已空时删除并沿空目录链向上清理；
+     * 只清理云下载根目录内部（前缀校验），根目录自身与外部路径不动；
+     * 未解析到根目录（cloudRoot 为空）时仅允许删除源目录自身，保持旧行为。
+     */
+    private void deleteEmptyChainUnderCloudRoot(String dir, String cloudRoot) {
+        String root = StrUtil.isBlank(cloudRoot) ? null : trimTrailingSlash(cloudRoot);
+        String origin = trimTrailingSlash(dir);
+        String cursor = origin;
+        int guard = 0;
+        while (StrUtil.isNotBlank(cursor) && !"/".equals(cursor) && guard++ < 8) {
+            if (root != null
+                    && !cursor.toLowerCase(Locale.ROOT).startsWith(root.toLowerCase(Locale.ROOT) + "/")) {
+                // 云下载根目录自身与外部路径一律不动
+                return;
+            }
+            if (root == null && !cursor.equalsIgnoreCase(origin)) {
+                // 未解析到根目录：仅删源目录自身，避免无界向上回溯
+                return;
+            }
+            List<OpenListFileInfo> children;
+            try {
+                children = fsList(cursor, true);
+            } catch (Exception e) {
+                log.debug("清理云下载空壳列目录失败 {}: {}", cursor, e.getMessage());
+                return;
+            }
+            if (!children.isEmpty()) {
+                // 目录仍有内容（可能含其它剧集/任务文件）：停止上溯
+                return;
+            }
+            int idx = cursor.lastIndexOf('/');
+            if (idx <= 0) {
+                return;
+            }
+            String parent = cursor.substring(0, idx);
+            String name = cursor.substring(idx + 1);
+            log.info("清理 115 云下载空壳目录 {}/{}", parent, name);
+            try {
+                fsRemove(parent, List.of(name));
+            } catch (Exception e) {
+                log.debug("清理云下载空壳目录失败 {}: {}", cursor, e.getMessage());
+                return;
+            }
+            cursor = parent;
         }
     }
 
