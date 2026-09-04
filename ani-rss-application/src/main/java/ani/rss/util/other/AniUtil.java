@@ -95,7 +95,8 @@ public class AniUtil {
 
             // 自动修补缺失的封面
             String image = ani.getImage();
-            saveCover(image);
+            // 回填补全后的封面路径（port upstream 2147d525）
+            ani.setCover(saveCover(image));
 
             Ani newAni = AniUtil.createAni();
             BeanUtil.copyProperties(newAni, ani, copyOptions);

@@ -18,6 +18,15 @@
 
 ---
 
+## 3.2.28-fork 增量（2026-09）
+
+### 版本
+- chore: 同步上游版本号至 **3.2.28**（`pom.xml` / 子模块 parent version）；上游 3.2.23~3.2.28 共 15 个提交（发布在 `test` 分支，`master` 仍停在 v3.2.22），逐个评估后仅移植 2 个修复，UI 美化类重构（背景色/图标/表格布局/按钮/首页订阅过滤）与日志优化未搬入
+- port: **AniBT 部分种子缺失修复**（上游 `3a719665`，`ItemsUtil`）：RSS 条目缺 `.torrent` 文件时回退 `contentLength`/`magneturi` 字段，非种子 `link` 不再丢弃整个条目（可能已被 magneturi 兜底）
+- port: **订阅封面回填**（上游 `2147d525`，`AniUtil`）：`saveCover` 返回值写回 `ani.cover`，补全缺失封面；本 fork `CopyOptions.setOverride(false)` 拷贝语义一致，回填不会被模板值覆盖
+
+---
+
 ## 3.2.22-fork 增量（2026-08）
 
 ### 版本

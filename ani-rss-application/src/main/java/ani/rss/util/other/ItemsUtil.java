@@ -242,16 +242,27 @@ public class ItemsUtil {
                             String pubDateStr = pubDateEl.getTextContent();
                             pubDate = DateUtil.parse(pubDateStr);
                         }
+
+                        // AniBT 兼容：部分种子缺 .torrent 文件，回退 contentLength/magneturi（port upstream 3a719665）
+                        Element contentLength = XmlUtil.getElement((Element) itemChild, "contentLength");
+                        if (Objects.nonNull(contentLength) && StrUtil.isBlank(length)) {
+                            length = contentLength.getTextContent();
+                        }
+
+                        Element magneturi = XmlUtil.getElement((Element) itemChild, "magneturi");
+                        if (Objects.nonNull(magneturi) && StrUtil.isBlank(torrent)) {
+                            torrent = magneturi.getTextContent();
+                        }
                     } catch (Exception ignored) {
                     }
                 }
 
                 if (itemChildNodeName.equals("link")) {
                     String link = itemChild.getTextContent();
-                    if (!link.endsWith(".torrent")) {
-                        continue;
+                    // .torrent 链接优先；非种子链接不再丢弃整个条目（可能已被 magneturi 兜底）
+                    if (link.endsWith(".torrent")) {
+                        torrent = link;
                     }
-                    torrent = link;
                 }
 
             }
