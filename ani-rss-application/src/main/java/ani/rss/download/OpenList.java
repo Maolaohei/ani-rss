@@ -785,6 +785,11 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         Long alistDownloadRetryNumber = config.getAlistDownloadRetryNumber();
         Boolean delete = config.getDelete();
         boolean claimedInFlight = ctx.claimedInFlight;
+        // 本集判定参数一次解析，等待循环与各兜底分支复用
+        // （expectedEpisodesOf/expectedSeasonOf/titleTokensOf 均含清洗开销，勿在循环内重复计算）
+        List<Double> expectedEpisodes = expectedEpisodesOf(item);
+        Integer expectedSeason = expectedSeasonOf(finalRenameBase);
+        List<String> titleTokens = titleTokensOf(ani, item);
         try {
             while (DateTime.now().getTime() < deadlineMs) {
                 if (shouldAbortWait()) {
@@ -889,7 +894,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                             // 先兜底检查：幽灵旧任务可能已把文件下完落在临时/最终/云下载目录，
                             // 有文件直接进后处理归位，不要浪费这次成果
                             EpisodeScanResult dupScan = scanEpisodeFilesOnce(path, savePath, tempDownloadDir,
-                                    finalRenameBase, expectedEpisodesOf(item));
+                                    finalRenameBase, expectedEpisodes);
                             if (dupScan.alreadyFinal()) {
                                 log.info("10008 死锁但本集文件已在最终目录，视为下载完成 {}", reName);
                                 clearDuplicateMagnet(infoHash);
@@ -919,11 +924,10 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                         continue;
                     }
                     // Error/Failed：仅当本集临时目录或最终目录命中本集文件时才当完成
-                    if (hasEpisodeVideos(path, tempDirName, expectedEpisodesOf(item))
-                        || hasEpisodeVideos(savePath, finalRenameBase, expectedEpisodesOf(item))
+                    if (hasEpisodeVideos(path, tempDirName, expectedEpisodes)
+                        || hasEpisodeVideos(savePath, finalRenameBase, expectedEpisodes)
                         || !findCloudDownloadEpisodeVideos(
-                                expectedEpisodesOf(item), expectedSeasonOf(finalRenameBase),
-                                titleTokensOf(ani, item)).isEmpty()) {
+                                expectedEpisodes, expectedSeason, titleTokens).isEmpty()) {
                         log.info("本集资源已就绪，OpenList 任务状态异常但文件可用，继续后处理 {}", reName);
                         clearDuplicateMagnet(infoHash);
                         break;
@@ -960,11 +964,10 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 }
 
                 // 无 tid（10008）：低频轮询本集文件是否出现（勿扫整季其它集）
-                if (hasEpisodeVideos(path, tempDirName, expectedEpisodesOf(item))
-                        || hasEpisodeVideos(savePath, finalRenameBase, expectedEpisodesOf(item))
+                if (hasEpisodeVideos(path, tempDirName, expectedEpisodes)
+                        || hasEpisodeVideos(savePath, finalRenameBase, expectedEpisodes)
                         || !findCloudDownloadEpisodeVideos(
-                                expectedEpisodesOf(item), expectedSeasonOf(finalRenameBase),
-                                titleTokensOf(ani, item)).isEmpty()) {
+                                expectedEpisodes, expectedSeason, titleTokens).isEmpty()) {
                     log.info("10008 本集任务文件已就绪 {}", reName);
                     clearDuplicateMagnet(infoHash);
                     break;
@@ -976,8 +979,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             if (DateTime.now().getTime() >= deadlineMs) {
                 // 最终兜底：绕过缓存并确认文件大小稳定，避免状态更新滞后导致误判失败。
                 TimeoutFileInspection inspection = inspectTimeoutFiles(
-                        path, savePath, tempDirName, expectedEpisodesOf(item),
-                        titleTokensOf(ani, item));
+                        path, savePath, tempDirName, expectedEpisodes, titleTokens);
                 String finalState = tid == null
                         ? "no-tid"
                         : taskInfo(tid).map(info -> String.valueOf(info.getState())).orElse("unknown");
@@ -1010,7 +1012,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                     System.currentTimeMillis() + POST_SUCCESS_FILE_GRACE_MS);
             while (true) {
                 EpisodeScanResult scan = scanEpisodeFilesOnce(path, savePath, tempDownloadDir,
-                        finalRenameBase, expectedEpisodesOf(item));
+                        finalRenameBase, expectedEpisodes);
                 cloudSourceDirs.addAll(scan.cloudSourceDirs());
                 if (scan.alreadyFinal()) {
                     // 已在最终目录顶层：不要再 rename/move 到自己，直接成功；
@@ -1643,6 +1645,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                     .toList());
             List<OpenListFileInfo> cloudFiles = findCloudDownloadFiles();
             String cloudDirForGuard = resolveCloudDownloadDir();
+            List<String> cloudTitleTokens = titleTokensOf(ani, item);
             Set<String> cloudSourceDirs = new HashSet<>();
             List<OpenListFileInfo> videoList = expectedEpisodeVideos(source, episodeRange, expectedSeason).stream()
                     .sorted(FILE_SIZE_DESC)
@@ -1652,7 +1655,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                         // 云下载共享目录：标题守卫防 A/B 番同季同集数互认；
                         // 兼容原样下载结构（标题只在任务子目录名上，文件名可能是纯 S01E03.mkv）
                         .filter(f -> !cloudEntryLacksTitleToken(
-                                f.getName(), f.getPath(), cloudDirForGuard, titleTokensOf(ani, item)))
+                                f.getName(), f.getPath(), cloudDirForGuard, cloudTitleTokens))
                         .sorted(FILE_SIZE_DESC)
                         .toList();
                 if (videoList.isEmpty()) {
@@ -1679,7 +1682,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 log.info("归位对账: 子目录发现本集文件 {} videos={}", item.getReName(), videoList.size());
             }
 
-            // 字幕：与视频同目录的字幕（savePath 子目录 + 云下载源目录）
+            // 字幕：与视频同目录（videoDirs 已含 savePath 子目录与云下载源目录两类，无需再查 cloudSourceDirs）
             Set<String> videoDirs = videoList.stream()
                     .map(OpenListFileInfo::getPath)
                     .filter(Objects::nonNull)
@@ -1687,17 +1690,15 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             List<OpenListFileInfo> subtitleList = new ArrayList<>(source.stream()
                     .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
                     .filter(f -> FileUtils.isSubtitleFormat(f.getName()))
-                    .filter(f -> f.getPath() == null || videoDirs.contains(f.getPath())
-                            || cloudSourceDirs.contains(f.getPath()))
+                    .filter(f -> f.getPath() == null || videoDirs.contains(f.getPath()))
                     .toList());
             // 云下载原样结构下字幕与视频同目录，但 source 只覆盖 savePath 递归范围，需从 cloudFiles 补齐
-            String cloudDirForSubs = cloudDirForGuard;
             cloudFiles.stream()
                     .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
                     .filter(f -> FileUtils.isSubtitleFormat(f.getName()))
-                    .filter(f -> videoDirs.contains(f.getPath()) || cloudSourceDirs.contains(f.getPath()))
+                    .filter(f -> videoDirs.contains(f.getPath()))
                     .filter(f -> !cloudEntryLacksTitleToken(
-                            f.getName(), f.getPath(), cloudDirForSubs, titleTokensOf(ani, item)))
+                            f.getName(), f.getPath(), cloudDirForGuard, cloudTitleTokens))
                     .filter(f -> subtitleList.stream().noneMatch(s -> Objects.equals(s.getPath(), f.getPath())
                             && Objects.equals(s.getName(), f.getName())))
                     .forEach(subtitleList::add);
@@ -2199,40 +2200,42 @@ public class OpenList implements BaseDownload, OfflineDownloader {
 
     /**
      * 自底向上清理 dir 子树内的垃圾文件与空子目录；视频/字幕等普通内容一律保留。
+     * 返回子树是否已全部清空（供上层直接删除，避免重复列目录）。
      */
-    private void purgeJunkAndEmptyDirsBottomUp(String dir) {
+    private boolean purgeJunkAndEmptyDirsBottomUp(String dir) {
         String current = trimTrailingSlash(dir);
         if (StrUtil.isBlank(current) || "/".equals(current)) {
-            return;
+            return false;
         }
         List<OpenListFileInfo> children;
         try {
             children = fsList(current, true);
         } catch (Exception e) {
             log.debug("清理云下载残留列目录失败 {}: {}", current, e.getMessage());
-            return;
+            return false;
         }
-        // 先递归子目录（自底向上）
+        // 先递归子目录（自底向上）；任一子树非空则本层必非空
+        boolean allChildrenEmpty = true;
         for (OpenListFileInfo entry : children) {
             if (Boolean.TRUE.equals(entry.getIsDir())) {
-                purgeJunkAndEmptyDirsBottomUp(current + "/" + entry.getName());
+                if (!purgeJunkAndEmptyDirsBottomUp(current + "/" + entry.getName())) {
+                    allChildrenEmpty = false;
+                }
             }
         }
         try {
-            // 删本层垃圾文件
-            for (OpenListFileInfo child : fsList(current, true)) {
-                if (Boolean.TRUE.equals(child.getIsDir()) || !isJunkTempFile(child)) {
-                    continue;
-                }
-                try {
-                    log.info("清理 115 云下载残留垃圾 {}/{}", current, child.getName());
-                    fsRemove(current, List.of(child.getName()));
-                } catch (Exception e) {
-                    log.debug("清理云下载残留垃圾失败 {}/{}: {}", current, child.getName(), e.getMessage());
-                }
+            // 删本层垃圾文件（复用递归时的列表，垃圾文件不受递归影响）
+            List<String> junkNames = children.stream()
+                    .filter(child -> !Boolean.TRUE.equals(child.getIsDir()) && isJunkTempFile(child))
+                    .map(OpenListFileInfo::getName)
+                    .toList();
+            if (!junkNames.isEmpty()) {
+                log.info("清理 115 云下载残留垃圾 {}/{}", current, junkNames);
+                fsRemove(current, junkNames);
             }
-            // 删已空的子目录
-            for (OpenListFileInfo child : fsList(current, true)) {
+            // 删已空的子目录：递归已确认空的直接删，未确认的逐个确认
+            List<String> emptyDirNames = new ArrayList<>();
+            for (OpenListFileInfo child : children) {
                 if (!Boolean.TRUE.equals(child.getIsDir())) {
                     continue;
                 }
@@ -2240,36 +2243,50 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 if (!fsList(childPath, true).isEmpty()) {
                     continue;
                 }
-                try {
-                    log.info("清理 115 云下载空子目录 {}/{}", current, child.getName());
-                    fsRemove(current, List.of(child.getName()));
-                } catch (Exception e) {
-                    log.debug("清理云下载空子目录失败 {}/{}: {}", current, child.getName(), e.getMessage());
-                }
+                emptyDirNames.add(child.getName());
+            }
+            if (!emptyDirNames.isEmpty()) {
+                log.info("清理 115 云下载空子目录 {}/{}", current, emptyDirNames);
+                fsRemove(current, emptyDirNames);
+                allChildrenEmpty = true;
             }
         } catch (Exception e) {
             log.debug("清理云下载残留失败 {}: {}", current, e.getMessage());
+            return false;
+        }
+        // 仅剩本层自身（无文件残留）时视为已空
+        try {
+            return fsList(current, true).isEmpty();
+        } catch (Exception e) {
+            log.debug("清理云下载残留复查失败 {}: {}", current, e.getMessage());
+            return false;
         }
     }
 
     /**
      * 目录已空时删除并沿空目录链向上清理；
      * 只清理云下载根目录内部（前缀校验），根目录自身与外部路径不动；
-     * 未解析到根目录（cloudRoot 为空）时仅允许删除源目录自身，保持旧行为。
+     * 未解析到根目录（cloudRoot 为空）时以源目录自身为上溯边界，保持旧行为。
      */
     private void deleteEmptyChainUnderCloudRoot(String dir, String cloudRoot) {
-        String root = StrUtil.isBlank(cloudRoot) ? null : trimTrailingSlash(cloudRoot);
         String origin = trimTrailingSlash(dir);
+        // 单一不变量：cursor 必须严格位于 effectiveRoot 之下（根自身与外部一律不动）
+        String effectiveRoot = StrUtil.isBlank(cloudRoot)
+                ? origin : trimTrailingSlash(cloudRoot);
         String cursor = origin;
-        int guard = 0;
-        while (StrUtil.isNotBlank(cursor) && !"/".equals(cursor) && guard++ < 8) {
-            if (root != null
-                    && !cursor.toLowerCase(Locale.ROOT).startsWith(root.toLowerCase(Locale.ROOT) + "/")) {
-                // 云下载根目录自身与外部路径一律不动
-                return;
+        int maxDepth = 1;
+        for (int i = 0; i < effectiveRoot.length() && i < origin.length(); i++) {
+            if (effectiveRoot.charAt(i) != origin.charAt(i)) {
+                break;
             }
-            if (root == null && !cursor.equalsIgnoreCase(origin)) {
-                // 未解析到根目录：仅删源目录自身，避免无界向上回溯
+            if (effectiveRoot.charAt(i) == '/') {
+                maxDepth++;
+            }
+        }
+        int guard = 0;
+        while (StrUtil.isNotBlank(cursor) && !"/".equals(cursor) && guard++ < maxDepth) {
+            if (!cursor.toLowerCase(Locale.ROOT)
+                    .startsWith(effectiveRoot.toLowerCase(Locale.ROOT) + "/")) {
                 return;
             }
             List<OpenListFileInfo> children;
@@ -2375,7 +2392,6 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         if (StrUtil.isBlank(path)) {
             return;
         }
-        api.invalidateFindFilesCache();
         List<OpenListFileInfo> entries = fsList(path, true);
         // 先递归子目录
         for (OpenListFileInfo entry : entries) {
