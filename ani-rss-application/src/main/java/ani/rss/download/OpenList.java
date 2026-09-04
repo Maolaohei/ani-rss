@@ -894,7 +894,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                             // 先兜底检查：幽灵旧任务可能已把文件下完落在临时/最终/云下载目录，
                             // 有文件直接进后处理归位，不要浪费这次成果
                             EpisodeScanResult dupScan = scanEpisodeFilesOnce(path, savePath, tempDownloadDir,
-                                    finalRenameBase, expectedEpisodes);
+                                    finalRenameBase, expectedEpisodes, titleTokens);
                             if (dupScan.alreadyFinal()) {
                                 log.info("10008 死锁但本集文件已在最终目录，视为下载完成 {}", reName);
                                 clearDuplicateMagnet(infoHash);
@@ -1012,7 +1012,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                     System.currentTimeMillis() + POST_SUCCESS_FILE_GRACE_MS);
             while (true) {
                 EpisodeScanResult scan = scanEpisodeFilesOnce(path, savePath, tempDownloadDir,
-                        finalRenameBase, expectedEpisodes);
+                        finalRenameBase, expectedEpisodes, titleTokens);
                 cloudSourceDirs.addAll(scan.cloudSourceDirs());
                 if (scan.alreadyFinal()) {
                     // 已在最终目录顶层：不要再 rename/move 到自己，直接成功；
@@ -1202,11 +1202,12 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     }
 
     /**
-     * 扫描一次本集文件：临时目录 → savePath（模板名）→ savePath 递归（按集数）→ 云下载目录（按集数）。
+     * 扫描一次本集文件：临时目录 → savePath（模板名）→ savePath 递归（按集数）→ 云下载目录（按集数+标题守卫）。
      * 只读不移动；alreadyFinal 判定要求视频全部位于 savePath 顶层（递归子目录命中不算，继续走重命名/移动）。
      */
     private EpisodeScanResult scanEpisodeFilesOnce(String path, String savePath, String tempDownloadDir,
-                                                   String finalRenameBase, List<Double> episodeRange) {
+                                                   String finalRenameBase, List<Double> episodeRange,
+                                                   List<String> titleTokens) {
         Integer expectedSeason = expectedSeasonOf(finalRenameBase);
         List<OpenListFileInfo> openListFileInfos = findFiles(path);
         Set<String> cloudSourceDirs = new HashSet<>();
@@ -1259,9 +1260,10 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             }
             if (videoList.isEmpty()) {
                 // 115 离线完成后的文件可能落在根目录「云下载」而非目标路径：
-                // 兜底扫描（原始标题命名，按集数匹配），走重命名/移动流程自动归位到 savePath
+                // 兜底扫描（按集数匹配 + 目录链标题守卫，与其它救援路径同一口径），自动归位到 savePath
                 List<OpenListFileInfo> cloudFiles = findCloudDownloadFiles();
-                List<OpenListFileInfo> cloudVideos = expectedEpisodeVideos(cloudFiles, episodeRange, expectedSeason);
+                List<OpenListFileInfo> cloudVideos = findCloudDownloadEpisodeVideos(cloudFiles,
+                        resolveCloudDownloadDir(), episodeRange, expectedSeason, titleTokens);
                 if (!cloudVideos.isEmpty()) {
                     log.info("115 云下载目录兜底扫描发现本集文件，进入后处理 videos={} 详情={}",
                             cloudVideos.size(), describeVideos(cloudVideos));
@@ -2035,9 +2037,18 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     private List<OpenListFileInfo> findCloudDownloadEpisodeVideos(List<Double> expectedEpisodes, Integer expectedSeason,
                                                                   List<String> titleTokens) {
         String cloudDir = resolveCloudDownloadDir();
-        return expectedEpisodeVideos(findCloudDownloadFiles(), expectedEpisodes, expectedSeason).stream()
-                // 云下载共享目录：再要求「文件名+所在目录链」含本订阅标题别名，防 A/B 番同季同集数互认；
-                // 目录链校验兼容原样下载结构（标题只出现在任务子目录名上，文件名可能是纯 S01E03.mkv）
+        return findCloudDownloadEpisodeVideos(findCloudDownloadFiles(), cloudDir,
+                expectedEpisodes, expectedSeason, titleTokens);
+    }
+
+    /**
+     * 云下载认领唯一口径：集数匹配 + 目录链标题守卫（兼容原样下载结构）。
+     * 已持有 cloudFiles 列表的调用方（如主扫描）走本重载，避免重复递归列目录。
+     */
+    private List<OpenListFileInfo> findCloudDownloadEpisodeVideos(List<OpenListFileInfo> cloudFiles, String cloudDir,
+                                                                   List<Double> expectedEpisodes, Integer expectedSeason,
+                                                                   List<String> titleTokens) {
+        return expectedEpisodeVideos(cloudFiles, expectedEpisodes, expectedSeason).stream()
                 .filter(f -> !cloudEntryLacksTitleToken(f.getName(), f.getPath(), cloudDir, titleTokens))
                 .toList();
     }

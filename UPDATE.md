@@ -25,6 +25,13 @@
 - port: **AniBT 部分种子缺失修复**（上游 `3a719665`，`ItemsUtil`）：RSS 条目缺 `.torrent` 文件时回退 `contentLength`/`magneturi` 字段，非种子 `link` 不再丢弃整个条目（可能已被 magneturi 兜底）
 - port: **订阅封面回填**（上游 `2147d525`，`AniUtil`）：`saveCover` 返回值写回 `ani.cover`，补全缺失封面；本 fork `CopyOptions.setOverride(false)` 拷贝语义一致，回填不会被模板值覆盖
 
+### 代码简化（奥卡姆剃刀）
+- **云下载认领口径统一**：主扫描兜底（`scanEpisodeFilesOnce` 云分支）此前是唯一不带标题守卫的平行实现，现与 Error/Failed 检查、10008 等待、超时终检、归位对账共用 `findCloudDownloadEpisodeVideos`（集数匹配 + 目录链守卫 + 原样结构兼容）；同链字幕同样受守卫约束
+- **判定参数一次解析**：`expectedEpisodes`/`expectedSeason`/`titleTokensOf` 提升到方法入口，等待循环与归位对账不再逐文件/逐轮重建
+- **清理请求量约降 3/4**：`purgeJunkAndEmptyDirsBottomUp` 返回子树空标志，垃圾/空子目录合并批量删除，列表复用
+- **空壳链上溯单规则化**：`deleteEmptyChainUnderCloudRoot` 双防护分支合一为「不越过 effectiveRoot」，魔数界改为深度派生
+- **冗余删除**：字幕过滤恒冗余的 `cloudSourceDirs` 析取、`forceRemoveTree` 死缓存失效（`fsList(refresh=true)` 不经 findFilesCache）
+
 ---
 
 ## 3.2.22-fork 增量（2026-08）
