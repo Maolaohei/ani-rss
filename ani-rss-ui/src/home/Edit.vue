@@ -48,6 +48,8 @@ let move = ref(false)
 let downloadPath = ref('')
 let callback = ref(() => {
 })
+// 打开编辑时的主RSS快照, 保存后对比判断主源是否变化
+let originalUrl = ref('')
 
 const editChange = async (fun) => {
   callback.value = fun
@@ -66,6 +68,14 @@ const editAni = () => {
         ElMessage.success(res.message)
         window.$reLoadList()
         dialogVisible.value = false
+        // 主RSS变化(如备用互换)时自动触发一次刷新, 拉取新主源集数
+        let url = ani.value.url
+        if (url && url !== originalUrl.value && ani.value.enable) {
+          http.refreshAni(ani.value)
+              .then(r => ElMessage.info(r.message || '已自动刷新新主RSS'))
+              .catch(() => {
+              })
+        }
       })
       .finally(callback.value)
 
@@ -92,6 +102,7 @@ const show = (item) => {
   ani.value = JSON.parse(JSON.stringify(item))
   ani.value.showDownlaod = true
   move.value = false
+  originalUrl.value = item.url
   dialogVisible.value = true
 }
 

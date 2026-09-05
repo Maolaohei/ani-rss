@@ -123,7 +123,7 @@ let switchTo = standby => {
   }
 
   dialogVisible.value = false
-  ElMessage.success(`已切换主RSS: ${standbyLabel(standby)}，点击「确定」保存`)
+  ElMessage.success(`已切换主RSS: ${standbyLabel(standby)}，点击「确定」保存后自动刷新`)
 }
 
 defineExpose({show})
