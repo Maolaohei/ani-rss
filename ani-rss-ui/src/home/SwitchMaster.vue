@@ -2,7 +2,7 @@
   <el-dialog v-model="dialogVisible" center title="切换主RSS" width="520px">
     <el-alert :closable="false" class="switch-alert" show-icon type="info">
       <template #title>
-        选择一条备用 RSS 与当前主 RSS 互换；原主 RSS 会自动转为备用，匹配/排除规则随字幕组标签生效，无需改动
+        选择一条备用 RSS 与当前主 RSS 互换；原主 RSS 会自动转为备用（重复 RSS 自动去重），匹配/排除规则随字幕组标签生效，无需改动
       </template>
     </el-alert>
     <el-alert v-if="config && !config.standbyRss" :closable="false"
@@ -92,35 +92,60 @@ let show = () => {
  * 将备用 RSS 与主 RSS 原位互换：
  * - 备用的 url/label/offset 迁移为主 RSS（url/subgroup/offset）
  * - 原主 RSS 快照转存到备用列表原位置，其余备用顺序保持不变
+ * - 去重：添加订阅时可能自动复制过主RSS至备用，互换会重复；
+ *   剔除与新主RSS/原主RSS同URL的备用条目，其余重复URL保留最先出现的
  */
 let switchTo = standby => {
   let ani = props.ani
 
-  let url = ani.url
+  let url = (ani.url || '').trim()
+  let newUrl = (standby.url || '').trim()
+  if (!newUrl) {
+    ElMessage.warning('该备用RSS无效')
+    return
+  }
+  if (newUrl === url) {
+    ElMessage.info('该RSS已是当前主RSS')
+    return
+  }
+
   let subgroup = ani.subgroup?.length ? ani.subgroup : '未知字幕组'
   let offset = ani.offset
 
-  ani.url = standby.url
+  ani.url = newUrl
   ani.subgroup = standbyLabel(standby)
   ani.offset = standby.offset ?? ani.offset ?? 0
 
-  let idx = ani.standbyRssList.indexOf(standby)
-  if (url?.length) {
+  let list = ani.standbyRssList || []
+  let idx = list.indexOf(standby)
+
+  // 去重重建备用列表: 移除被提升的条目; 新主RSS与原主RSS的URL不再进入备用;
+  // 其余重复URL保留最先出现的; 原主RSS快照插入到被提升条目的原位置
+  let seen = new Set([newUrl, ...(url ? [url] : [])])
+  let rest = []
+  let at = 0
+  list.forEach((it, i) => {
+    if (i === idx) {
+      at = rest.length
+      return
+    }
+    let u = (it?.url || '').trim()
+    if (!u || seen.has(u)) {
+      return
+    }
+    seen.add(u)
+    rest.push(it)
+  })
+
+  if (url) {
     // 原主RSS在原位置转为备用
-    let newStandby = {
+    rest.splice(Math.min(at, rest.length), 0, {
       label: subgroup,
       url: url,
       offset: offset ?? 0
-    }
-    if (idx > -1) {
-      ani.standbyRssList[idx] = newStandby
-    } else {
-      ani.standbyRssList.push(newStandby)
-    }
-  } else if (idx > -1) {
-    // 原主RSS为空时直接移除该备用位
-    ani.standbyRssList.splice(idx, 1)
+    })
   }
+  ani.standbyRssList = rest
 
   dialogVisible.value = false
   ElMessage.success(`已切换主RSS: ${standbyLabel(standby)}，点击「确定」保存后自动刷新`)
