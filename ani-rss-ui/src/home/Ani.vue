@@ -1,6 +1,7 @@
 <template>
   <Preview ref="previewRef" :ani="props.ani"/>
   <StandbyRss ref="standbyRssRef" :ani="props.ani"/>
+  <SwitchMaster ref="switchMasterRef" :ani="props.ani"/>
   <AniBT ref="aniBTRef" @callback="mikanCallback"/>
   <Mikan ref="mikanRef" @callback="mikanCallback"/>
   <AnimeGarden ref="animeGardenRef" @callback="mikanCallback"/>
@@ -67,6 +68,7 @@
                   <el-input v-model:model-value="props.ani.url" placeholder="https://xxx.xxx"/>
                 </div>
                 <div style="justify-content: end;margin-top: 4px;" class="flex full-width">
+                  <el-button bg text icon="Switch" @click="switchMasterRef?.show">切换</el-button>
                   <el-button bg text
                              @click="mikanShow">
                     <template #icon>
@@ -340,6 +342,7 @@ import Preview from "./Preview.vue";
 import {computed, onMounted, ref} from "vue";
 import {ElMessage, ElMessageBox, ElText} from "element-plus";
 import StandbyRss from "./StandbyRss.vue";
+import SwitchMaster from "./SwitchMaster.vue";
 import Mikan from "./Mikan.vue";
 import TmdbGroup from "./TmdbGroup.vue";
 import CustomTags from "@/config/CustomTags.vue";
@@ -356,6 +359,7 @@ const aniBTRef = ref()
 const mikanRef = ref()
 const animeGardenRef = ref()
 const tmdbGroupRef = ref()
+const switchMasterRef = ref()
 
 let standbyRssRef = ref()
 
