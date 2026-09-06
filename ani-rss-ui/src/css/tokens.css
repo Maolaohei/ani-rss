@@ -1,0 +1,57 @@
+/* ============================================================
+   tokens.css — 新版 UI 设计令牌
+   来源：ani-rss-ui/design/ui-adapted.html（已评审通过的新版皮肤）
+   职责：仅覆盖 Element Plus 设计变量与全局观感（圆角/阴影/弹层/深色配色），
+        不涉及任何业务逻辑、配置字段或接口，切换 UI 不会影响用户配置。
+   加载顺序：位于 element-plus/dist/index.css 与 dark/css-vars.css 之后生效。
+   ============================================================ */
+
+:root {
+    /* 阴影体系：更轻、更聚焦 */
+    --el-box-shadow: 0 12px 32px 4px rgba(0, 0, 0, .07), 0 8px 20px rgba(0, 0, 0, .06);
+    --el-box-shadow-light: 0 4px 14px rgba(0, 0, 0, .06);
+    --el-box-shadow-lighter: 0 2px 8px rgba(0, 0, 0, .05);
+    --el-box-shadow-dark: 0 16px 48px rgba(0, 0, 0, .16);
+
+    /* 弹层与遮罩 */
+    --el-overlay-color-lighter: rgba(0, 0, 0, .45);
+
+    --el-border-radius-extra-small: 4px;
+}
+
+html.dark {
+    /* 新版深色配色（替代旧 #2D2E2F 系，向设计稿看齐：更深、层次更清晰） */
+    --el-bg-color: #202023;
+    --el-bg-color-page: #141416;
+    --el-bg-color-overlay: #26262a;
+    --el-fill-color: rgba(255, 255, 255, .075);
+    --el-fill-color-light: rgba(255, 255, 255, .06);
+    --el-fill-color-lighter: rgba(255, 255, 255, .05);
+    --el-fill-color-blank: var(--el-bg-color);
+    --el-border-color: #2c2c30;
+    --el-border-color-light: #333338;
+    --el-border-color-lighter: #2c2c30;
+    --el-border-color-extra-light: #242428;
+    --el-text-color-placeholder: #6e6e76;
+    --el-mask-color: rgba(0, 0, 0, .6);
+
+    --el-box-shadow: 0 16px 48px rgba(0, 0, 0, .5);
+    --el-box-shadow-light: 0 8px 24px rgba(0, 0, 0, .4);
+    --el-box-shadow-lighter: 0 4px 12px rgba(0, 0, 0, .3);
+}
+
+/* 消息与消息框：与新版权型一致 */
+.el-message {
+    border-radius: 10px;
+    border-width: 0;
+    box-shadow: var(--el-box-shadow-light);
+}
+
+.el-message-box {
+    border-radius: 16px;
+}
+
+/* 气泡弹层统一圆角 */
+.el-popper.is-light {
+    border-radius: var(--el-border-radius-base);
+}

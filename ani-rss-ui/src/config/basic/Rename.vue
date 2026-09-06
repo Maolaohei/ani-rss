@@ -43,6 +43,10 @@
               target="_blank">详细说明
           </el-link>
         </el-text>
+        <rename-template-tools
+            v-model="props.config.renameTemplate"
+            :preset="EMBY_PRESET"
+            preset-name="官方EMBY标准格式"/>
       </div>
     </el-form-item>
     <el-form-item label="剧场版重命名模版(电影式)">
@@ -51,6 +55,10 @@
           <el-input v-model:model-value="props.config.ovaRenameTemplate"
                     placeholder="${title} (${year}) [${subgroup}]"/>
         </div>
+        <rename-template-tools
+            v-model="props.config.ovaRenameTemplate"
+            :preset="OVA_PRESET"
+            preset-name="电影格式（内置默认）"/>
         <el-text class="mx-1" size="small">
           仅对剧场版生效（媒体类型选"剧场版"），不包含 S/E 占位符，便于 Emby/Jellyfin 识别为电影。
           多部（上/中/下、Part N）会自动追加 Part N，可用 ${part} 占位符自定义位置。
@@ -58,7 +66,7 @@
           注意：开启上方"剔除年份"会把 ${year} 生成的年份一并移除。
         </el-text>
       </div>
-    </el-form-item>
+      </el-form-item>
     <el-form-item label="剔除年份">
       <div>
         <el-switch v-model:model-value="props.config.renameDelYear"/>
@@ -93,6 +101,7 @@
 
 <script setup>
 import {ElText} from "element-plus";
+import RenameTemplateTools from "@/config/basic/RenameTemplateTools.vue";
 
 let testRenameTemplate = renameTemplate => {
   let test = [
@@ -108,6 +117,11 @@ let testRenameTemplate = renameTemplate => {
 }
 
 let props = defineProps(['config'])
+
+/** 官方 Emby 标准格式预设（点击覆盖整个模板） */
+const EMBY_PRESET = '${title} (${year}) - S${seasonFormat}E${episodeFormat} - ${episodeTitle} ${resolution}'
+/** 剧场版内置默认预设 */
+const OVA_PRESET = '${title} (${year}) [${subgroup}]'
 </script>
 
 <style scoped>

@@ -1,13 +1,7 @@
 html.dark {
-    /* 自定义深色背景颜色 */
-    --el-bg-color: #2D2E2F;
-    --el-bg-color-overlay: var(--el-bg-color);
-    --el-fill-color-blank: var(--el-bg-color);
+    /* 深色配色基准已迁移至 css/tokens.css（新版 UI 设计令牌），此处仅保留折叠面板融合 */
     --el-collapse-header-bg-color: none;
     --el-collapse-content-bg-color: none;
-    /* 深色模式下边框颜色调整，使其更融合 */
-    --el-border-color: #414243;
-    --el-border-color-light: #4C4D4F;
 }
 
 :root {
@@ -41,7 +35,7 @@ html.dark {
 html.dark .el-card {
     border: 1px solid var(--el-border-color);
     box-shadow: none;
-    background-color: #343536; /* 稍微提亮一点背景以区分 */
+    background-color: var(--el-bg-color-overlay); /* 稍微提亮一点背景以区分 */
 }
 
 .el-overlay-dialog {

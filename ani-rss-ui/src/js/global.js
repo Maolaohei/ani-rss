@@ -52,10 +52,24 @@ const color = useLocalStorage('--el-color-primary', '#409eff')
 
 /**
  * 改动强调色
+ * 同步派生 light-3/5/7/8/9 与 dark-2 变体，
+ * 修复此前仅更新主色导致按钮 hover / 浅色底失效的问题。
  */
 const colorChange = (v) => {
+    if (!v) {
+        return
+    }
     const el = document.documentElement
+    const dark = document.documentElement.classList.contains('dark')
+    const base = dark ? '#141414' : '#ffffff'
+    const mix = (other, percent) => `color-mix(in srgb, ${base} ${percent}%, ${other})`
     el.style.setProperty('--el-color-primary', v)
+    el.style.setProperty('--el-color-primary-light-3', mix(v, 30))
+    el.style.setProperty('--el-color-primary-light-5', mix(v, 50))
+    el.style.setProperty('--el-color-primary-light-7', mix(v, 70))
+    el.style.setProperty('--el-color-primary-light-8', mix(v, 80))
+    el.style.setProperty('--el-color-primary-light-9', mix(v, 90))
+    el.style.setProperty('--el-color-primary-dark-2', mix('#000000', 20))
 }
 
 /**
@@ -82,6 +96,8 @@ const initTheme = () => {
             // 自动根据夜间模式修改沉浸式状态栏
             const meta = document.getElementById('themeColorMeta');
             meta.content = dark ? '#000000' : '#ffffff';
+            // 明暗切换后按对应底色重新派生强调色变体
+            colorChange(color.value)
         }
     })
 
