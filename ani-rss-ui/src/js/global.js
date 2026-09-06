@@ -51,6 +51,23 @@ const showLastDownloadTime = useLocalStorage("show-last-download-time", true);
 const color = useLocalStorage('--el-color-primary', '#409eff')
 
 /**
+ * 十六进制混色：a 以 percent 权重与 b 混合
+ * 不依赖 CSS color-mix()，兼容旧移动端浏览器（iOS < 16.2 / 旧 WebView）
+ */
+const mixHex = (a, b, percent) => {
+    const pa = percent / 100
+    const pb = 1 - pa
+    const ar = parseInt(a.slice(1, 3), 16)
+    const ag = parseInt(a.slice(3, 5), 16)
+    const ab = parseInt(a.slice(5, 7), 16)
+    const br = parseInt(b.slice(1, 3), 16)
+    const bg = parseInt(b.slice(3, 5), 16)
+    const bb = parseInt(b.slice(5, 7), 16)
+    const to = n => Math.round(n).toString(16).padStart(2, '0')
+    return '#' + to(ar * pa + br * pb) + to(ag * pa + bg * pb) + to(ab * pa + bb * pb)
+}
+
+/**
  * 改动强调色
  * 同步派生 light-3/5/7/8/9 与 dark-2 变体，
  * 修复此前仅更新主色导致按钮 hover / 浅色底失效的问题。
@@ -60,16 +77,19 @@ const colorChange = (v) => {
         return
     }
     const el = document.documentElement
+    el.style.setProperty('--el-color-primary', v)
+    if (!/^#[0-9a-fA-F]{6}$/.test(v)) {
+        // 非标准 6 位十六进制（如透明/异常值）时仅设置主色，变体保持 EP 默认
+        return
+    }
     const dark = document.documentElement.classList.contains('dark')
     const base = dark ? '#141414' : '#ffffff'
-    const mix = (other, percent) => `color-mix(in srgb, ${base} ${percent}%, ${other})`
-    el.style.setProperty('--el-color-primary', v)
-    el.style.setProperty('--el-color-primary-light-3', mix(v, 30))
-    el.style.setProperty('--el-color-primary-light-5', mix(v, 50))
-    el.style.setProperty('--el-color-primary-light-7', mix(v, 70))
-    el.style.setProperty('--el-color-primary-light-8', mix(v, 80))
-    el.style.setProperty('--el-color-primary-light-9', mix(v, 90))
-    el.style.setProperty('--el-color-primary-dark-2', mix('#000000', 20))
+    el.style.setProperty('--el-color-primary-light-3', mixHex(base, v, 30))
+    el.style.setProperty('--el-color-primary-light-5', mixHex(base, v, 50))
+    el.style.setProperty('--el-color-primary-light-7', mixHex(base, v, 70))
+    el.style.setProperty('--el-color-primary-light-8', mixHex(base, v, 80))
+    el.style.setProperty('--el-color-primary-light-9', mixHex(base, v, 90))
+    el.style.setProperty('--el-color-primary-dark-2', mixHex('#000000', v, 20))
 }
 
 /**

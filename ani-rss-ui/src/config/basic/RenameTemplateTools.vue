@@ -262,4 +262,31 @@ html.dark .tpl-chip:hover {
 .tpl-chip.is-preset i {
   font-weight: 600;
 }
+
+/* 移动端适配：放大触控目标、预览行标签换行不挤压 */
+@media (pointer: coarse) {
+  .tpl-chip {
+    height: 34px;
+    font-size: 12px;
+    gap: 8px;
+    padding: 0 12px;
+  }
+
+  .tpl-collapse :deep(.el-collapse-item__header) {
+    height: 40px;
+    font-size: 13px;
+  }
+}
+
+@media (max-width: 480px) {
+  .tpl-live {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+
+  .tpl-collapse-tip {
+    display: none;
+  }
+}
 </style>
