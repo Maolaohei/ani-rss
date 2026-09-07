@@ -149,6 +149,8 @@ const healthTooltip = computed(() => {
 
 .list-card-image-container {
   height: 100%;
+  border-radius: var(--el-border-radius-base);
+  overflow: hidden;
 }
 
 .list-card-image {
@@ -157,6 +159,7 @@ const healthTooltip = computed(() => {
   cursor: pointer;
   height: 130px;
   width: 92px;
+  transition: transform 320ms cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 .list-card-info {

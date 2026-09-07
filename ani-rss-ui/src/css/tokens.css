@@ -146,9 +146,9 @@ body {
     border-radius: 10px;
 }
 
-/* 气泡弹层统一圆角 */
+/* 气泡弹层统一圆角（演示页 12px） */
 .el-popper.is-light {
-    border-radius: var(--el-border-radius-base);
+    border-radius: 12px;
 }
 
 /* 无障碍：用户偏好减少动效时全部停用 */

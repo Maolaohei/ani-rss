@@ -315,6 +315,20 @@ html.dark .el-progress-bar__outer {
         display: flex;
         justify-content: center;
     }
+
+    /* 分段等宽居中（与演示页一致，避免内容宽度排版导致"基本"等页签偏离中心） */
+    .el-tabs__nav {
+        display: flex;
+        width: 100%;
+    }
+
+    .el-tabs__item {
+        flex: 1;
+        text-align: center;
+        height: 34px;
+        line-height: 34px;
+        padding: 0 12px;
+    }
 }
 
 /* ============================================================
@@ -500,4 +514,45 @@ html.dark .el-tabs__item.is-active {
         box-shadow: var(--el-box-shadow);
         border-color: var(--el-border-color-light);
     }
+
+    /* 订阅卡封面轻放大（演示页 AniCard 观感） */
+    .el-card:hover .list-card-image {
+        transform: scale(1.05);
+    }
+
+    /* 订阅卡操作按钮：悬停浮现，触屏常显 */
+    .list-card-actions {
+        opacity: 0;
+        transition: opacity var(--dur) var(--ease-apple);
+    }
+
+    .el-card:hover .list-card-actions,
+    .el-card:focus-within .list-card-actions {
+        opacity: 1;
+    }
+}
+
+@media (hover: none) {
+    .list-card-actions {
+        opacity: 1;
+    }
+}
+
+/* ---- ElMessageBox 自定义确认按钮类（is-text + is-has-bg 组合，
+       在 Edit/Del/Collection/Backup/Ani 等确认框中使用，此前无样式定义） ---- */
+.el-message-box .is-has-bg {
+    background-color: var(--el-fill-color);
+}
+
+/* ---- el-input-number 步进按钮悬停反馈 ---- */
+.el-input-number > span[role="button"] {
+    transition: filter var(--dur-fast);
+}
+
+.el-input-number > span[role="button"]:hover {
+    filter: brightness(.96);
+}
+
+html.dark .el-input-number > span[role="button"]:hover {
+    filter: brightness(1.15);
 }

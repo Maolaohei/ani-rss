@@ -268,7 +268,7 @@
       </el-tab-pane>
     </el-tabs>
   </div>
-  <div class="flex full-width" style="justify-content: space-between;margin-top: 10px;">
+  <div class="flex full-width dialog-foot" style="margin-top: 10px;">
     <div>
       <el-dropdown trigger="click">
         <el-button bg text icon="MoreFilled">
@@ -569,5 +569,16 @@ const emit = defineEmits(['callback'])
   width: 24px;
   height: 24px;
   border-radius: 8px;
+}
+
+/* 弹窗底部操作条：左右分布，窄屏收窄留白 */
+.dialog-foot {
+  justify-content: space-between;
+}
+
+@media (max-width: 640px) {
+  .dialog-foot {
+    padding: 0 4px;
+  }
 }
 </style>
