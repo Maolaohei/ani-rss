@@ -592,6 +592,98 @@ html.dark .el-input-number > span[role="button"]:hover {
     filter: brightness(1.15);
 }
 
+/* ---- el-alert：紧凑排版（圆角在 tokens 层）；info 变体转主色调（演示页取意，EP 变量随用户主色联动） ---- */
+.el-alert {
+    font-size: 12.5px;
+    line-height: 1.6;
+    padding: 9px 12px;
+    gap: 8px;
+}
+
+.el-alert--info {
+    background-color: var(--el-color-primary-light-9);
+    color: var(--el-color-primary);
+}
+
+/* ---- el-checkbox：苹果圆角方块（EP 官方变量覆写） ---- */
+.el-checkbox {
+    --el-checkbox-input-height: 16px;
+    --el-checkbox-input-width: 16px;
+    --el-checkbox-border-radius: 5px;
+}
+
+/* ---- el-dropdown-menu：宽松圆角条目 ---- */
+.el-dropdown-menu {
+    padding: 6px 8px;
+}
+
+.el-dropdown-menu__item {
+    padding: 8px 12px;
+    border-radius: 7px;
+    font-size: 13px;
+}
+
+/* ---- el-empty：描述字号 ---- */
+.el-empty__description p {
+    font-size: 13px;
+}
+
+/* ---- el-progress：柔和条形（真实使用：批量添加/任务管理器/关于更新） ---- */
+.el-progress-bar__outer,
+.el-progress-bar__inner {
+    border-radius: 4px;
+}
+
+.el-progress-bar__inner {
+    transition: width .8s var(--ease-apple);
+}
+
+/* ---- el-upload 拖拽区（真实使用：导入数据弹窗） ---- */
+.el-upload-dragger {
+    border: 1.5px dashed var(--el-border-color);
+    border-radius: 10px;
+    transition: border-color var(--dur-fast), background-color var(--dur-fast);
+}
+
+.el-upload-dragger:hover,
+.el-upload-dragger.is-dragover {
+    border-color: var(--el-color-primary);
+    background-color: var(--el-color-primary-light-9);
+}
+
+/* ---- el-tag--info：中性灰底（演示页，替代 EP 旧灰蓝） ---- */
+.el-tag.el-tag--info {
+    background-color: var(--el-fill-color);
+    color: var(--el-text-color-secondary);
+    border-color: transparent;
+}
+
+/* ---- el-select 下拉：条目圆角 + 单选右对勾（演示页） ---- */
+.el-select-dropdown__list {
+    padding: 6px 8px;
+}
+
+.el-select-dropdown__item {
+    display: flex;
+    align-items: center;
+    border-radius: 7px;
+    font-size: 13px;
+}
+
+.el-select-dropdown__item.selected::after {
+    content: "✓";
+    margin-left: auto;
+    padding-left: 12px;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--el-color-primary);
+}
+
+/* ---- el-badge 圆点：白圈浮起（设置入口更新提示） ---- */
+.el-badge__content.is-dot {
+    box-shadow: 0 0 0 2px var(--el-bg-color);
+}
+
 /* ---- 毛玻璃 sticky 顶栏（搜索/筛选/操作区）：
        首页列表由内层滚动改为页面级滚动后，顶栏吸附顶部，
        毛玻璃实时透出滚过的卡片；滚动后加软性滚动边缘（两端渐隐发丝线）与柔影 ---- */

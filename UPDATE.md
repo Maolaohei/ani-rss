@@ -26,6 +26,9 @@
 - **主题色变体修复**：`colorChange` 同步派生 `light-3/5/7/8/9` 与 `dark-2`（JS 十六进制混色，不依赖 CSS `color-mix()`，旧移动端浏览器同样生效），`useDark` 切换后自动重算——修复自定义主题色下按钮 hover / 浅色底失效的问题
 - **重命名模板增强**：新增 `RenameTemplateTools.vue`（官方文档 17 个变量 chip 点选追加、⚡预设一键覆盖——官方 EMBY 标准格式 / 剧场版电影格式、"当前模板效果"实时预览与未知变量告警），`Rename.vue` 两个模板输入框接入；纯展示层组件，config 字段与保存逻辑不变
 - **毛玻璃 sticky 顶栏**：首页列表由内层滚动改为页面级滚动，`#header` 吸顶 + 78% 页底色毛玻璃（blur 20px/saturate 180%），滚动后加深至 90%，底部以两端渐隐的发丝线 + 柔影收边、顶缘白色细缘受光（亮暗双态）；老浏览器回退纯色、reduced-transparency 关闭模糊；滚动监听 passive + 卸载清理
+- **组件适配层补全（系统迁移批次）**：alert（info 变体转主色调）、checkbox（16px/圆角 5px 方块）、dropdown-menu（宽松圆角条目）、empty（描述 13px）、progress（4px 圆角条 + 苹果曲线动画）、upload-dragger（1.5px 虚线 + 主色悬停）、tag--info（中性灰底）、select 下拉（条目圆角 + 单选右对勾）、badge 圆点（白圈浮起）——全部按演示页规则经 EP 变量/低特异性选择器移植；15 个演示页未设计的组件（avatar/color-picker/date-picker/descriptions/divider/form/input-tag/link/popconfirm/radio/rate/scrollbar/text/tooltip）保持 EP 原生
+- **登录页卡片化**：按演示页 dlg-login 规格——380px 圆角卡片 + 投影 + 18px/700 标题 + 居中链接行（原 200px 裸表单）
+- **导入数据弹窗旧皮肤清理**：21 处旧版硬编码色值（#409eff/#303133/#f0f9ff 等）全部替换为 token 变量，深色模式不再出现刺眼浅蓝块
 - **细节修复**：修改订阅弹窗"基本/自定义"页签等宽居中（此前内容宽度排版导致偏离中心）；订阅卡封面悬停轻放大（容器裁切防溢出）+ 操作按钮悬停浮现/触屏常显；`el-radio-button` 分段化（外观三态/下载工具，选中白底浮起、深色自适应）；`el-input-number` 步进按钮悬停反馈；弹层圆角 12px；弹窗 footer 顶部分隔线；按钮 `:focus-visible` 键盘焦点环；弹窗底部操作条窄屏适配。注：确认框的 `is-has-bg` 为 EP 官方类（自带样式），无需自定义
 
 ---

@@ -133,17 +133,24 @@ onMounted(() => {
   justify-content: space-between;
 }
 
+/* 演示页 dlg-login 规格：居中卡片 + 卡内图标/标题/表单 */
 #form {
-  max-width: 200px;
+  max-width: 380px;
+  box-sizing: border-box;
+  padding: 30px 28px 24px;
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-extra-light);
+  border-radius: 16px;
+  box-shadow: var(--el-box-shadow-light);
 }
 
 .title-h2 {
   text-align: center;
-  margin-bottom: 32px;
-}
-
-el-input {
-  width: 200px;
+  margin: 16px 0 28px;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--el-text-color-primary);
 }
 
 .action {
@@ -153,6 +160,11 @@ el-input {
 
 .footer {
   margin-bottom: 16px;
+  display: flex;
+  gap: 14px;
+  justify-content: center;
+  align-items: center;
+  font-size: 12px;
 }
 
 @media (max-width: 450px) {
