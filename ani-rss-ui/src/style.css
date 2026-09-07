@@ -5,16 +5,12 @@ html.dark {
 }
 
 :root {
-    /* 全局圆角优化：更圆润 */
-    --el-border-radius-small: 8px;
-    --el-border-radius-base: 12px;
-    --el-border-radius-round: 24px;
+    /* 全局圆角（与 design/ui-adapted.html 对齐） */
+    --el-border-radius-small: 7px;
+    --el-border-radius-base: 9px;
+    --el-border-radius-round: 999px;
 
     --el-collapse-item-content-padding: 16px;
-
-    /* 全局边框淡化：使用更浅的颜色 */
-    --el-border-color: var(--el-border-color-lighter);
-    --el-border-color-light: var(--el-border-color-extra-light);
 
     /* 订阅卡片列数 */
     --grid-columns: 1;
@@ -47,18 +43,26 @@ html.dark .el-card {
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
 }
 
-/* 优化输入框和选择器：更圆润，边框更淡 */
+/* 优化输入框和选择器：灰底融合（无描边），聚焦时主色描边（演示页语言） */
 .el-input__wrapper,
 .el-select__wrapper,
 .el-textarea__inner {
-    box-shadow: 0 0 0 1px var(--el-border-color) inset; /* 使用我们定义的淡化后的变量 */
+    box-shadow: none;
+    background-color: var(--el-fill-color-light);
+    transition: box-shadow var(--dur-fast), background-color var(--dur-fast);
 }
 
-/* 聚焦时保持高亮但不过分刺眼 */
+.el-input__wrapper:hover,
+.el-select__wrapper:hover {
+    background-color: var(--el-fill-color);
+}
+
+/* 聚焦时主色描边 */
 .el-input__wrapper.is-focus,
 .el-select__wrapper.is-focused,
 .el-textarea__inner:focus {
     box-shadow: 0 0 0 1px var(--el-color-primary) inset;
+    background-color: var(--el-fill-color);
 }
 
 /* 下拉弹出层圆角优化 */
@@ -106,7 +110,7 @@ html.dark .el-card {
     margin: 0;
     padding: 0;
     box-sizing: border-box;
-    font-family: "PingFang SC", "Noto Sans SC", "Microsoft YaHei", "Helvetica Neue", Helvetica, "Hiragino Sans GB", Arial, sans-serif;
+    font-family: system-ui, -apple-system, "PingFang SC", "Noto Sans SC", "Microsoft YaHei", "Helvetica Neue", Helvetica, "Hiragino Sans GB", Arial, sans-serif;
 }
 
 .el-input__inner {
@@ -310,5 +314,190 @@ html.dark .el-progress-bar__outer {
     .el-tabs__nav-scroll {
         display: flex;
         justify-content: center;
+    }
+}
+
+/* ============================================================
+   组件适配层（来源：design/ui-adapted.html 第 2 层，
+   仅映射真实 DOM 中存在的 Element Plus 结构；
+   变量与动效令牌见 css/tokens.css）
+   ============================================================ */
+
+/* ---- el-button：默认按钮改灰底无边框（经 EP 按钮变量覆写，
+       不影响 primary/success/danger 等类型按钮的自有配色）+ 按压回弹 ---- */
+.el-button:where(:not(.el-button--primary):not(.el-button--success):not(.el-button--warning):not(.el-button--danger):not(.el-button--info)) {
+    --el-button-bg-color: var(--el-fill-color);
+    --el-button-hover-bg-color: var(--el-fill-color);
+    --el-button-active-bg-color: var(--el-fill-color);
+    --el-button-border-color: transparent;
+    --el-button-hover-border-color: transparent;
+    --el-button-active-border-color: transparent;
+    --el-button-text-color: var(--el-text-color-regular);
+    --el-button-hover-text-color: var(--el-text-color-primary);
+}
+
+.el-button {
+    transition: background-color var(--dur-fast), color var(--dur-fast), transform var(--dur-fast) var(--ease-apple), box-shadow var(--dur-fast);
+}
+
+.el-button:active {
+    transform: scale(.96);
+}
+
+.el-button.is-text {
+    background-color: transparent;
+}
+
+.el-button.is-text:hover {
+    background-color: var(--el-fill-color);
+}
+
+.el-button.is-link {
+    background-color: transparent;
+    padding: 4px 2px;
+}
+
+.el-button:disabled {
+    opacity: .45;
+}
+
+.el-button .el-icon {
+    width: 15px;
+    height: 15px;
+}
+
+/* ---- el-input / el-select / el-textarea：灰底融合 ---- */
+.el-input__wrapper,
+.el-select__wrapper {
+    background-color: var(--el-fill-color-light);
+    transition: box-shadow var(--dur-fast), background-color var(--dur-fast);
+}
+
+.el-input__wrapper:hover,
+.el-select__wrapper:hover {
+    background-color: var(--el-fill-color);
+}
+
+.el-textarea__inner {
+    background-color: var(--el-fill-color-light);
+}
+
+/* ---- el-tabs：分段式页签（演示页观感；横向与左侧两种布局均适配） ---- */
+.el-tabs__nav-wrap::after {
+    display: none;
+}
+
+.el-tabs__nav-scroll {
+    background: var(--el-fill-color);
+    border-radius: 10px;
+    padding: 3px;
+    box-sizing: border-box;
+}
+
+.el-tabs__nav {
+    border: none !important;
+    border-radius: 8px;
+}
+
+.el-tabs__item {
+    border-radius: 8px;
+    color: var(--el-text-color-secondary);
+    font-weight: 500;
+    transition: background-color var(--dur-fast), color var(--dur-fast), box-shadow var(--dur-fast);
+}
+
+.el-tabs__item:hover {
+    color: var(--el-text-color-primary);
+}
+
+.el-tabs__item.is-active {
+    background-color: var(--el-bg-color);
+    color: var(--el-text-color-primary);
+    font-weight: 600;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, .1);
+}
+
+html.dark .el-tabs__item.is-active {
+    background-color: var(--el-fill-color);
+}
+
+.el-tabs__active-bar {
+    display: none;
+}
+
+/* ---- el-table：圆角容器 + 行悬停（真实页面：预览/管理/Bgm/StandbyRss） ---- */
+.el-table {
+    --el-table-border-color: var(--el-border-color-extra-light);
+    --el-table-header-bg-color: var(--el-bg-color);
+    --el-table-header-text-color: var(--el-text-color-secondary);
+    --el-table-row-hover-bg-color: var(--el-fill-color-light);
+    border-radius: 10px;
+    font-size: 12.5px;
+}
+
+.el-table th.el-table__cell {
+    font-weight: 600;
+}
+
+/* ---- el-dialog：激活标题加重 ---- */
+.el-dialog__title {
+    font-weight: 700;
+    font-size: 16px;
+}
+
+/* ---- el-form：标签次级灰 ---- */
+.el-form-item__label {
+    color: var(--el-text-color-secondary);
+}
+
+/* ---- el-switch：EP 变量覆写，选中态用成功绿（演示页取色） ---- */
+.el-switch {
+    --el-switch-on-color: var(--el-color-success);
+}
+
+/* ---- el-collapse：悬浮胶囊头 ---- */
+.el-collapse-item__header {
+    border-radius: var(--el-border-radius-base);
+    transition: background-color var(--dur-fast);
+}
+
+.el-collapse-item__header:hover {
+    background-color: var(--el-fill-color-light);
+}
+
+/* ---- el-radio-button：分段控件观感 ---- */
+.el-radio-button__inner {
+    transition: background-color var(--dur-fast), color var(--dur-fast), box-shadow var(--dur-fast);
+}
+
+/* ---- el-tag：轻字重 ---- */
+.el-tag {
+    font-weight: 500;
+}
+
+/* ---- 弹层动效：苹果弹簧曲线 ---- */
+.el-overlay-dialog,
+.el-overlay-message-box {
+    transition: opacity var(--dur) var(--ease-apple);
+}
+
+.el-dialog {
+    transition: transform var(--dur-slow) var(--ease-apple), opacity var(--dur-slow) var(--ease-apple);
+}
+
+.el-popper {
+    transition: opacity var(--dur-fast), transform var(--dur-fast) var(--ease-apple);
+}
+
+/* ---- 卡片悬停轻抬（指针精细设备才有 hover 语义） ---- */
+@media (hover: hover) {
+    .el-card {
+        transition: transform var(--dur) var(--ease-apple), box-shadow var(--dur) var(--ease-apple), border-color var(--dur) var(--ease-apple);
+    }
+
+    .el-card:hover {
+        transform: translateY(-2px);
+        box-shadow: var(--el-box-shadow);
+        border-color: var(--el-border-color-light);
     }
 }

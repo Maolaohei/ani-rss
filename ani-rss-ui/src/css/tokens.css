@@ -1,22 +1,62 @@
 /* ============================================================
    tokens.css — 新版 UI 设计令牌
    来源：ani-rss-ui/design/ui-adapted.html（已评审通过的新版皮肤）
-   职责：仅覆盖 Element Plus 设计变量与全局观感（圆角/阴影/弹层/深色配色），
+   职责：仅覆盖 Element Plus 设计变量与全局观感（配色/圆角/阴影/弹层），
         不涉及任何业务逻辑、配置字段或接口，切换 UI 不会影响用户配置。
    加载顺序：位于 element-plus/dist/index.css 与 dark/css-vars.css 之后生效。
+   兼容性：状态色 light-9 采用预计算静态 hex（等价于演示页的 color-mix），
+        不依赖 CSS color-mix()，旧移动端浏览器同样生效。
    ============================================================ */
 
 :root {
+    /* 浅色页面与内容底色：灰底白卡（新版观感的核心） */
+    --el-bg-color-page: #f5f5f7;
+
+    /* 文字灰阶（系统级） */
+    --el-text-color-primary: #1d1d1f;
+    --el-text-color-regular: #3c3c43;
+    --el-text-color-secondary: #6e6e73;
+    --el-text-color-placeholder: #a8a8ad;
+
+    /* 边框透明度灰阶：更轻、更融合 */
+    --el-border-color: rgba(0, 0, 0, .12);
+    --el-border-color-light: rgba(0, 0, 0, .09);
+    --el-border-color-lighter: rgba(0, 0, 0, .06);
+    --el-border-color-extra-light: rgba(0, 0, 0, .045);
+
+    /* 填充透明度灰阶：按钮/输入框/悬停底 */
+    --el-fill-color: rgba(0, 0, 0, .05);
+    --el-fill-color-light: rgba(0, 0, 0, .04);
+    --el-fill-color-lighter: rgba(0, 0, 0, .03);
+
+    /* 状态色板（演示页苹果系取色） */
+    --el-color-success: #34c759;
+    --el-color-warning: #ff9f0a;
+    --el-color-danger: #ff453a;
+    --el-color-error: var(--el-color-danger);
+    --el-color-info: #909399;
+    /* light-9 = 对应基色 12~14% 混白的预计算值 */
+    --el-color-success-light-9: #e5f8e9;
+    --el-color-warning-light-9: #fff2dd;
+    --el-color-danger-light-9: #ffe9e7;
+    --el-color-error-light-9: #ffe9e7;
+    --el-color-info-light-9: #f4f4f5;
+
     /* 阴影体系：更轻、更聚焦 */
-    --el-box-shadow: 0 12px 32px 4px rgba(0, 0, 0, .07), 0 8px 20px rgba(0, 0, 0, .06);
-    --el-box-shadow-light: 0 4px 14px rgba(0, 0, 0, .06);
+    --el-box-shadow: 0 18px 50px rgba(0, 0, 0, .16), 0 4px 14px rgba(0, 0, 0, .08);
+    --el-box-shadow-light: 0 4px 14px rgba(0, 0, 0, .08), 0 1px 3px rgba(0, 0, 0, .05);
     --el-box-shadow-lighter: 0 2px 8px rgba(0, 0, 0, .05);
     --el-box-shadow-dark: 0 16px 48px rgba(0, 0, 0, .16);
 
     /* 弹层与遮罩 */
-    --el-overlay-color-lighter: rgba(0, 0, 0, .45);
+    --el-overlay-color-lighter: rgba(0, 0, 0, .32);
+    --el-mask-color: rgba(0, 0, 0, .32);
 
-    --el-border-radius-extra-small: 4px;
+    /* 动效令牌（演示页 apple-design 语言） */
+    --ease-apple: cubic-bezier(0.32, 0.72, 0, 1);
+    --dur-fast: 120ms;
+    --dur: 200ms;
+    --dur-slow: 320ms;
 }
 
 html.dark {
@@ -28,30 +68,98 @@ html.dark {
     --el-fill-color-light: rgba(255, 255, 255, .06);
     --el-fill-color-lighter: rgba(255, 255, 255, .05);
     --el-fill-color-blank: var(--el-bg-color);
-    --el-border-color: #2c2c30;
-    --el-border-color-light: #333338;
-    --el-border-color-lighter: #2c2c30;
-    --el-border-color-extra-light: #242428;
-    --el-text-color-placeholder: #6e6e76;
-    --el-mask-color: rgba(0, 0, 0, .6);
+    --el-border-color: rgba(255, 255, 255, .14);
+    --el-border-color-light: rgba(255, 255, 255, .10);
+    --el-border-color-lighter: rgba(255, 255, 255, .08);
+    --el-border-color-extra-light: rgba(255, 255, 255, .06);
+    --el-text-color-primary: #f5f5f7;
+    --el-text-color-regular: #d5d5da;
+    --el-text-color-secondary: #a1a1a6;
+    --el-text-color-placeholder: #6e6e73;
+    --el-mask-color: rgba(0, 0, 0, .5);
 
-    --el-box-shadow: 0 16px 48px rgba(0, 0, 0, .5);
-    --el-box-shadow-light: 0 8px 24px rgba(0, 0, 0, .4);
-    --el-box-shadow-lighter: 0 4px 12px rgba(0, 0, 0, .3);
+    /* 深色下的状态色 light-9（基色 16~18% 混 #141416 的预计算值） */
+    --el-color-success-light-9: #193221;
+    --el-color-warning-light-9: #3e2d14;
+    --el-color-danger-light-9: #3a1c1c;
+    --el-color-error-light-9: #3a1c1c;
+    --el-color-info-light-9: #28282b;
+
+    --el-box-shadow: 0 18px 50px rgba(0, 0, 0, .55), 0 4px 14px rgba(0, 0, 0, .4);
+    --el-box-shadow-light: 0 4px 14px rgba(0, 0, 0, .4);
+    --el-box-shadow-lighter: 0 2px 8px rgba(0, 0, 0, .3);
 }
 
-/* 消息与消息框：与新版权型一致 */
+/* 页面底色与前景随主题过渡 */
+body {
+    background: var(--el-bg-color-page);
+    color: var(--el-text-color-primary);
+    transition: background-color var(--dur) var(--ease-apple), color var(--dur) var(--ease-apple);
+}
+
+/* 全局细滚动条（el-scrollbar 之外的原生滚动区域） */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--el-border-color-light);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--el-border-color);
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+/* 弹层遮罩毛玻璃（演示页观感） */
+.el-overlay {
+    -webkit-backdrop-filter: blur(3px);
+    backdrop-filter: blur(3px);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+    .el-overlay {
+        -webkit-backdrop-filter: none;
+        backdrop-filter: none;
+    }
+}
+
+/* 消息与消息框：与新版权型一致（消息为胶囊形） */
 .el-message {
-    border-radius: 10px;
+    border-radius: 999px;
     border-width: 0;
+    padding: 9px 18px;
     box-shadow: var(--el-box-shadow-light);
 }
 
 .el-message-box {
-    border-radius: 16px;
+    border-radius: 14px;
+}
+
+/* 提示条圆角 */
+.el-alert {
+    border-radius: 10px;
 }
 
 /* 气泡弹层统一圆角 */
 .el-popper.is-light {
     border-radius: var(--el-border-radius-base);
+}
+
+/* 无障碍：用户偏好减少动效时全部停用 */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: .01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: .01ms !important;
+    }
+
+    .el-card {
+        transform: none !important;
+    }
 }
