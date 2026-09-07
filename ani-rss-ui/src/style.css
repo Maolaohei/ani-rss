@@ -574,26 +574,43 @@ html.dark .el-input-number > span[role="button"]:hover {
 
 /* ---- 毛玻璃 sticky 顶栏（搜索/筛选/操作区）：
        首页列表由内层滚动改为页面级滚动后，顶栏吸附顶部，
-       毛玻璃实时透出滚过的卡片；滚动后加投影与边界线 ---- */
+       毛玻璃实时透出滚过的卡片；滚动后加软性滚动边缘（两端渐隐发丝线）与柔影 ---- */
 #header {
     position: sticky;
     top: 0;
     z-index: 500; /* 高于内容卡片、低于弹层遮罩（EP 2000+） */
     background: var(--el-bg-color-page); /* 回退：不支持 color-mix 的老浏览器 */
     background: color-mix(in srgb, var(--el-bg-color-page) 78%, transparent);
-    -webkit-backdrop-filter: blur(14px) saturate(180%);
-    backdrop-filter: blur(14px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    backdrop-filter: blur(20px) saturate(180%);
+    border-top: 1px solid rgba(255, 255, 255, .45); /* 材质顶缘受光 */
     transition: background-color var(--dur) var(--ease-apple), box-shadow var(--dur) var(--ease-apple);
 }
 
 #header.is-scrolled {
     background: var(--el-bg-color-page);
     background: color-mix(in srgb, var(--el-bg-color-page) 90%, transparent);
-    box-shadow: 0 1px 0 var(--el-border-color-lighter), 0 8px 24px rgba(0, 0, 0, .06);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .07);
+}
+
+/* 滚动边缘：两端渐隐的发丝线，替代生硬的整条分隔线 */
+#header.is-scrolled::after {
+    content: '';
+    position: absolute;
+    left: 16px;
+    right: 16px;
+    bottom: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--el-border-color-light), transparent);
+    pointer-events: none;
+}
+
+html.dark #header {
+    border-top-color: rgba(255, 255, 255, .08);
 }
 
 html.dark #header.is-scrolled {
-    box-shadow: 0 1px 0 var(--el-border-color-lighter), 0 8px 24px rgba(0, 0, 0, .4);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
 }
 
 @media (prefers-reduced-transparency: reduce) {
