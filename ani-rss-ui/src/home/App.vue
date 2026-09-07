@@ -7,7 +7,7 @@
   <TorrentsInfos ref="torrentsInfosRef"/>
   <TaskManager ref="taskManagerRef"/>
   <div class="content">
-    <div id="header">
+    <div id="header" :class="{'is-scrolled': scrolled}">
       <div style="margin: 10px;" class="auto-flex">
         <div>
           <el-input
@@ -144,7 +144,7 @@
 </template>
 
 <script setup>
-import {onMounted, ref} from "vue";
+import {onMounted, onUnmounted, ref} from "vue";
 import {Download, Fold, List as ListIcon, Plus, Refresh, Setting, Tickets} from "@element-plus/icons-vue"
 import Config from "./Config.vue";
 import List from "./List.vue";
@@ -210,6 +210,12 @@ const about = ref({
   'markdownBody': ''
 })
 
+// 页面级滚动后顶栏加投影（毛玻璃 sticky 顶栏的滚动反馈）
+const scrolled = ref(false)
+let onScroll = () => {
+  scrolled.value = (window.scrollY || document.documentElement.scrollTop) > 8
+}
+
 let refreshAni = () => {
   http.refreshAll()
       .then(res => {
@@ -220,17 +226,22 @@ let refreshAni = () => {
 onMounted(() => {
   initLayout()
   selectChange()
+  window.addEventListener('scroll', onScroll, {passive: true})
+  onScroll()
 
   http.about()
       .then(res => {
         about.value = res.data
       })
 })
+
+onUnmounted(() => {
+  window.removeEventListener('scroll', onScroll)
+})
 </script>
 
 <style scoped>
 .content {
-  height: 100%;
   display: flex;
   flex-direction: column;
 }

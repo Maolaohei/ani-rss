@@ -571,3 +571,35 @@ html.dark .el-radio-group .el-radio-button__original-radio:checked:not(:disabled
 html.dark .el-input-number > span[role="button"]:hover {
     filter: brightness(1.15);
 }
+
+/* ---- 毛玻璃 sticky 顶栏（搜索/筛选/操作区）：
+       首页列表由内层滚动改为页面级滚动后，顶栏吸附顶部，
+       毛玻璃实时透出滚过的卡片；滚动后加投影与边界线 ---- */
+#header {
+    position: sticky;
+    top: 0;
+    z-index: 500; /* 高于内容卡片、低于弹层遮罩（EP 2000+） */
+    background: var(--el-bg-color-page); /* 回退：不支持 color-mix 的老浏览器 */
+    background: color-mix(in srgb, var(--el-bg-color-page) 78%, transparent);
+    -webkit-backdrop-filter: blur(14px) saturate(180%);
+    backdrop-filter: blur(14px) saturate(180%);
+    transition: background-color var(--dur) var(--ease-apple), box-shadow var(--dur) var(--ease-apple);
+}
+
+#header.is-scrolled {
+    background: var(--el-bg-color-page);
+    background: color-mix(in srgb, var(--el-bg-color-page) 90%, transparent);
+    box-shadow: 0 1px 0 var(--el-border-color-lighter), 0 8px 24px rgba(0, 0, 0, .06);
+}
+
+html.dark #header.is-scrolled {
+    box-shadow: 0 1px 0 var(--el-border-color-lighter), 0 8px 24px rgba(0, 0, 0, .4);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+    #header {
+        -webkit-backdrop-filter: none;
+        backdrop-filter: none;
+        background: var(--el-bg-color-page);
+    }
+}

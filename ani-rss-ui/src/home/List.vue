@@ -5,8 +5,7 @@
   <Del ref="delRef"/>
   <BgmRate ref="bgmRateRef"/>
   <div class="list-container" v-loading="loading">
-    <el-scrollbar class="hide-scrollbar">
-      <div class="list-content">
+    <div class="list-content">
         <template v-if="showWeek">
           <div v-for="weekItem in filterList">
             <h2 class="list-week-title">
@@ -42,7 +41,6 @@
         </template>
         <div class="list-bottom-spacer"></div>
       </div>
-    </el-scrollbar>
   </div>
 </template>
 
@@ -159,8 +157,8 @@ let props = defineProps({
 }
 
 .list-container {
-  height: 100%;
-  overflow: hidden;
+  width: 100%;
+  min-height: 240px;
 }
 
 .list-content {
