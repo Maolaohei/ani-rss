@@ -327,7 +327,15 @@ html.dark .el-progress-bar__outer {
         text-align: center;
         height: 34px;
         line-height: 34px;
-        padding: 0 12px;
+        padding: 0 8px;
+    }
+}
+
+/* 窄屏（设置弹窗 8 段页签）：压缩内距与字号避免挤压 */
+@media (max-width: 640px) {
+    .tabs-center .el-tabs__item {
+        padding: 0 6px;
+        font-size: 13px;
     }
 }
 
@@ -426,6 +434,18 @@ html.dark .el-tabs__item.is-active {
 
 .el-tabs__active-bar {
     display: none;
+}
+
+/* 左侧页签（添加订阅）：对齐演示页 is-left 规格——固定轨宽 + 紧凑内距 */
+.el-tabs--left .el-tabs__nav {
+    width: 118px;
+}
+
+.el-tabs--left .el-tabs__item {
+    padding: 0 10px;
+    height: 34px;
+    line-height: 34px;
+    text-align: left;
 }
 
 /* ---- el-table：圆角容器 + 行悬停（真实页面：预览/管理/Bgm/StandbyRss） ---- */

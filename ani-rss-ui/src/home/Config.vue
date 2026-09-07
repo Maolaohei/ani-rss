@@ -1,7 +1,7 @@
 <template>
   <el-dialog v-model="dialogVisible" center title="设置">
     <div v-loading="loading" class="loading">
-      <el-tabs v-model:model-value="activeName" style="margin: 0 15px;">
+      <el-tabs v-model:model-value="activeName" class="tabs-center" style="margin: 0 15px;">
         <el-tab-pane label="下载设置" name="download" :lazy="true">
           <div style="height: 500px;">
             <el-scrollbar style="padding: 0 12px">
