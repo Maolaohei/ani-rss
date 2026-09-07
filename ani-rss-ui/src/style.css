@@ -489,8 +489,11 @@ html.dark .el-tabs__item.is-active {
 }
 
 /* ---- el-radio-button：分段控件观感（外观三态/下载工具）。
+       显式 opt-in：.el-radio-group.dsh-segmented ——
+       曾按元素名全局作用于 .el-radio-group，导致普通圆点单选
+       （Ani 类型/ImportAni 冲突/Bangumi 获取方式等 6 处）也被套灰底药丸（非构想），已收窄。
        选中态经 EP 官方变量覆写（EP 活跃规则特异性 0,5,0，勿用类选择器硬碰） ---- */
-.el-radio-group {
+.el-radio-group.dsh-segmented {
     --el-radio-button-checked-bg-color: var(--el-bg-color);
     --el-radio-button-checked-text-color: var(--el-text-color-primary);
     --el-radio-button-checked-border-color: transparent;
@@ -500,9 +503,9 @@ html.dark .el-tabs__item.is-active {
     gap: 2px;
 }
 
-.el-radio-group .el-radio-button__inner,
-.el-radio-group .el-radio-button:first-child .el-radio-button__inner,
-.el-radio-group .el-radio-button:last-child .el-radio-button__inner {
+.el-radio-group.dsh-segmented .el-radio-button__inner,
+.el-radio-group.dsh-segmented .el-radio-button:first-child .el-radio-button__inner,
+.el-radio-group.dsh-segmented .el-radio-button:last-child .el-radio-button__inner {
     border: none;
     border-radius: 7px;
     background-color: transparent;
@@ -511,12 +514,12 @@ html.dark .el-tabs__item.is-active {
     transition: background-color var(--dur-fast), color var(--dur-fast), box-shadow var(--dur-fast);
 }
 
-.el-radio-group .el-radio-button.is-active .el-radio-button__original-radio:not(:disabled) + .el-radio-button__inner {
+.el-radio-group.dsh-segmented .el-radio-button.is-active .el-radio-button__original-radio:not(:disabled) + .el-radio-button__inner {
     font-weight: 600;
 }
 
-html.dark .el-radio-group .el-radio-button.is-active .el-radio-button__original-radio:not(:disabled) + .el-radio-button__inner,
-html.dark .el-radio-group .el-radio-button__original-radio:checked:not(:disabled) + .el-radio-button__inner {
+html.dark .el-radio-group.dsh-segmented .el-radio-button.is-active .el-radio-button__original-radio:not(:disabled) + .el-radio-button__inner,
+html.dark .el-radio-group.dsh-segmented .el-radio-button__original-radio:checked:not(:disabled) + .el-radio-button__inner {
     background-color: var(--el-fill-color);
 }
 

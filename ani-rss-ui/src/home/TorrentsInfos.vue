@@ -2,7 +2,7 @@
   <el-dialog v-model="dialogVisible" center title="下载">
     <div class="torrents-container">
       <div class="torrents-header">
-        <el-radio-group v-model="sortType">
+        <el-radio-group v-model="sortType" class="dsh-segmented">
           <el-radio-button
               v-for="item in sortTypeList"
               :value="item.value"

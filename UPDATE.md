@@ -29,6 +29,7 @@
 - **组件适配层补全（系统迁移批次）**：alert（info 变体转主色调）、checkbox（16px/圆角 5px 方块）、dropdown-menu（宽松圆角条目）、empty（描述 13px）、progress（4px 圆角条 + 苹果曲线动画）、upload-dragger（1.5px 虚线 + 主色悬停）、tag--info（中性灰底）、select 下拉（条目圆角 + 单选右对勾）、badge 圆点（白圈浮起）——全部按演示页规则经 EP 变量/低特异性选择器移植；15 个演示页未设计的组件（avatar/color-picker/date-picker/descriptions/divider/form/input-tag/link/popconfirm/radio/rate/scrollbar/text/tooltip）保持 EP 原生
 - **登录页卡片化**：按演示页 dlg-login 规格——380px 圆角卡片 + 投影 + 18px/700 标题 + 居中链接行（原 200px 裸表单）
 - **导入数据弹窗旧皮肤清理**：21 处旧版硬编码色值（#409eff/#303133/#f0f9ff 等）全部替换为 token 变量，深色模式不再出现刺眼浅蓝块
+- **意外实现排查修复（两处 token/选择器外溢）**：① `--el-mask-color` 深幕布外溢 v-loading 加载遮罩——已改专属轻磨砂白纱；② `.el-radio-group` 灰底药丸样式外溢普通圆点单选（Ani 类型/ImportAni 冲突/Bangumi 获取方式/AniBT/AG/Mikan 匹配组共 6 处）——药丸收窄为显式 opt-in `.dsh-segmented`（外观三态/下载排序两处挂类保持分段观感），圆点组回归 EP 原生
 - **细节修复**：修改订阅弹窗"基本/自定义"页签等宽居中（此前内容宽度排版导致偏离中心）；订阅卡封面悬停轻放大（容器裁切防溢出）+ 操作按钮悬停浮现/触屏常显；`el-radio-button` 分段化（外观三态/下载工具，选中白底浮起、深色自适应）；`el-input-number` 步进按钮悬停反馈；弹层圆角 12px；弹窗 footer 顶部分隔线；按钮 `:focus-visible` 键盘焦点环；弹窗底部操作条窄屏适配。注：确认框的 `is-has-bg` 为 EP 官方类（自带样式），无需自定义
 
 ---

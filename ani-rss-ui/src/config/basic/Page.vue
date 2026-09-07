@@ -21,7 +21,7 @@
   <el-form @submit.prevent label-width="auto"
            class="full-width">
     <el-form-item label="外观">
-      <el-radio-group v-model="store">
+      <el-radio-group v-model="store" class="dsh-segmented">
         <el-radio-button label="自动" value="auto">
           <template #default>
             <el-icon>
