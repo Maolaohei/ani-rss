@@ -122,6 +122,16 @@ body {
     backdrop-filter: blur(3px);
 }
 
+/* v-loading 加载遮罩：轻磨砂纱（--el-mask-color 的深幕布语义仅为弹窗遮罩设计，
+   不能让数据加载把页面压暗；EP 浅色默认即白纱） */
+.el-loading-mask {
+    background-color: rgba(245, 245, 247, .72);
+}
+
+html.dark .el-loading-mask {
+    background-color: rgba(20, 20, 22, .72);
+}
+
 @media (prefers-reduced-transparency: reduce) {
     .el-overlay {
         -webkit-backdrop-filter: none;
