@@ -9,9 +9,12 @@ import ani.rss.util.other.ConfigUtil;
 import cn.hutool.core.collection.ListUtil;
 import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.lang.Assert;
+import cn.hutool.core.util.NumberUtil;
+import cn.hutool.core.util.ObjectUtil;
 import cn.hutool.core.util.ReUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.core.util.URLUtil;
+import cn.hutool.http.HttpResponse;
 import cn.hutool.http.HttpUtil;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
@@ -91,7 +94,8 @@ public class MikanService {
                 }
 
                 MikanBgm mikanBgm = mikanBgmMap.get(mikanId);
-                Double score = mikanBgm.getScore();
+                // score 可能为 null, 兜底 0.0, 避免下方 comparingDouble 拆箱 NPE
+                Double score = ObjectUtil.defaultIfNull(mikanBgm.getScore(), 0.0);
                 String bgmId = mikanBgm.getBgmId();
                 mikanInfo.setScore(score)
                         .setBgmId(bgmId);
@@ -137,7 +141,8 @@ public class MikanService {
 
         String url = getMikanHost();
         if (StrUtil.isNotBlank(text)) {
-            url = url + "/Home/Search?searchstr=" + URLUtil.encodeBlank(text);
+            // 标题需完整 URL 编码, 防止 / & # 等特殊字符截断或改变 query
+            url = url + "/Home/Search?searchstr=" + URLUtil.encodeAll(text);
         } else {
             Integer year = season.getYear();
             String seasonStr = season.getSeason();
@@ -151,26 +156,43 @@ public class MikanService {
 
         HttpReq.get(url)
                 .then(res -> {
+                    HttpReq.assertStatus(res);
+                    assertNotChallengePage(res);
                     Document document = Jsoup.parse(res.body());
                     Elements dateSelects = document.select(".date-select");
                     if (!dateSelects.isEmpty()) {
-                        Element dateSelect = dateSelects.get(0);
                         String dateText = dateSelects.get(0).select(".date-text").text().trim();
-                        Element dropdownMenu = dateSelect.selectFirst(".dropdown-menu");
-                        for (Element child : dropdownMenu.children()) {
-                            Elements seasonItems = child.select("li");
-                            for (Element seasonItem : seasonItems.subList(1, seasonItems.size())) {
-                                Element a = seasonItem.selectFirst("a");
-                                String dataYear = a.attr("data-year");
-                                String dataSeason = a.attr("data-season");
-                                String selectLabel = StrUtil.format("{} {}", dataYear, dataSeason);
-                                seasons.add(
-                                        new Mikan.Season()
-                                                .setYear(Integer.parseInt(dataYear))
-                                                .setSeason(dataSeason)
-                                                .setSeasonLabel(selectLabel)
-                                                .setSelect(dateText.startsWith(selectLabel))
-                                );
+                        Element dropdownMenu = dateSelects.get(0).selectFirst(".dropdown-menu");
+                        if (Objects.isNull(dropdownMenu)) {
+                            // 下拉菜单缺失, 跳过季列表解析
+                            log.warn("Mikan 季列表结构异常, 未找到 .dropdown-menu");
+                        } else {
+                            for (Element child : dropdownMenu.children()) {
+                                Elements seasonItems = child.select("li");
+                                // 第一个 li 是标题项, 需剔除
+                                List<Element> items = seasonItems.size() > 1
+                                        ? seasonItems.subList(1, seasonItems.size())
+                                        : Collections.emptyList();
+                                for (Element seasonItem : items) {
+                                    Element a = seasonItem.selectFirst("a");
+                                    if (Objects.isNull(a)) {
+                                        continue;
+                                    }
+                                    String dataYear = a.attr("data-year");
+                                    String dataSeason = a.attr("data-season");
+                                    if (!NumberUtil.isInteger(dataYear)) {
+                                        // 年份非数字, 脏数据跳过
+                                        continue;
+                                    }
+                                    String selectLabel = StrUtil.format("{} {}", dataYear, dataSeason);
+                                    seasons.add(
+                                            new Mikan.Season()
+                                                    .setYear(Integer.parseInt(dataYear))
+                                                    .setSeason(dataSeason)
+                                                    .setSeasonLabel(selectLabel)
+                                                    .setSelect(dateText.startsWith(selectLabel))
+                                    );
+                                }
                             }
                         }
                     }
@@ -182,8 +204,11 @@ public class MikanService {
                         }
                         Elements lis = el.select("li");
                         for (Element li : lis) {
-                            String img = getMikanHost() + li.selectFirst("span")
-                                    .attr("data-src");
+                            Element span = li.selectFirst("span");
+                            if (Objects.isNull(span)) {
+                                continue;
+                            }
+                            String img = getMikanHost() + span.attr("data-src");
                             Elements aa = li.select("a");
                             if (aa.isEmpty()) {
                                 continue;
@@ -223,8 +248,14 @@ public class MikanService {
                                 continue;
                             }
 
+                            Elements children = skBangumi.children();
+                            if (children.isEmpty()) {
+                                // 星期标签缺失, 脏数据跳过
+                                continue;
+                            }
+
                             // 星期
-                            String label = skBangumi.children().get(0).text().trim();
+                            String label = children.get(0).text().trim();
 
                             Mikan.Week week = new Mikan.Week();
                             week.setWeekLabel(label)
@@ -254,6 +285,8 @@ public class MikanService {
     public List<Mikan.Group> getGroups(String url) {
         List<Mikan.Group> groupList = HttpReq.get(url)
                 .thenFunction(res -> {
+                    HttpReq.assertStatus(res);
+                    assertNotChallengePage(res);
                     Document document = Jsoup.parse(res.body());
                     List<Mikan.Group> groups = new ArrayList<>();
 
@@ -262,8 +295,11 @@ public class MikanService {
                     for (Element bangumiInfo : bangumiInfos) {
                         String string = bangumiInfo.ownText();
                         if (string.equals("Bangumi番组计划链接：")) {
-                            bgmUrl = bangumiInfo.selectFirst("a")
-                                    .attr("href");
+                            Element a = bangumiInfo.selectFirst("a");
+                            if (Objects.isNull(a)) {
+                                continue;
+                            }
+                            bgmUrl = a.attr("href");
                         }
                     }
 
@@ -277,7 +313,22 @@ public class MikanService {
                         String label = subgroupText.select("a.subgroup-name").text().trim();
                         // id锚点，例如 #213
                         String id = subgroupText.select("a.subgroup-name").attr("data-anchor");
-                        String attr = document.selectFirst(id).selectFirst(".mikan-rss").attr("href");
+                        if (StrUtil.isBlank(id)) {
+                            // 锚点为空, 跳过防止空选择器异常
+                            continue;
+                        }
+                        Element anchor = document.selectFirst(id);
+                        if (Objects.isNull(anchor)) {
+                            // 锚点缺失, 该字幕组结构异常, 跳过
+                            log.warn("Mikan 字幕组锚点缺失, 跳过: {}", label);
+                            continue;
+                        }
+                        Element rssElement = anchor.selectFirst(".mikan-rss");
+                        if (Objects.isNull(rssElement)) {
+                            log.warn("Mikan 字幕组 rss 链接缺失, 跳过: {}", label);
+                            continue;
+                        }
+                        String attr = rssElement.attr("href");
                         group.setLabel(label)
                                 .setRss(getMikanHost() + attr);
                         groups.add(group);
@@ -285,27 +336,9 @@ public class MikanService {
                         String day = subgroupText.select(".date").text().trim();
                         group.setUpdateDay(day);
 
-                        Element table = document.selectFirst(id).nextElementSibling();
-                        Element tbody = table.selectFirst("tbody");
-                        for (Element tr : tbody.children()) {
-                            String title = tr.select("a").get(0).ownText();
-                            String magnet = tr.select("a").get(1).attr("data-clipboard-text");
-                            String formatSize = tr.select("td").get(2).text().trim();
-                            String dateStr = tr.select("td").get(3).text().trim();
-
-                            String torrent = tr.select("a").get(2).attr("href");
-
-                            String mikanHost = getMikanHost();
-
-                            items.add(
-                                    new Mikan.Item()
-                                            .setTitle(title)
-                                            .setMagnet(magnet)
-                                            .setFormatSize(formatSize)
-                                            .setCreatedAt(DateUtil.parse(dateStr))
-                                            .setTorrent(mikanHost + torrent)
-                            );
-                        }
+                        Element table = anchor.nextElementSibling();
+                        Element tbody = Objects.isNull(table) ? null : table.selectFirst("tbody");
+                        parseEpisodeTable(tbody, items);
                     }
 
                     return groups;
@@ -327,6 +360,8 @@ public class MikanService {
         String url = host + "/Home/Bangumi/" + bangumiId;
         return HttpReq.get(url)
                 .thenFunction(res -> {
+                    HttpReq.assertStatus(res);
+                    assertNotChallengePage(res);
                     MikanInfo mikanInfo = new MikanInfo();
 
                     mikanInfo.setUrl(url);
@@ -347,9 +382,11 @@ public class MikanService {
                     for (Element bangumiInfo : bangumiInfos) {
                         String string = bangumiInfo.ownText();
                         if (string.equals("Bangumi番组计划链接：")) {
-                            String bgmUrl = bangumiInfo.selectFirst("a")
-                                    .attr("href");
-                            mikanInfo.setBgmUrl(bgmUrl);
+                            Element a = bangumiInfo.selectFirst("a");
+                            if (Objects.isNull(a)) {
+                                continue;
+                            }
+                            mikanInfo.setBgmUrl(a.attr("href"));
                         }
                     }
 
@@ -360,7 +397,6 @@ public class MikanService {
 
                     for (Element subgroupText : subgroupTitles) {
                         Mikan.Group group = new Mikan.Group();
-                        groups.add(group);
 
                         List<Mikan.Item> items = new ArrayList<>();
                         group.setItems(items);
@@ -369,41 +405,38 @@ public class MikanService {
 
                         // id锚点，例如 #213
                         String id = subgroupText.select("a.subgroup-name").attr("data-anchor");
+                        if (StrUtil.isBlank(id)) {
+                            // 锚点为空, 跳过防止空选择器异常
+                            continue;
+                        }
 
-                        String attr = html.selectFirst(id)
-                                .selectFirst(".mikan-rss")
-                                .attr("href");
+                        Element anchor = html.selectFirst(id);
+                        if (Objects.isNull(anchor)) {
+                            // 锚点缺失, 该字幕组结构异常, 跳过
+                            log.warn("Mikan 字幕组锚点缺失, 跳过: {}", label);
+                            continue;
+                        }
+                        Element rssElement = anchor.selectFirst(".mikan-rss");
+                        if (Objects.isNull(rssElement)) {
+                            log.warn("Mikan 字幕组 rss 链接缺失, 跳过: {}", label);
+                            continue;
+                        }
+                        String attr = rssElement.attr("href");
 
                         group.setLabel(label)
                                 .setSubgroupId(id.replace("#", "").trim())
                                 .setRss(getMikanHost() + attr);
+
+                        groups.add(group);
 
                         // 字幕组更新日期
                         String day = subgroupText.select(".date").text().trim();
 
                         group.setUpdateDay(day);
 
-                        Element table = html.selectFirst(id).nextElementSibling();
-                        Element tbody = table.selectFirst("tbody");
-                        for (Element tr : tbody.children()) {
-                            String title = tr.select("a").get(0).ownText();
-                            String magnet = tr.select("a").get(1).attr("data-clipboard-text");
-                            String formatSize = tr.select("td").get(2).text().trim();
-                            String dateStr = tr.select("td").get(3).text().trim();
-
-                            String torrent = tr.select("a").get(2).attr("href");
-
-                            String mikanHost = getMikanHost();
-
-                            items.add(
-                                    new Mikan.Item()
-                                            .setTitle(title)
-                                            .setMagnet(magnet)
-                                            .setFormatSize(formatSize)
-                                            .setCreatedAt(DateUtil.parse(dateStr))
-                                            .setTorrent(mikanHost + torrent)
-                            );
-                        }
+                        Element table = anchor.nextElementSibling();
+                        Element tbody = Objects.isNull(table) ? null : table.selectFirst("tbody");
+                        parseEpisodeTable(tbody, items);
                     }
 
                     mikanInfo.setGroups(groups);
@@ -434,6 +467,67 @@ public class MikanService {
             if (subgroupId.equals(id)) {
                 ani.setSubgroup(label);
             }
+        }
+    }
+
+    /**
+     * 检测 Mikan 是否返回 Cloudflare 挑战页, 命中则抛出带语义的异常
+     */
+    private static void assertNotChallengePage(HttpResponse res) {
+        String body = res.body();
+        if (StrUtil.isNotBlank(body)
+                && (body.contains("Just a moment") || body.contains("cf-chl"))) {
+            throw new IllegalStateException("Mikan 被 Cloudflare 拦截, 请配置代理");
+        }
+    }
+
+    /**
+     * 解析字幕组条目表格 (getGroups 与 getMikanInfo 共用)
+     * 逐格判空取值, 单行脏数据跳过而非整体失败
+     */
+    private static void parseEpisodeTable(Element tbody, List<Mikan.Item> items) {
+        if (Objects.isNull(tbody)) {
+            // 表格缺失, 无条目
+            return;
+        }
+        for (Element tr : tbody.children()) {
+            Elements as = tr.select("a");
+            Elements tds = tr.select("td");
+            // 需要: a[0] 标题, a[1] 磁力, a[2] 种子链接, td[2] 大小, td[3] 时间
+            if (as.size() < 3 || tds.size() < 4) {
+                continue;
+            }
+            String title = as.get(0).ownText();
+            String magnet = as.get(1).attr("data-clipboard-text");
+            String formatSize = tds.get(2).text().trim();
+            String dateStr = tds.get(3).text().trim();
+            String torrent = as.get(2).attr("href");
+
+            String mikanHost = getMikanHost();
+
+            items.add(
+                    new Mikan.Item()
+                            .setTitle(title)
+                            .setMagnet(magnet)
+                            .setFormatSize(formatSize)
+                            .setCreatedAt(parseDateQuietly(dateStr))
+                            .setTorrent(mikanHost + torrent)
+            );
+        }
+    }
+
+    /**
+     * 安全解析时间字符串, 失败时返回 null 并记录日志
+     */
+    private static Date parseDateQuietly(String dateStr) {
+        if (StrUtil.isBlank(dateStr)) {
+            return null;
+        }
+        try {
+            return DateUtil.parse(dateStr);
+        } catch (Exception e) {
+            log.warn("时间解析失败: {}", dateStr);
+            return null;
         }
     }
 

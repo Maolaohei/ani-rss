@@ -20,8 +20,13 @@ public class AniService {
      */
     public Boolean updateTotalEpisodeNumber(Ani ani, BgmInfo bgmInfo, Boolean force) {
         Integer totalEpisodeNumber = ani.getTotalEpisodeNumber();
-        if (!force) {
-            // 未开启强制更新
+        if (totalEpisodeNumber == null) {
+            // 旧订阅数据可能缺失 totalEpisodeNumber，跳过更新避免拆箱 NPE
+            log.warn("{} 总集数为空，跳过总集数更新", ani.getTitle());
+            return false;
+        }
+        if (!Boolean.TRUE.equals(force)) {
+            // 未开启强制更新（force 为空视为未开启）
             if (totalEpisodeNumber > 0) {
                 // 总集数不为 0
                 return false;

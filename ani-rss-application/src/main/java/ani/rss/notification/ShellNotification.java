@@ -4,7 +4,11 @@ import ani.rss.entity.Ani;
 import ani.rss.entity.NotificationConfig;
 import ani.rss.enums.NotificationStatusEnum;
 import ani.rss.util.other.RenameUtil;
+import cn.hutool.core.io.IoUtil;
 import cn.hutool.core.lang.Assert;
+import cn.hutool.core.thread.ExecutorBuilder;
+import cn.hutool.core.thread.NamedThreadFactory;
+import cn.hutool.core.util.StrUtil;
 import cn.hutool.system.SystemUtil;
 import lombok.extern.slf4j.Slf4j;
 
@@ -16,6 +20,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -24,6 +29,16 @@ import java.util.stream.Collectors;
  */
 @Slf4j
 public class ShellNotification implements BaseNotification {
+
+    /**
+     * 进程输出读取专用有界线程池：2 线程、daemon、命名 shell-notify-reader。
+     * 不占用 ForkJoinPool.commonPool，避免读取阻塞泄漏公共池线程
+     */
+    private static final ExecutorService READER_EXECUTOR = ExecutorBuilder.create()
+            .setCorePoolSize(2)
+            .setMaxPoolSize(2)
+            .setThreadFactory(new NamedThreadFactory("shell-notify-reader", true))
+            .build();
 
     /**
      * 测试
@@ -73,6 +88,7 @@ public class ShellNotification implements BaseNotification {
         log.debug(shell);
 
         Process process = null;
+        CompletableFuture<String> outputFuture = null;
         try {
             process = new ProcessBuilder(getShellCommand(shell))
                     .redirectErrorStream(true)
@@ -80,37 +96,47 @@ public class ShellNotification implements BaseNotification {
             long pid = process.pid();
             log.info("pid: {}", pid);
 
-            CompletableFuture<String> outputFuture = readStreamAsync(process.getInputStream());
-
-            process.onExit()
-                    .thenAccept(result -> {
-                        try {
-                            String output = outputFuture.get(5, TimeUnit.SECONDS);
-                            log.debug(output);
-                        } catch (Exception ignored) {
-                        }
-
-                        int exitValue = result.exitValue();
-                        log.info("已退出 pid: {}, exit: {}", pid, exitValue);
-                    });
+            outputFuture = readStreamAsync(process.getInputStream());
 
             try {
                 boolean b = process.waitFor(aliveLimit, TimeUnit.SECONDS);
                 if (!b) {
                     log.info("存活超时已强制停止 pid: {}", pid);
+                    // 先销毁主进程，再强杀全部孙进程，防止孙进程持有 stdout 管道导致读取线程永久阻塞
                     process.destroy();
+                    process.descendants().forEach(ProcessHandle::destroyForcibly);
                     return false;
                 }
             } catch (InterruptedException e) {
                 log.error(e.getMessage(), e);
                 return false;
             }
-            return process.exitValue() == 0;
+
+            int exitValue = process.exitValue();
+            log.info("已退出 pid: {}, exit: {}", pid, exitValue);
+
+            String output = null;
+            try {
+                output = outputFuture.get(5, TimeUnit.SECONDS);
+            } catch (Exception ignored) {
+            }
+            if (StrUtil.isNotBlank(output)) {
+                log.debug(output);
+            }
+            return exitValue == 0;
         } catch (Exception e) {
             throw new RuntimeException(e);
         } finally {
+            if (Objects.nonNull(outputFuture)) {
+                // 中断读取任务：读取线程随后会因底层流被关闭而退出
+                outputFuture.cancel(true);
+            }
             if (Objects.nonNull(process)) {
                 process.destroy();
+                // 追加强杀全部孙进程，避免残留进程持有管道导致读取线程永久阻塞
+                process.descendants().forEach(ProcessHandle::destroyForcibly);
+                // 关闭底层输出流，解除读取线程可能仍存在的 read() 阻塞
+                IoUtil.close(process.getInputStream());
             }
         }
     }
@@ -130,16 +156,23 @@ public class ShellNotification implements BaseNotification {
             } catch (IOException e) {
                 throw new CompletionException("流读取异常", e);
             }
-        });
+            // 自建有界线程池，避免占用 ForkJoinPool.commonPool；线程超时后 cancel(true)+close 流可退出
+        }, READER_EXECUTOR);
     }
 
     /**
      * 清洗将拼入 shell 命令的外部数据：剥离全部 shell 元字符，防命令注入。
-     * 保留字母/数字/中文、空格与常见安全符号（. , : / - _ = + % @）
+     * 保留字母/数字/中文、空格与常见安全符号（. , : / - _ = + @）。
+     * 仅 Windows 路径额外把 % 与 ^ 一并替换为空格：Windows 走 cmd.exe /c，
+     * %VAR% 会触发环境变量展开、^ 是 cmd 转义符；Linux 下二者为普通字符，无需剥离
      */
     private static String sanitizeShellValue(String s) {
         if (s == null) {
             return null;
+        }
+        if (SystemUtil.getOsInfo().isWindows()) {
+            // Windows 走 cmd.exe /c，剥离 % 与 ^，防止 %VAR% 环境变量展开与转义符注入
+            return s.replaceAll("[;&|<>$`\\\\\"'()\\[\\]{}*?!~#%^\\n\\r\\t]", " ");
         }
         return s.replaceAll("[;&|<>$`\\\\\"'()\\[\\]{}*?!~#\\n\\r\\t]", " ");
     }
@@ -182,6 +215,7 @@ public class ShellNotification implements BaseNotification {
                 "mkfs\\s",      // mkfs
                 "dd\\s+if=",    // dd if=
                 "\\$\\{",       // 未替换模板变量/变量注入
+                "%[^%]{1,256}%", // %VAR% Windows 环境变量引用（含 %VAR:~0,3% 子串展开）
                 ";\\s*(wget|curl|nc|python|perl|bash|sh|base64|chmod|chown|kill|pkill|systemctl|docker|sudo|su|shutdown|reboot)\\s",
                 "\\|\\s*(wget|curl|nc|python|perl|bash|sh|base64|chmod|chown|kill|pkill|systemctl|docker|sudo|su|shutdown|reboot)\\s",
                 "&&\\s*(wget|curl|nc|python|perl|bash|sh|base64|chmod|chown|kill|pkill|systemctl|docker|sudo|su|shutdown|reboot)\\s",

@@ -15,7 +15,6 @@ import cn.hutool.core.util.StrUtil;
 import cn.hutool.http.Header;
 import cn.hutool.http.HttpRequest;
 import cn.hutool.http.HttpResponse;
-import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import lombok.extern.slf4j.Slf4j;
@@ -351,30 +350,54 @@ public class OpenListApi {
 
     /**
      * 未完成的离线任务
+     * (E8) 对齐 fsList 容错: 先校验 HTTP 状态; data 缺失/isJsonNull 返回空列表,
+     * 调用失败返回空列表, 不再让脏响应打挂整条链路
      *
      * @return 任务列表
      */
     public List<OpenListTaskInfo> taskUnDoneList() {
-        return getApi("task/offline_download/undone")
-                .thenFunction(res -> {
-                    JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                    JsonArray jsonArray = jsonObject.get("data").getAsJsonArray();
-                    return GsonStatic.fromJsonList(jsonArray, OpenListTaskInfo.class);
-                });
+        try {
+            return getApi("task/offline_download/undone")
+                    .thenFunction(res -> {
+                        HttpReq.assertStatus(res);
+                        JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
+                        JsonElement data = jsonObject == null ? null : jsonObject.get("data");
+                        if (data == null || data.isJsonNull()) {
+                            log.warn("OpenList task/undone 返回缺少 data, 按空任务处理");
+                            return List.of();
+                        }
+                        return GsonStatic.fromJsonList(data.getAsJsonArray(), OpenListTaskInfo.class);
+                    });
+        } catch (Exception e) {
+            log.warn("OpenList task/undone 调用失败: {}", ExceptionUtils.getMessage(e));
+            return List.of();
+        }
     }
 
     /**
      * 已完成的离线任务
+     * (E8) 对齐 fsList 容错: 先校验 HTTP 状态; data 缺失/isJsonNull 返回空列表,
+     * 调用失败返回空列表, 不再让脏响应打挂整条链路
      *
      * @return 任务列表
      */
     public List<OpenListTaskInfo> taskDoneList() {
-        return getApi("task/offline_download/done")
-                .thenFunction(res -> {
-                    JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                    JsonArray jsonArray = jsonObject.get("data").getAsJsonArray();
-                    return GsonStatic.fromJsonList(jsonArray, OpenListTaskInfo.class);
-                });
+        try {
+            return getApi("task/offline_download/done")
+                    .thenFunction(res -> {
+                        HttpReq.assertStatus(res);
+                        JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
+                        JsonElement data = jsonObject == null ? null : jsonObject.get("data");
+                        if (data == null || data.isJsonNull()) {
+                            log.warn("OpenList task/done 返回缺少 data, 按空任务处理");
+                            return List.of();
+                        }
+                        return GsonStatic.fromJsonList(data.getAsJsonArray(), OpenListTaskInfo.class);
+                    });
+        } catch (Exception e) {
+            log.warn("OpenList task/done 调用失败: {}", ExceptionUtils.getMessage(e));
+            return List.of();
+        }
     }
 
     /**

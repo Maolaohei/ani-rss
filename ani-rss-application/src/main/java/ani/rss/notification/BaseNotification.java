@@ -165,6 +165,10 @@ public interface BaseNotification {
         Config config = ConfigUtil.CONFIG;
         String template = config.getNotificationTemplate();
 
+        // 防自嵌套无限递归：全局模板自身若含 ${notification}，递归前先剥离，
+        // 否则字符串不收缩会一直递归直到 StackOverflowError
+        template = template.replace("${notification}", "");
+
         template = replaceNotificationTemplate(ani, template, text, notificationStatusEnum);
 
         notificationTemplate = notificationTemplate.replace("${notification}", template);

@@ -6,43 +6,92 @@ import ani.rss.entity.web.Result;
 import ani.rss.util.other.ConfigUtil;
 import cn.hutool.core.codec.Base64;
 import cn.hutool.core.io.FileUtil;
+import cn.hutool.core.lang.Assert;
 import cn.hutool.crypto.SecureUtil;
 import io.swagger.v3.oas.annotations.Operation;
 import jakarta.servlet.http.HttpServletRequest;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.io.ByteArrayInputStream;
 import java.io.File;
-import java.io.IOException;
+import java.io.InputStream;
+import java.util.Locale;
+import java.util.Set;
 
+@Slf4j
 @RestController
 public class UploadController extends BaseController {
+
+    /**
+     * 单请求大小上限: 10 MiB
+     */
+    private static final long MAX_UPLOAD_SIZE = 10L * 1024 * 1024;
+
+    /**
+     * 允许上传的扩展名白名单 (图片/字幕/视频), 显式排除 svg/html 等可执行内容
+     */
+    private static final Set<String> IMAGE_EXT = Set.of("png", "jpg", "jpeg", "webp");
+    private static final Set<String> SUBTITLE_EXT = Set.of("ass", "ssa", "sub", "srt", "lyc", "sup", "pgs", "mks");
+    private static final Set<String> VIDEO_EXT = Set.of("mp4", "mkv", "avi", "wmv");
+
     @Auth
     @Operation(summary = "上传文件")
     @PostMapping(value = "/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public Result<Object> upload(@RequestParam("file") MultipartFile file) throws IOException {
+    public Result<Object> upload(@RequestParam("file") MultipartFile file) throws Exception {
+        Assert.notNull(file, "文件为空");
+
+        // 单请求大小上限
+        Assert.isTrue(file.getSize() <= MAX_UPLOAD_SIZE, "文件超过大小限制 (10MiB)");
+
         HttpServletRequest request = Global.REQUEST.get();
         String type = request.getParameter("type");
-        byte[] fileContent = file.getBytes();
+
         if ("getBase64".equals(type)) {
-            return Result.success(r ->
-                    r.setData(Base64.encode(fileContent))
-            );
+            // Base64 分支需整包读入内存, 同样受大小上限约束
+            try (InputStream inputStream = file.getInputStream()) {
+                byte[] fileContent = inputStream.readAllBytes();
+                return Result.success(r ->
+                        r.setData(Base64.encode(fileContent))
+                );
+            }
         }
 
-        String s = SecureUtil.md5(new ByteArrayInputStream(fileContent));
         String fileName = file.getOriginalFilename();
-        String saveName = s + "." + FileUtil.extName(fileName);
+        String extName = FileUtil.extName(fileName).toLowerCase(Locale.ROOT);
 
-        File configDir = ConfigUtil.getConfigDir();
-        FileUtil.mkdir(configDir + "/files/" + s.charAt(0));
-        FileUtil.writeBytes(fileContent, configDir + "/files/" + s.charAt(0) + "/" + saveName);
+        // 扩展名白名单: 仅允许图片/字幕/视频, 且显式拒绝 svg/html/htm/js 等可执行内容 (防存储型 XSS)
+        Assert.isTrue(isAllowedExt(extName), "不支持的文件格式: {}", extName);
+
+        String saveDir = ConfigUtil.getConfigDir() + "/files/";
+
+        // 流式计算 MD5 与落盘, 不再将整个文件读入内存
+        String s;
+        try (InputStream inputStream = file.getInputStream()) {
+            s = SecureUtil.md5(inputStream);
+        }
+
+        String saveName = s + "." + extName;
+        File targetFile = new File(saveDir, s.charAt(0) + "/" + saveName);
+
+        FileUtil.mkdir(targetFile.getParentFile());
+        try (InputStream inputStream = file.getInputStream()) {
+            FileUtil.writeFromStream(inputStream, targetFile);
+        }
+
         return new Result<>()
                 .setMessage("上传完成")
                 .setData(s.charAt(0) + "/" + saveName);
     }
+
+    /**
+     * 扩展名白名单判定
+     */
+    private static boolean isAllowedExt(String extName) {
+        return IMAGE_EXT.contains(extName) || SUBTITLE_EXT.contains(extName) || VIDEO_EXT.contains(extName);
+    }
+
 }

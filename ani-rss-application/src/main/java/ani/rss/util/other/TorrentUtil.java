@@ -42,6 +42,8 @@ public class TorrentUtil {
 
     /**
      * 获取任务列表（带缓存，5秒内重复调用直接返回缓存）
+     * (E1) 查询异常不再吞掉返回空列表: 向上抛出, 由调用方区分"无任务"与"查询失败",
+     * 避免查询失败被当作无任务放行并发上限/误判坏种; 缓存命中路径不受影响。
      */
     public static synchronized List<TorrentsInfo> getTorrentsInfos() {
         long now = System.currentTimeMillis();
@@ -80,7 +82,8 @@ public class TorrentUtil {
         File configDir = ConfigUtil.getConfigDir();
 
         String pinyin = PinyinUtils.getPinyin(title);
-        String s = pinyin.toUpperCase().substring(0, 1);
+        // 标题清洗后可能为空: 空串取首字母会 StringIndexOutOfBounds, 回落 "#"(用 isBlank 同时防 null)
+        String s = StrUtil.isBlank(pinyin) ? "#" : pinyin.toUpperCase().substring(0, 1);
         if (ReUtil.isMatch("^\\d$", s)) {
             s = "0";
         } else if (!ReUtil.isMatch("^[a-zA-Z]$", s)) {
@@ -221,9 +224,11 @@ public class TorrentUtil {
     }
 
     /**
-     * 启动时清理 .pending 残留: 仅删除"对应正式种子记录已存在"的标记
-     * (promote 后遗留或历史崩溃残留)。正式记录不存在的不动——可能是进行中的离线任务,
-     * 由同 hash 提交时的 adopt/复用逻辑处理。
+     * 启动时清理 .pending 残留(启动瞬间本进程必无在途离线任务, 全部 pending 均可安全清理):
+     * - 正式种子记录已存在: 任务已完成(promote 后遗留或历史崩溃残留), 删除标记;
+     * - 正式记录不存在: 孤儿 pending —— 崩溃前离线等待未完成, 若保留会被 RSS 轮次
+     *   "pending 存在即跳过"永久拦截, 该集静默漏下。因此同样删除,
+     *   等待下轮 RSS 重新提交离线任务(远端任务将由 adopt/10008 复用逻辑接管, 不会重复下载)。
      */
     public static void cleanupOrphanPending() {
         try {
@@ -238,9 +243,11 @@ public class TorrentUtil {
                 }
                 String rel = pendingRoot.toPath().relativize(f.toPath()).toString();
                 File formal = new File(new File(configDir, "torrents"), rel);
+                FileUtil.del(f);
                 if (formal.exists()) {
-                    FileUtil.del(f);
                     log.info("清理已完成任务的 pending 残留: {}", rel);
+                } else {
+                    log.warn("孤儿 pending 已清除，等待下轮 RSS 重新提交(远端任务将由 10008/adopt 逻辑接管): {}", rel);
                 }
             });
         } catch (Exception e) {
@@ -401,11 +408,13 @@ public class TorrentUtil {
     }
 
     /**
-     * 重命名
+     * 重命名(整体不再 static synchronized, A4)。
+     * 仅"第一次 rename 调用 + 状态读取"在类锁短临界区内完成;
+     * 失败退避重试循环在锁外执行, 不再把 RSS worker 长时间阻塞在类锁上。
      *
      * @param torrentsInfo
      */
-    public static synchronized void rename(TorrentsInfo torrentsInfo) {
+    public static void rename(TorrentsInfo torrentsInfo) {
         Config config = ConfigUtil.CONFIG;
         Boolean rename = config.getRename();
         if (!rename) {
@@ -417,16 +426,25 @@ public class TorrentUtil {
             return;
         }
 
-        // 不再固定 sleep；失败后短退避重试一次
-        Boolean renamed = DOWNLOAD.rename(torrentsInfo);
+        // 第一次调用: 同步查 DOWNLOAD 状态并下发 rename, 仅此处持锁
+        Boolean renamed = renameOnce(torrentsInfo);
         if (!Boolean.TRUE.equals(renamed)) {
+            // 不再固定 sleep；失败后短退避重试一次(锁外, A4)
             ThreadUtil.sleep(500);
-            renamed = DOWNLOAD.rename(torrentsInfo);
+            renamed = renameOnce(torrentsInfo);
         }
         if (Boolean.TRUE.equals(renamed)) {
             addTags(torrentsInfo, TorrentsTags.RENAME.getValue());
             refreshTorrentsCache();
         }
+    }
+
+    /**
+     * 类锁保护的短临界区: 同步调用一次 DOWNLOAD.rename 并读取结果(A4)。
+     * 多轮退避等待已在锁外; 对外行为与原 rename 保持兼容(调用方 RenameTask 不改)。
+     */
+    private static synchronized Boolean renameOnce(TorrentsInfo torrentsInfo) {
+        return DOWNLOAD.rename(torrentsInfo);
     }
 
     /**

@@ -15,7 +15,6 @@ import ani.rss.util.other.TaskFailureHumanizer;
 import ani.rss.util.other.TempDirResidualPolicy;
 import ani.rss.util.other.TorrentUtil;
 import cn.hutool.core.date.DateTime;
-import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.lang.Assert;
 import cn.hutool.core.text.StrFormatter;
@@ -35,7 +34,7 @@ import java.util.*;
 import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.TimeUnit;
@@ -56,14 +55,20 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     /**
      * 独立长任务池：OpenList 离线等待（最长 60 分钟）在此执行，不再占用 RSS 主线程池。
      * daemon 线程：JVM 退出不阻塞；并发离线任务数 2~4。
+     * (E12) 显式 ThreadPoolExecutor + 有界队列(32) + AbortPolicy: 队列满时提交立即失败,
+     * 由 submit 处的 catch 释放占位并返回失败, 不再让任务无限排队后"预判超时"误杀。
      */
-    private static final ExecutorService OFFLINE_WAIT_POOL = Executors.newFixedThreadPool(
+    private static final ExecutorService OFFLINE_WAIT_POOL = new java.util.concurrent.ThreadPoolExecutor(
             Math.max(2, Math.min(4, Runtime.getRuntime().availableProcessors() / 2)),
+            Math.max(2, Math.min(4, Runtime.getRuntime().availableProcessors() / 2)),
+            0L, TimeUnit.MILLISECONDS,
+            new java.util.concurrent.LinkedBlockingQueue<>(32),
             runnable -> {
                 Thread thread = new Thread(runnable, "openlist-offline-wait");
                 thread.setDaemon(true);
                 return thread;
-            });
+            },
+            new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
 
     /**
      * 提交中去重：防止同一 infoHash 被重复提交到 OpenList
@@ -81,8 +86,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
      * 一键清理会整树删掉其它在途下载目录（含未完成媒体）。
      */
     private static final ConcurrentHashMap<String, Set<String>> ACTIVE_TEMP_DIRS_BY_HASH = new ConcurrentHashMap<>();
-    /** 用户取消时置位，打断 sleep 与轮询 */
-    private static final AtomicBoolean offlineCancelRequested = new AtomicBoolean(false);
+    /** 用户取消时按 hash 记录取销请求(E6): shouldAbortWait 只查当前任务自身 hash, 新提交不得清除其它 hash 的标记 */
+    private static final Set<String> CANCEL_REQUESTED_HASHES = ConcurrentHashMap.newKeySet();
     /** 进程内仅启动回扫一次（login 成功后异步） */
     private static final AtomicBoolean startupResidualScanned = new AtomicBoolean(false);
     /** 最近一次残留快照（任务管理器展示） */
@@ -239,12 +244,18 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             }
             // 提交即受理：等待+提升+失败处理移交独立长任务池，不再占用 RSS 主线程池；
             // pending 标记保持到离线真正完成，预览不会误判"已下载"；
-            // 取消经 offlineCancelRequested/RssTask.isCancelRequested 由后台任务自行响应
+            // 取消经 CANCEL_REQUESTED_HASHES/RssTask.isCancelRequested 由后台任务自行响应
             final String finalSavePath = savePath;
             try {
                 OFFLINE_WAIT_POOL.submit(() -> finalizeOfflineDownload(ctx, ani, item, finalSavePath));
+            } catch (RejectedExecutionException | IllegalStateException e) {
+                // (E12) 池关闭/队列满(AbortPolicy)/拒绝: 释放占位, 避免同 hash 死等
+                log.error("提交离线等待任务失败 {}: {}", item.getReName(), ExceptionUtils.getMessage(e));
+                releaseOfflinePlaceholder(hashKey, ctx.tid, ctx.claimedInFlight,
+                        config.getDelete(), ctx.newlySubmittedTid);
+                return false;
             } catch (Exception e) {
-                // 池关闭/拒绝（极低概率）：释放占位，避免同 hash 死等
+                // (E12) 其他异常同样释放占位, 避免同 hash 死等
                 log.error("提交离线等待任务失败 {}: {}", item.getReName(), ExceptionUtils.getMessage(e));
                 releaseOfflinePlaceholder(hashKey, ctx.tid, ctx.claimedInFlight,
                         config.getDelete(), ctx.newlySubmittedTid);
@@ -275,7 +286,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 TorrentUtil.refreshTorrentsCache();
                 return;
             }
-            if (offlineCancelRequested.get() || RssTask.isCancelRequested()) {
+            if (CANCEL_REQUESTED_HASHES.contains(ctx.infoHash) || RssTask.isCancelRequested()) {
                 // 用户取消：仅清 pending，不误发"下载失败"通知/不记失败队列
                 log.info("离线下载被用户取消，清理 pending {}", ctx.reName);
                 try {
@@ -339,7 +350,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         final boolean isCollection;
         final boolean skipNewSubmit;
         final int waitMinutes;
-        final long deadlineMs;
+        /** (E5) 离线等待截止时间: 由 awaitAndFinalize 开工时刻计算后写回 */
+        long deadlineMs;
         /** 原始磁力链接：卡住任务删除后重新提交使用 */
         final String magnet;
 
@@ -416,13 +428,12 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             if (!inFlightTasks.add(infoHash)) {
                 // 等待持有方结束，返回 true 避免 DownloadService 删种子
                 log.info("infoHash 正在处理中，等待其完成 {}", reName);
-                Integer waitMinutes = ObjectUtil.defaultIfNull(config.getAlistDownloadTimeout(), 30);
-                waitMinutes = Math.max(waitMinutes, 1);
-                long deadline = System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(waitMinutes);
-                int waitPoll = 0;
+                // (E4) 同 hash 等待上限 60s(1s 间隔有限轮询), 不再按完整离线超时死等:
+                // 持 ANI 锁+hash 锁的 RSS worker 不能被长时间阻塞
+                long deadline = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(60);
                 while (inFlightTasks.contains(infoHash)
                         && System.currentTimeMillis() < deadline) {
-                    if (shouldAbortWait()) {
+                    if (shouldAbortWait(infoHash)) {
                         log.warn("等待同 hash 任务被用户取消 {}", reName);
                         return shortCircuitResult(false);
                     }
@@ -430,10 +441,10 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                     if (remain <= 0) {
                         break;
                     }
-                    long sleepMs = Math.min(nextPollIntervalMs(waitPoll++), remain);
+                    long sleepMs = Math.min(1000L, remain);
                     long end = System.currentTimeMillis() + sleepMs;
                     while (System.currentTimeMillis() < end) {
-                        if (shouldAbortWait()) {
+                        if (shouldAbortWait(infoHash)) {
                             log.warn("等待同 hash 任务被用户取消 {}", reName);
                             return shortCircuitResult(false);
                         }
@@ -443,19 +454,21 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                     }
                 }
                 if (inFlightTasks.contains(infoHash)) {
-                    log.error("等待同 hash 任务超过离线超时 {} 分钟，放弃 {}", waitMinutes, reName);
-                    throw new OfflineTimeoutException(reName + " 等待同 hash 任务超过离线超时 " + waitMinutes + " 分钟");
-                } else {
-                    log.info("同 hash 任务已结束 {}", reName);
-                    // 等待方未实际提交下载: 清除本订阅的 pending 标记,
-                    // 避免 DownloadService 收到 true 后将其提升为正式记录(假完成, 导致永久漏下)
-                    TorrentUtil.deletePendingTorrent(ani, item);
+                    // (E4) 60s 有限轮询超时: 不再抛超时/不再死等, 按现有"提交即受理"语义
+                    // 返回 true 并保留 pending, 下轮 RSS 由 adopt/10008 逻辑接管远端任务
+                    log.warn("等待同 hash 任务超过 60s，按提交即受理返回(保留 pending) {} hash={}", reName, infoHash);
+                    return shortCircuitResult(true);
                 }
+                log.info("同 hash 任务已结束 {}", reName);
+                // 等待方未实际提交下载: 清除本订阅的 pending 标记,
+                // 避免 DownloadService 收到 true 后将其提升为正式记录(假完成, 导致永久漏下)
+                TorrentUtil.deletePendingTorrent(ani, item);
                 return shortCircuitResult(true);
             }
             claimedInFlight = true;
             currentInfoHashes.add(infoHash);
-            offlineCancelRequested.set(false);
+            // (E6) 新提交只清除本 hash 的取消标记, 不得影响其它在途任务
+            CANCEL_REQUESTED_HASHES.remove(infoHash);
             int waitMinutesInit = Math.max(ObjectUtil.defaultIfNull(config.getAlistDownloadTimeout(), 30), 1);
             updateOfflineWait(infoHash, reName, tempDirName, null, "Pending",
                     System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(waitMinutesInit));
@@ -545,12 +558,10 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             }
 
             Integer alistDownloadTimeout = config.getAlistDownloadTimeout();
-            Long alistDownloadRetryNumber = config.getAlistDownloadRetryNumber();
-            DateTime startTime = DateTime.now();
-            // 唯一截止：用户配置的【离线超时】
+            // (E5) waitMinutes 仅透传给等待阶段; deadline 改由 awaitAndFinalize 开工时刻计算:
+            // OFFLINE_WAIT_POOL 有界队列排队期间不再计入离线超时, 防止排队任务被"预判超时"误杀
             int waitMinutes = ObjectUtil.defaultIfNull(alistDownloadTimeout, 30);
             waitMinutes = Math.max(waitMinutes, 1);
-            long deadlineMs = DateUtil.offsetMinute(startTime, waitMinutes).getTime();
             if (skipNewSubmit) {
                 log.info("10008 冷却期内不重复提交，按离线超时 {} 分钟等待文件/任务 {}", waitMinutes, reName);
             }
@@ -558,7 +569,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             OfflineDownloadContext ctx = new OfflineDownloadContext(
                     infoHash, reName, finalRenameBase, tempDirName,
                     path, tempDownloadDir, isCollection, skipNewSubmit,
-                    waitMinutes, deadlineMs, magnet);
+                    waitMinutes, 0L, magnet);
             ctx.tid = tid;
             ctx.claimedInFlight = claimedInFlight;
             ctx.newlySubmittedTid = newlySubmittedTid;
@@ -776,13 +787,17 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         String tempDownloadDir = ctx.tempDownloadDir;
         boolean isCollection = ctx.isCollection;
         String infoHash = ctx.infoHash;
-        long deadlineMs = ctx.deadlineMs;
         int waitMinutes = ctx.waitMinutes;
+        // (E5) deadline 在开工时刻计算(而非提交时刻): OFFLINE_WAIT_POOL 有界队列可能排队,
+        // 排队时间若计入离线超时会误杀正常任务(提交后迟迟不进入等待即被超时 purge)
+        long deadlineMs = System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(waitMinutes);
+        ctx.deadlineMs = deadlineMs;
         int pollIndex = 0;
         // tid 会随 10008 切换，需写回 ctx 供 finally 清理使用
         String tid = ctx.tid;
         long retry = ctx.retry;
-        Long alistDownloadRetryNumber = config.getAlistDownloadRetryNumber();
+        // (E7) 旧配置可能缺 alistDownloadRetryNumber(拆箱 NPE), 默认 5
+        long retryLimit = ObjectUtil.defaultIfNull(config.getAlistDownloadRetryNumber(), 5L);
         Boolean delete = config.getDelete();
         boolean claimedInFlight = ctx.claimedInFlight;
         // 本集判定参数一次解析，等待循环与各兜底分支复用
@@ -792,7 +807,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         List<String> titleTokens = titleTokensOf(ani, item);
         try {
             while (DateTime.now().getTime() < deadlineMs) {
-                if (shouldAbortWait()) {
+                if (shouldAbortWait(infoHash)) {
                     log.warn("离线等待被用户取消 {}", reName);
                     try {
                         purgeHashTasks(infoHash);
@@ -808,7 +823,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                     Optional<OpenListTaskInfo> taskInfoOpt = taskInfo(tid);
                     if (taskInfoOpt.isEmpty()) {
                         // 避免 taskInfo 空响应时 tight loop
-                        sleepUntilNextPoll(deadlineMs, pollIndex++);
+                        sleepUntilNextPoll(infoHash, deadlineMs, pollIndex++);
                         continue;
                     }
 
@@ -837,7 +852,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                                 && detectStallAndResubmit(ctx, taskInfo)) {
                             continue; // 已删除并重新提交，重新轮询新 tid
                         }
-                        sleepUntilNextPoll(deadlineMs, pollIndex++);
+                        sleepUntilNextPoll(infoHash, deadlineMs, pollIndex++);
                         continue;
                     }
 
@@ -920,7 +935,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                                     "{} 115 云端存在该磁力历史任务导致去重死锁(10008)，已进入24h长冷却；"
                                             + "请到 115 离线列表删除同名旧任务后等下一轮自动重试", reName));
                         }
-                        sleepUntilNextPoll(deadlineMs, pollIndex++);
+                        sleepUntilNextPoll(infoHash, deadlineMs, pollIndex++);
                         continue;
                     }
                     // Error/Failed：仅当本集临时目录或最终目录命中本集文件时才当完成
@@ -952,14 +967,14 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                         return false;
                     }
                     // 非终态异常（Failing 等）：按次数重试
-                    if (alistDownloadRetryNumber > -1 && retry >= alistDownloadRetryNumber) {
+                    if (retryLimit > -1 && retry >= retryLimit) {
                         log.error("离线下载失败 {} (已重试{}次)", taskInfo.getError(), retry);
                         return false;
                     }
                     retry++;
-                    log.info("离线任务重试 {}/{} state={}", retry, alistDownloadRetryNumber, state);
+                    log.info("离线任务重试 {}/{} state={}", retry, retryLimit, state);
                     taskRetry(tid);
-                    sleepUntilNextPoll(deadlineMs, pollIndex++);
+                    sleepUntilNextPoll(infoHash, deadlineMs, pollIndex++);
                     continue;
                 }
 
@@ -973,7 +988,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                     break;
                 }
                 // 与有 tid 一致：20s -> 1min -> 5min -> 10min
-                sleepUntilNextPoll(deadlineMs, pollIndex++);
+                sleepUntilNextPoll(infoHash, deadlineMs, pollIndex++);
             }
 
             if (DateTime.now().getTime() >= deadlineMs) {
@@ -2944,8 +2959,9 @@ public class OpenList implements BaseDownload, OfflineDownloader {
 
     /**
      * 睡眠到下次轮询，但不超过 deadline。
+     * (E6) 取消判定只看本任务自身 hash, 不受其它并行任务取消标记影响。
      */
-    private static void sleepUntilNextPoll(long deadlineMs, int pollIndex) {
+    private static void sleepUntilNextPoll(String infoHash, long deadlineMs, int pollIndex) {
         long remain = deadlineMs - System.currentTimeMillis();
         if (remain <= 0) {
             return;
@@ -2954,7 +2970,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         // 分段睡眠，便于任务管理器取消尽快生效
         long end = System.currentTimeMillis() + sleepMs;
         while (System.currentTimeMillis() < end) {
-            if (offlineCancelRequested.get() || RssTask.isCancelRequested()) {
+            if (shouldAbortWait(infoHash)) {
                 return;
             }
             long slice = Math.min(1000L, end - System.currentTimeMillis());
@@ -3714,9 +3730,9 @@ public class OpenList implements BaseDownload, OfflineDownloader {
      * - 未登录：只释放本地占用，不打远程 API
      */
     public void cancelCurrentOffline() {
-        offlineCancelRequested.set(true);
-        // 多 hash 并行时取消全部在等任务（快照避免并发修改）
+        // (E6) per-hash 取消: 对当前全部在等 hash 逐一置位, 不再有全局开关
         Set<String> hashes = Set.copyOf(currentInfoHashes);
+        CANCEL_REQUESTED_HASHES.addAll(hashes);
         if (hashes.isEmpty()) {
             return;
         }
@@ -3746,9 +3762,10 @@ public class OpenList implements BaseDownload, OfflineDownloader {
 
     /**
      * 轮询/等待是否应中止（超时仍由 deadline 负责）
+     * (E6) 只查本任务自身 hash 的取消标记, 互不干扰并行任务的取消语义
      */
-    private boolean shouldAbortWait() {
-        return offlineCancelRequested.get() || RssTask.isCancelRequested();
+    private static boolean shouldAbortWait(String infoHash) {
+        return CANCEL_REQUESTED_HASHES.contains(infoHash) || RssTask.isCancelRequested();
     }
 
     private TimeoutFileInspection inspectTimeoutFiles(String tempPath, String savePath, String reName,

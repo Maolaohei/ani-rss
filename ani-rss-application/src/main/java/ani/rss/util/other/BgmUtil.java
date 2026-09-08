@@ -103,7 +103,8 @@ public class BgmUtil {
 
         String bgmApi = config.getBgmApi();
 
-        String url = UrlBuilder.of(bgmApi + "/search/subject/" + name)
+        // 路径段需完整编码, 防止标题中 / & # 等特殊字符改变路径或截断 query (空格转 %20)
+        String url = UrlBuilder.of(bgmApi + "/search/subject/" + URLUtil.encodeAll(name))
                 .addQuery("type", 2)
                 .addQuery("max_results", 25)
                 .addQuery("responseGroup", "small")
@@ -140,12 +141,15 @@ public class BgmUtil {
 
     /**
      * 查找番剧id
+     * <p>
+     * (A9) 不再加 synchronized: 缓存走线程安全的 CacheUtils, 并发同名词汇最多重复一次搜索
+     * (结果一致, put 后写覆盖无实际影响); 原实现持类锁做网络搜索+睡眠 1s, 会拖长整个 RSS 轮次。
      *
      * @param bgmName 名称
      * @param s       季度
      * @return 番剧id
      */
-    public static synchronized String getSubjectId(String bgmName, Integer s) {
+    public static String getSubjectId(String bgmName, Integer s) {
         if (StrUtil.isBlank(bgmName)) {
             return "";
         }
@@ -245,15 +249,32 @@ public class BgmUtil {
                         return List.of();
                     }
 
-                    return GsonStatic.fromJson(body, JsonObject.class)
-                            .get("data")
+                    JsonObject jsonObject = GsonStatic.fromJson(body, JsonObject.class);
+                    if (Objects.isNull(jsonObject)) {
+                        // 响应为 JSON null, 视为无集数数据
+                        return List.of();
+                    }
+
+                    JsonElement dataElement = jsonObject.get("data");
+                    if (Objects.isNull(dataElement) || dataElement.isJsonNull() || !dataElement.isJsonArray()) {
+                        // data 缺失、null 或形态异常, 视为无集数数据
+                        log.warn("BGM episodes 响应缺少 data: subjectId={}", subjectId);
+                        return List.of();
+                    }
+
+                    return dataElement
                             .getAsJsonArray()
                             .asList()
                             .stream()
                             .map(JsonElement::getAsJsonObject)
                             .filter(itemObject -> {
                                 if (Objects.nonNull(type)) {
-                                    return type == itemObject.get("type").getAsInt();
+                                    JsonElement typeElement = itemObject.get("type");
+                                    if (Objects.isNull(typeElement) || typeElement.isJsonNull()) {
+                                        // type 缺失, 无法匹配, 跳过该条
+                                        return false;
+                                    }
+                                    return type == typeElement.getAsInt();
                                 }
                                 return true;
                             })
@@ -371,6 +392,10 @@ public class BgmUtil {
         String epId = "";
         String sortId = "";
 
+        if (Objects.isNull(e)) {
+            return epId;
+        }
+
         String key = "BGM_getEpisodeId:" + subjectId;
 
         List<JsonObject> episodes = CacheUtils.get(key);
@@ -379,14 +404,21 @@ public class BgmUtil {
             CacheUtils.put(key, episodes, TimeUnit.MINUTES.toMillis(10));
         }
         for (JsonObject itemObject : episodes) {
-            double ep = itemObject.get("ep").getAsDouble();
-            double sort = itemObject.get("sort").getAsDouble();
-            if (ep == e) {
-                epId = itemObject.get("id").getAsString();
+            JsonElement epElement = itemObject.get("ep");
+            JsonElement sortElement = itemObject.get("sort");
+            JsonElement idElement = itemObject.get("id");
+
+            if (Objects.isNull(idElement) || idElement.isJsonNull()) {
+                // id 缺失, 跳过该条
+                continue;
+            }
+
+            if (Objects.nonNull(epElement) && !epElement.isJsonNull() && epElement.getAsDouble() == e) {
+                epId = idElement.getAsString();
                 break;
             }
-            if (sort == e) {
-                sortId = itemObject.get("id").getAsString();
+            if (Objects.nonNull(sortElement) && !sortElement.isJsonNull() && sortElement.getAsDouble() == e) {
+                sortId = idElement.getAsString();
                 break;
             }
         }
@@ -408,11 +440,26 @@ public class BgmUtil {
         String bgmApi = config.getBgmApi();
         JsonObject jsonObject = setToken(HttpReq.get(bgmApi + "/v0/users/-/collections/-/episodes/" + episodeId))
                 .contentType(ContentType.JSON)
-                .thenFunction(res -> GsonStatic.fromJson(res.body(), JsonObject.class));
+                .thenFunction(res -> {
+                    if (res.getStatus() == 404) {
+                        // 未收藏, 视为 type=0 继续后续标记
+                        return null;
+                    }
+                    HttpReq.assertStatus(res);
+                    return GsonStatic.fromJson(res.body(), JsonObject.class);
+                });
 
-        int typeNow = jsonObject.get("type").getAsInt();
-        if (type == typeNow) {
-            return;
+        if (Objects.isNull(jsonObject)) {
+            // 404 未收藏, typeNow 视为 0
+            if (Objects.equals(type, 0)) {
+                return;
+            }
+        } else {
+            JsonElement typeElement = jsonObject.get("type");
+            if (Objects.nonNull(typeElement) && !typeElement.isJsonNull() && Objects.equals(typeElement.getAsInt(), type)) {
+                // 状态一致, 无需标记
+                return;
+            }
         }
 
         // 间隔 500 毫秒, 防止流控
@@ -570,19 +617,50 @@ public class BgmUtil {
 
         // 从别名获取
         for (JsonObject jsonObject : infobox) {
-            String key = jsonObject.get("key").getAsString();
-            if (!key.equals("别名")) {
+            JsonElement keyElement = jsonObject.get("key");
+            if (Objects.isNull(keyElement) || keyElement.isJsonNull()) {
                 continue;
             }
-            JsonArray value = jsonObject.getAsJsonArray("value");
-            for (JsonElement jsonElement : value.asList()) {
-                JsonObject item = jsonElement.getAsJsonObject();
-                String v = item.get("v").getAsString();
-                int season = getSeasonByName(v);
+            if (!keyElement.getAsString().equals("别名")) {
+                continue;
+            }
+            JsonElement value = jsonObject.get("value");
+            if (Objects.isNull(value) || value.isJsonNull()) {
+                // 别名 value 缺失, 跳过
+                continue;
+            }
+
+            if (value.isJsonPrimitive()) {
+                // 字符串形态: "value": "剧场版 第一季"
+                int season = getSeasonByName(value.getAsString());
                 if (season > 1) {
                     return season;
                 }
+            } else if (value.isJsonArray()) {
+                // 数组形态: 元素可为对象 {"v": "..."} 或纯字符串
+                for (JsonElement jsonElement : value.getAsJsonArray().asList()) {
+                    if (Objects.isNull(jsonElement) || jsonElement.isJsonNull()) {
+                        continue;
+                    }
+                    String v = null;
+                    if (jsonElement.isJsonObject()) {
+                        JsonElement vElement = jsonElement.getAsJsonObject().get("v");
+                        if (Objects.nonNull(vElement) && vElement.isJsonPrimitive()) {
+                            v = vElement.getAsString();
+                        }
+                    } else if (jsonElement.isJsonPrimitive()) {
+                        v = jsonElement.getAsString();
+                    }
+                    if (StrUtil.isBlank(v)) {
+                        continue;
+                    }
+                    int season = getSeasonByName(v);
+                    if (season > 1) {
+                        return season;
+                    }
+                }
             }
+            // 其他形态(嵌套对象等)跳过
         }
 
         // 都未匹配到 返回季度1
@@ -591,6 +669,10 @@ public class BgmUtil {
 
     public static Integer getSeasonByName(String name) {
         int season = 1;
+
+        if (StrUtil.isBlank(name)) {
+            return season;
+        }
 
         List<String> regexList = List.of(
                 // 第一季 第一期
@@ -623,11 +705,14 @@ public class BgmUtil {
 
     /**
      * 设置token
+     * <p>
+     * (A9) 不再加 synchronized: 方法内无共享可变状态(仅读 volatile CONFIG + 设置请求头),
+     * 原实现持类锁睡眠 500-1000ms 会把全站 BGM 流量串行化; 保留睡眠作为调用节奏限制。
      *
      * @param httpRequest
      * @return
      */
-    public static synchronized HttpRequest setToken(HttpRequest httpRequest) {
+    public static HttpRequest setToken(HttpRequest httpRequest) {
         String bgmToken = config.getBgmToken();
 
         if (StrUtil.isNotBlank(bgmToken)) {
@@ -744,7 +829,7 @@ public class BgmUtil {
             return episodeTitleMap;
         }
 
-        if (ani.getOva()) {
+        if (Boolean.TRUE.equals(ani.getOva())) {
             return episodeTitleMap;
         }
 
@@ -758,11 +843,20 @@ public class BgmUtil {
         try {
             List<JsonObject> data = getEpisodes(subjectId, 0);
             for (JsonObject it : data) {
-                int ep = it.get("ep").getAsInt();
-                String jpTitle = it.get("name").getAsString();
+                JsonElement epElement = it.get("ep");
+                JsonElement nameElement = it.get("name");
+                if (Objects.isNull(epElement) || epElement.isJsonNull() || Objects.isNull(nameElement) || nameElement.isJsonNull()) {
+                    // ep 或 name 缺失, 跳过该条
+                    continue;
+                }
+                int ep = epElement.getAsInt();
+                String jpTitle = nameElement.getAsString();
 
-                String title = it.get("name_cn").getAsString();
-                title = StrUtil.blankToDefault(title, it.get("name").getAsString());
+                JsonElement nameCnElement = it.get("name_cn");
+                String title = Objects.nonNull(nameCnElement) && !nameCnElement.isJsonNull()
+                        ? nameCnElement.getAsString()
+                        : "";
+                title = StrUtil.blankToDefault(title, jpTitle);
 
                 title = RenameUtil.getName(title);
                 jpTitle = RenameUtil.getName(jpTitle);
@@ -791,7 +885,13 @@ public class BgmUtil {
      * @return
      */
     public static Integer getEps(BgmInfo bgmInfo) {
-        int eps = bgmInfo.getEps();
+        Integer epsNum = bgmInfo.getEps();
+        if (Objects.isNull(epsNum)) {
+            // eps 缺失 (旧数据或响应缺少字段), 视为 0, 防止拆箱 NPE
+            log.warn("BgmInfo eps 为空: id={}", bgmInfo.getId());
+            epsNum = 0;
+        }
+        int eps = epsNum;
         String subjectId = bgmInfo.getId();
         if (eps < 1) {
             return 0;

@@ -7,6 +7,7 @@ import ani.rss.service.DownloadService;
 import ani.rss.util.other.ConfigUtil;
 import ani.rss.util.other.TorrentUtil;
 import cn.hutool.core.thread.ThreadUtil;
+import cn.hutool.core.util.ObjectUtil;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -26,7 +27,8 @@ public class RenameTask implements BaseTask {
     @Override
     public void accept(AtomicBoolean loop) {
         Config config = ConfigUtil.CONFIG;
-        int renameSleepSeconds = config.getRenameSleepSeconds();
+        // 防御配置缺字段时的拆箱 NPE
+        int renameSleepSeconds = ObjectUtil.defaultIfNull(config.getRenameSleepSeconds(), 10);
 
         if (!TorrentUtil.login()) {
             ThreadUtil.sleep(renameSleepSeconds * 1000L);
@@ -42,7 +44,7 @@ public class RenameTask implements BaseTask {
                 try {
                     TorrentUtil.rename(torrentsInfo);
                     downloadService.notification(torrentsInfo);
-                    if (deleteStandbyRSSOnly) {
+                    if (Boolean.TRUE.equals(deleteStandbyRSSOnly)) {
                         continue;
                     }
                     TorrentUtil.delete(torrentsInfo);

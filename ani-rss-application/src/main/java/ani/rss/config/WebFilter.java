@@ -29,26 +29,27 @@ public class WebFilter implements Filter {
 
         String uri = request.getRequestURI();
 
-        // 非 api
-        if (!uri.startsWith("/api")) {
-            String extName = FileUtil.extName(uri);
-
-            if (StrUtil.isBlank(extName) && !uri.endsWith("/")) {
-                String htmlPath = uri + ".html";
-                request.getRequestDispatcher(htmlPath).forward(request, response);
-                return;
-            }
-
-            if (StrUtil.isNotBlank(extName) && CACHE_EXT.contains(extName)) {
-                setCacheControl(response, 86400);
-            } else {
-                setCacheControl(response, 0);
-            }
-        }
-
+        // ThreadLocal 装填与清理必须覆盖 forward 分支, 保证转发后的控制器仍可取到请求上下文
         Global.REQUEST.set(request);
         Global.RESPONSE.set(response);
         try {
+            // 非 api (路由不区分大小写)
+            if (!uri.toLowerCase().startsWith("/api")) {
+                String extName = FileUtil.extName(uri);
+
+                if (StrUtil.isBlank(extName) && !uri.endsWith("/")) {
+                    String htmlPath = uri + ".html";
+                    request.getRequestDispatcher(htmlPath).forward(request, response);
+                    return;
+                }
+
+                if (StrUtil.isNotBlank(extName) && CACHE_EXT.contains(extName)) {
+                    setCacheControl(response, 86400);
+                } else {
+                    setCacheControl(response, 0);
+                }
+            }
+
             cors(request, response);
             filterChain.doFilter(req, res);
         } finally {

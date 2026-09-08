@@ -8,7 +8,6 @@ import ani.rss.config.CronConfig;
 import ani.rss.download.BaseDownload;
 import ani.rss.entity.Config;
 import ani.rss.entity.Global;
-import ani.rss.entity.Login;
 import ani.rss.entity.ProxyTest;
 import ani.rss.entity.web.ContentType;
 import ani.rss.entity.web.Header;
@@ -22,10 +21,9 @@ import ani.rss.util.other.AfdianUtil;
 import ani.rss.util.other.AniUtil;
 import ani.rss.util.other.ConfigUtil;
 import ani.rss.util.other.TorrentUtil;
-import cn.hutool.core.bean.BeanUtil;
-import cn.hutool.core.bean.copier.CopyOptions;
 import cn.hutool.core.codec.Base64;
 import cn.hutool.core.date.LocalDateTimeUtil;
+import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.io.resource.ResourceUtil;
 import cn.hutool.core.lang.Assert;
@@ -53,6 +51,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Date;
 import java.util.Objects;
 import java.util.Set;
 import java.util.zip.ZipEntry;
@@ -101,50 +100,28 @@ public class ConfigController extends BaseController {
     @Operation(summary = "修改设置")
     @PostMapping("/setConfig")
     public Result<Void> setConfig(@RequestBody Config newConfig) {
+        // 保存旧值用于变更对比(此后 CONFIG 会被整体原子替换, 旧引用不再被修改)
         Config config = ConfigUtil.CONFIG;
-        Login login = config.getLogin();
-        String username = login.getUsername();
-        String password = login.getPassword();
         Integer renameSleepSeconds = config.getRenameSleepSeconds();
         Integer sleep = config.getRssSleepMinutes();
         String download = config.getDownloadToolType();
         Boolean autoStart = config.getAutoStart();
         String networkPrefer = config.getNetworkPrefer();
 
-        newConfig.setExpirationTime(null)
-                .setOutTradeNo(null)
-                .setTryOut(null);
-
-        CopyOptions copyOptions = CopyOptions
-                .create()
-                .setIgnoreNullValue(true);
-
-        BeanUtil.copyProperties(
-                newConfig,
-                config,
-                copyOptions
-        );
-
-        String loginPassword = config.getLogin().getPassword();
-        // 密码未发生修改
-        if (StrUtil.isBlank(loginPassword)) {
-            config.getLogin().setPassword(password);
+        boolean saved;
+        try {
+            saved = ConfigUtil.updateFromApi(newConfig);
+        } catch (IllegalArgumentException e) {
+            // 合并后的参数校验未通过(如代理参数不完整), 配置未被修改
+            return Result.error(e.getMessage());
         }
-        String loginUsername = config.getLogin().getUsername();
-        if (StrUtil.isBlank(loginUsername)) {
-            config.getLogin().setUsername(username);
+        if (!saved) {
+            return Result.error("保存失败,请检查磁盘/权限");
         }
 
-        Boolean proxy = config.getProxy();
-        if (proxy) {
-            String proxyHost = config.getProxyHost();
-            Integer proxyPort = config.getProxyPort();
-            if (StrUtil.isBlank(proxyHost) || Objects.isNull(proxyPort)) {
-                return Result.error("代理参数不完整");
-            }
-        }
+        // 重新读取交换后的新配置快照
+        config = ConfigUtil.CONFIG;
 
-        ConfigUtil.sync();
         Integer newRenameSleepSeconds = config.getRenameSleepSeconds();
         Integer newSleep = config.getRssSleepMinutes();
         Boolean newAutoStart = config.getAutoStart();
@@ -322,16 +299,36 @@ public class ConfigController extends BaseController {
 
         File configDir = ConfigUtil.getConfigDir();
 
-        // 删除旧的种子记录
-        FileUtil.del(configDir + "/torrents");
-
         // 白名单校验：备份包只允许已知文件，拒绝 .. / 绝对路径 / 未知文件（防配置投毒与 zip-slip）
+        // 先校验、再解压暂存、最后替换: 任何一步失败都不触碰现有配置目录
         verifyZipEntries(file.getInputStream());
 
-        @Cleanup
-        InputStream inputStream = file.getInputStream();
+        String ts = DateUtil.format(new Date(), "yyyyMMddHHmmss");
+        File stagingDir = new File(configDir, "import-staging-" + ts);
+        FileUtil.del(stagingDir);
+        FileUtil.mkdir(stagingDir);
 
-        ZipUtil.unzip(inputStream, configDir, StandardCharsets.UTF_8);
+        try {
+            @Cleanup
+            InputStream inputStream = file.getInputStream();
+            ZipUtil.unzip(inputStream, stagingDir, StandardCharsets.UTF_8);
+
+            // 校验暂存目录内容非空
+            File[] stagedItems = stagingDir.listFiles();
+            Assert.isTrue(stagedItems != null && stagedItems.length > 0, "备份包内容为空");
+
+            // 校验通过后才替换: 删除旧的种子记录, 再将暂存内容逐个移动到配置目录
+            FileUtil.del(configDir + "/torrents");
+            for (File item : stagedItems) {
+                FileUtil.move(item, configDir, true);
+            }
+        } catch (Exception e) {
+            // 任一步失败: 清理暂存目录并上抛, 现有目录保持原状(种子记录已删的窗口仅在校验通过后)
+            FileUtil.del(stagingDir);
+            throw e;
+        } finally {
+            FileUtil.del(stagingDir);
+        }
 
         // 重新加载设置
         ConfigUtil.load();

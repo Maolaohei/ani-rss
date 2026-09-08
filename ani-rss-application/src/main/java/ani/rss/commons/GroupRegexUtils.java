@@ -4,10 +4,12 @@ import ani.rss.entity.GroupRegex;
 import ani.rss.entity.GroupRegex.RegexItem;
 import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.util.ReUtil;
+import cn.hutool.core.util.StrUtil;
 import lombok.Synchronized;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.function.Function;
 
 public class GroupRegexUtils {
@@ -26,13 +28,22 @@ public class GroupRegexUtils {
 
     @Synchronized("REGEX_LIST")
     public static <T> GroupRegex toGroupRegx(List<T> list, Function<T, String> getFun) {
-        List<String> titles = list.stream()
-                .map(getFun)
-                .distinct()
-                .toList();
-
         List<List<RegexItem>> regexList = new ArrayList<>();
         List<String> tags = new ArrayList<>();
+
+        if (CollUtil.isEmpty(list)) {
+            // 列表为 null 或空时直接返回空结果对象, 避免调用方 NPE
+            return new GroupRegex()
+                    .setRegexList(regexList)
+                    .setTags(tags);
+        }
+
+        List<String> titles = list.stream()
+                .filter(Objects::nonNull)
+                .map(getFun)
+                .filter(StrUtil::isNotBlank)
+                .distinct()
+                .toList();
 
         for (String title : titles) {
             List<RegexItem> regexItems = new ArrayList<>();

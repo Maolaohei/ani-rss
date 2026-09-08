@@ -47,11 +47,13 @@ public class ItemsUtil {
 
     /**
      * 获取视频列表
+     * (A5) 不再加 static synchronized: 订阅级并发已由 DownloadService 的 ANI_LOCKS 按 ani 串行,
+     * 本方法与静态锁数组(RSS_FETCH_LOCKS)之外无其它共享可变静态状态; getRss 内部保留 per-URL 锁。
      *
      * @param ani
      * @return
      */
-    public static synchronized List<Item> getItems(Ani ani) {
+    public static List<Item> getItems(Ani ani) {
         Config config = ConfigUtil.CONFIG;
         String url = ani.getUrl();
         String subgroup = StrUtil.blankToDefault(ani.getSubgroup(), "未知字幕组");
@@ -165,6 +167,10 @@ public class ItemsUtil {
 
         Document document = readXmlSafely(xml);
         Node channel = document.getElementsByTagName("channel").item(0);
+        // (E10) 响应可能为登录页/拦截页等无 channel 的文档, 空指针会掩盖真实原因
+        if (Objects.isNull(channel)) {
+            throw new RuntimeException("RSS 无 channel 节点: " + rssUrl);
+        }
         NodeList childNodes = channel.getChildNodes();
         List<String> globalExcludeList = config.getExclude();
         Boolean globalExclude = ani.getGlobalExclude();
@@ -193,19 +199,30 @@ public class ItemsUtil {
                 }
 
                 if (itemChildNodeName.equals("enclosure")) {
-                    NamedNodeMap attributes = itemChild.getAttributes();
-                    torrent = attributes.getNamedItem("url").getNodeValue();
-                    length = Optional.of(attributes)
-                            .map(it -> it.getNamedItem("length"))
-                            .map(Node::getNodeValue)
-                            .filter(NumberUtil::isLong)
-                            .orElse("1");
+                    // (E10) 单条 enclosure 缺属性/解析失败只跳过本条, 不再拖垮整个订阅
+                    try {
+                        NamedNodeMap attributes = itemChild.getAttributes();
+                        Node urlAttr = attributes == null ? null : attributes.getNamedItem("url");
+                        if (urlAttr == null) {
+                            log.warn("RSS enclosure 缺失 url 属性, 跳过该条目 title={}", itemTitle);
+                            continue;
+                        }
+                        torrent = urlAttr.getNodeValue();
+                        length = Optional.of(attributes)
+                                .map(it -> it.getNamedItem("length"))
+                                .map(Node::getNodeValue)
+                                .filter(NumberUtil::isLong)
+                                .orElse("1");
 
-                    if (ReUtil.contains(StringEnum.MAGNET_REG, torrent)) {
-                        infoHash = ReUtil.get(StringEnum.MAGNET_REG, torrent, 1);
-                    }
-                    if (ReUtil.contains(StringEnum.ED2K_REG, torrent)) {
-                        infoHash = ReUtil.get(StringEnum.ED2K_REG, torrent, 3);
+                        if (ReUtil.contains(StringEnum.MAGNET_REG, torrent)) {
+                            infoHash = ReUtil.get(StringEnum.MAGNET_REG, torrent, 1);
+                        }
+                        if (ReUtil.contains(StringEnum.ED2K_REG, torrent)) {
+                            infoHash = ReUtil.get(StringEnum.ED2K_REG, torrent, 3);
+                        }
+                    } catch (Exception e) {
+                        log.warn("解析 RSS enclosure 失败, 跳过该条目 title={}: {}", itemTitle, ExceptionUtils.getMessage(e));
+                        continue;
                     }
                 }
 

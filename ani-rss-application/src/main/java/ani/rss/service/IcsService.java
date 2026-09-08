@@ -19,8 +19,10 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.temporal.Temporal;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.Objects;
 
 @Slf4j
 @Service
@@ -43,10 +45,19 @@ public class IcsService {
                 .add(new XProperty("X-WR-TIMEZONE", CALENDAR_ZONE.getId()))
                 .add(new XProperty("X-WR-CALDESC", "ani-rss 动漫订阅日历"));
 
-        List<VEvent> list = AniUtil.getAniList().stream()
-                .filter(Ani::getEnable)
-                .map(this::generateEvent)
-                .toList();
+        List<VEvent> list = new ArrayList<>();
+        // 单条订阅生成失败仅跳过该条, 不影响整体日历
+        for (Ani ani : AniUtil.getAniList()) {
+            if (!Boolean.TRUE.equals(ani.getEnable())) {
+                continue;
+            }
+            try {
+                list.add(generateEvent(ani));
+            } catch (Exception e) {
+                log.warn("生成日历事件失败, 已跳过订阅: {}", ani.getTitle());
+                log.warn(e.getMessage(), e);
+            }
+        }
 
         ComponentList<VEvent> componentList = new ComponentList<>(list);
 
@@ -60,7 +71,7 @@ public class IcsService {
      * @return 事件
      */
     private VEvent generateEvent(Ani ani) {
-        boolean ova = ani.getOva();
+        boolean ova = Boolean.TRUE.equals(ani.getOva());
         String bgmUrl = ani.getBgmUrl();
         Instant now = Instant.now();
         Date releaseDate = ani.getReleaseDate();
@@ -71,13 +82,21 @@ public class IcsService {
 
         event
                 .add(generateUid(ani))
-                .add(new Url(URI.create(bgmUrl)))
                 .add(new DtStamp(now))
                 .add(new LastModified(now))
                 .add(new Status(Status.VALUE_CONFIRMED))
                 .add(new Transp(Transp.VALUE_TRANSPARENT))
                 .add(buildCategories(ani))
                 .add(buildDescription(ani));
+
+        // bgmUrl 为空或非法时不添加 Url 属性, 而非抛异常
+        if (StrUtil.isNotBlank(bgmUrl)) {
+            try {
+                event.add(new Url(URI.create(bgmUrl)));
+            } catch (Exception e) {
+                log.warn("bgmUrl 非法, 不添加 Url 属性: {}", bgmUrl);
+            }
+        }
 
         if (!ova) {
             event.add(buildRRule(ani));
@@ -105,7 +124,7 @@ public class IcsService {
      * @return 分类
      */
     private Categories buildCategories(Ani ani) {
-        boolean ova = ani.getOva();
+        boolean ova = Boolean.TRUE.equals(ani.getOva());
         Integer season = ani.getSeason();
         String seasonLabel = StrUtil.format("第{}季", season);
         String type = ova ? "剧场版/OVA" : "TV";
@@ -127,7 +146,7 @@ public class IcsService {
     private Description buildDescription(Ani ani) {
         String title = ani.getTitle();
         Boolean ova = ani.getOva();
-        String type = ova ? "剧场版/OVA" : "TV";
+        String type = Boolean.TRUE.equals(ova) ? "剧场版/OVA" : "TV";
         Integer season = ani.getSeason();
         String bgmUrl = ani.getBgmUrl();
 
@@ -186,9 +205,12 @@ public class IcsService {
         Date releaseDate = ani.getReleaseDate();
         Integer totalEpisodeNumber = ani.getTotalEpisodeNumber();
 
-        if (totalEpisodeNumber > 0) {
+        // 总集数缺失按 0 处理, 防止拆箱 NPE
+        int episodeNumber = Objects.nonNull(totalEpisodeNumber) ? totalEpisodeNumber : 0;
+
+        if (episodeNumber > 0) {
             // 一周一集, 计算结束时间
-            return DateUtil.offsetWeek(releaseDate, totalEpisodeNumber - 1);
+            return DateUtil.offsetWeek(releaseDate, episodeNumber - 1);
         }
         // 如果没有总集数，默认持续一个月
         return DateUtil.offsetMonth(DateUtil.beginOfDay(new Date()), 1);

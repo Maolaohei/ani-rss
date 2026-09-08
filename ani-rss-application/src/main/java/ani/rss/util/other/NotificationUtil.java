@@ -8,6 +8,7 @@ import ani.rss.enums.NotificationTypeEnum;
 import ani.rss.notification.*;
 import cn.hutool.core.thread.ExecutorBuilder;
 import cn.hutool.core.thread.ThreadUtil;
+import cn.hutool.core.util.ObjectUtil;
 import cn.hutool.core.util.ReflectUtil;
 import lombok.extern.slf4j.Slf4j;
 
@@ -65,7 +66,8 @@ public class NotificationUtil {
 
         for (NotificationConfig notificationConfig : notificationConfigList) {
             boolean enable = notificationConfig.getEnable();
-            int retry = notificationConfig.getRetry();
+            // 钳制重试次数到 [1, 10]，防止用户配置任意大导致通知线程长期重试阻塞
+            int retry = Math.min(Math.max(ObjectUtil.defaultIfNull(notificationConfig.getRetry(), 1), 1), 10);
             NotificationTypeEnum notificationType = notificationConfig.getNotificationType();
             List<NotificationStatusEnum> statusList = notificationConfig.getStatusList();
 
@@ -96,21 +98,30 @@ public class NotificationUtil {
             BaseNotification baseNotification = ReflectUtil.newInstance(aClass);
             try {
                 EXECUTOR_SERVICE.execute(() -> {
-                int currentRetry = 0;
-                do {
-                    if (currentRetry > 0) {
-                        log.warn("通知失败 正在重试 第{}次 {}", currentRetry, aClass.getName());
-                    }
-                    try {
-                        baseNotification.send(notificationConfig, ani, text, notificationStatusEnum);
-                        return;
-                    } catch (Exception e) {
-                        log.error(e.getMessage(), e);
-                    }
-                    currentRetry += 1;
-                    ThreadUtil.sleep(1000);
-                } while (currentRetry < retry);
-            });
+                    int currentRetry = 0;
+                    do {
+                        if (currentRetry > 0) {
+                            log.warn("通知失败 正在重试 第{}次 {}", currentRetry, aClass.getName());
+                        }
+                        try {
+                            Boolean ok = baseNotification.send(notificationConfig, ani, text, notificationStatusEnum);
+                            // 发送成功才结束，返回 false 视为失败进入重试
+                            if (Boolean.TRUE.equals(ok)) {
+                                return;
+                            }
+                            log.warn("通知发送返回失败 {} {}", aClass.getName(), text);
+                        } catch (Throwable t) {
+                            // StackOverflowError 等 Error 只记录不再重试，避免无限递归反复触发
+                            if (t instanceof Error) {
+                                log.error("通知发送出现 Error 停止重试 {}", aClass.getName(), t);
+                                return;
+                            }
+                            log.error(t.getMessage(), t);
+                        }
+                        currentRetry += 1;
+                        ThreadUtil.sleep(1000);
+                    } while (currentRetry < retry);
+                });
             } catch (java.util.concurrent.RejectedExecutionException e) {
                 // 队列满(256)时丢弃本条通知并计数，绝不让 RejectedExecutionException
                 // 上抛中断调用方（download() 中 send 无捕获，曾会中断订阅下载处理）

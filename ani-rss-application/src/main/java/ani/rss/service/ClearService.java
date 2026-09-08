@@ -7,6 +7,7 @@ import ani.rss.util.other.ConfigUtil;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.util.ObjectUtil;
 import cn.hutool.core.util.ReUtil;
+import cn.hutool.core.util.StrUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -45,7 +46,34 @@ public class ClearService {
             return;
         }
 
-        List<String> list = Arrays.asList(ObjectUtil.defaultIfNull(parentFile.list(), new String[]{}));
+        if (!hasDeletableContentOnly(parentFile)) {
+            // 不为空则不进行清理
+            return;
+        }
+
+        // 保护窗口: 目录最近 60 秒内有写入(如 rename 任务正在落新文件), 跳过删除
+        long lastModified = parentFile.lastModified();
+        if (lastModified > 0 && System.currentTimeMillis() - lastModified < 60_000L) {
+            log.debug("目录 {} 最近 60 秒内有写入, 跳过本次清理", parentFile);
+            return;
+        }
+
+        // 二次复查: 首次 list 与删除之间存在竞态窗口, 仍需"仅剩可清理内容"才删除
+        if (!hasDeletableContentOnly(parentFile)) {
+            log.debug("目录 {} 二次复查发现新文件, 跳过本次清理", parentFile);
+            return;
+        }
+
+        log.info("清理空文件夹 {}", parentFile);
+        FileUtil.del(parentFile);
+        clearParentFile(parentFile);
+    }
+
+    /**
+     * 目录剔除元数据/海报等可清理文件后是否已无有效内容
+     */
+    private boolean hasDeletableContentOnly(File dir) {
+        List<String> list = Arrays.asList(ObjectUtil.defaultIfNull(dir.list(), new String[]{}));
         list = list.stream()
                 .filter(f -> !f.endsWith(".nfo"))
                 .filter(f -> !f.endsWith("-thumb.jpg"))
@@ -57,13 +85,7 @@ public class ClearService {
                 .filter(f -> !ReUtil.contains("^season\\d+-poster.jpg$", f))
                 .filter(f -> !ReUtil.contains("^fanart\\d*.jpg$", f))
                 .toList();
-        if (!list.isEmpty()) {
-            // 不为空则不进行清理
-            return;
-        }
-        log.info("清理空文件夹 {}", parentFile);
-        FileUtil.del(parentFile);
-        clearParentFile(parentFile);
+        return list.isEmpty();
     }
 
     public Long clearCover() {
@@ -78,6 +100,7 @@ public class ClearService {
         Set<String> covers = AniUtil.getAniList()
                 .stream()
                 .map(Ani::getCover)
+                .filter(StrUtil::isNotBlank)
                 .map(s -> FileUtils.getAbsolutePath(Path.of(configDirStr, "files", s).toFile()))
                 .collect(Collectors.toSet());
 

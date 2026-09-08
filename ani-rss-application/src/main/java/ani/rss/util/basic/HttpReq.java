@@ -26,6 +26,11 @@ import java.util.function.Function;
 @Slf4j
 public class HttpReq {
 
+    /**
+     * 上次全局 Authenticator 的状态摘要, 用于仅在代理参数变化时设置一次:
+     * null=从未设置; "off"=已清除; 其他=当前生效的 host:port:user:pass
+     */
+    private static volatile String AUTHENTICATOR_STATE;
 
     public static final CookieManager COOKIE_MANAGER;
 
@@ -117,6 +122,8 @@ public class HttpReq {
         Boolean proxy = config.getProxy();
         if (!proxy) {
             log.debug("代理未开启 {}", url);
+            // 关闭代理时清除全局 Authenticator, 防止残留凭据发给任意要求认证的主机
+            clearAuthenticator();
             return;
         }
 
@@ -136,21 +143,46 @@ public class HttpReq {
         String proxyPassword = config.getProxyPassword();
         try {
             req.setHttpProxy(proxyHost, proxyPort);
-            Authenticator.setDefault(
-                    new Authenticator() {
-                        @Override
-                        public PasswordAuthentication getPasswordAuthentication() {
-                            if (StrUtil.isAllNotBlank(proxyUsername, proxyPassword)) {
-                                return new PasswordAuthentication(proxyUsername, proxyPassword.toCharArray());
+
+            // 代理参数摘要, 变化时才重新设置 JVM 全局 Authenticator, 避免并发请求互覆盖
+            String state = StrFormatter.format("{}:{}:{}:{}", proxyHost, proxyPort,
+                    StrUtil.nullToEmpty(proxyUsername), StrUtil.nullToEmpty(proxyPassword));
+            if (!state.equals(AUTHENTICATOR_STATE)) {
+                Authenticator.setDefault(
+                        new Authenticator() {
+                            @Override
+                            public PasswordAuthentication getPasswordAuthentication() {
+                                // 凭据仅提供给配置的代理主机, 不匹配时不返回凭据
+                                String requestingHost = getRequestingHost();
+                                if (StrUtil.isNotBlank(requestingHost)
+                                        && !requestingHost.equalsIgnoreCase(proxyHost)) {
+                                    return null;
+                                }
+                                if (StrUtil.isAllNotBlank(proxyUsername, proxyPassword)) {
+                                    return new PasswordAuthentication(proxyUsername, proxyPassword.toCharArray());
+                                }
+                                return null;
                             }
-                            return null;
                         }
-                    }
-            );
+                );
+                AUTHENTICATOR_STATE = state;
+                log.debug("已设置全局代理 Authenticator {}:{}", proxyHost, proxyPort);
+            }
             log.debug("使用代理 {}", url);
         } catch (Exception e) {
             log.error("设置代理出现问题 {}", url);
             log.error(e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 清除全局 Authenticator, 仅在状态实际发生变化时执行一次
+     */
+    private static void clearAuthenticator() {
+        if (!"off".equals(AUTHENTICATOR_STATE)) {
+            Authenticator.setDefault(null);
+            AUTHENTICATOR_STATE = "off";
+            log.debug("已清除全局代理 Authenticator");
         }
     }
 

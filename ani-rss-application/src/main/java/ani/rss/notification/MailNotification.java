@@ -68,7 +68,11 @@ public class MailNotification implements BaseNotification {
                 .setPort(mailSMTPPort)
                 .setSslEnable(mailSSLEnable)
                 .setStarttlsEnable(mailTLSEnable)
-                .setAuth(true);
+                .setAuth(true)
+                // 设置 SMTP 连接/读/写超时(约 10 秒)，防止 SMTP 默认无限等待卡死唯一通知线程
+                .setConnectionTimeout(10000L)
+                .setTimeout(10000L)
+                .setWriteTimeout(10000L);
 
 
         String image = ani.getImage();

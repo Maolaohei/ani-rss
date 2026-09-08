@@ -48,40 +48,44 @@ public class BgmTask implements BaseTask {
                 return;
             }
             Boolean enable = ani.getEnable();
-            if (!enable) {
+            if (!Boolean.TRUE.equals(enable)) {
                 continue;
             }
-            BgmInfo bgmInfo;
             try {
-                bgmInfo = BgmUtil.getBgmInfo(ani);
-            } catch (Exception e) {
-                log.error(e.getMessage(), e);
-                ThreadUtil.sleep(REQUEST_INTERVAL_MS);
-                continue;
-            }
+                BgmInfo bgmInfo;
+                try {
+                    bgmInfo = BgmUtil.getBgmInfo(ani);
+                } catch (Exception e) {
+                    log.error(e.getMessage(), e);
+                    continue;
+                }
 
-            double score = Optional.ofNullable(bgmInfo.getRating())
-                    .map(BgmInfo.Rating::getScore)
-                    .orElse(0.0);
-            Double oldScore = ani.getScore();
-            if (!Objects.equals(oldScore, score)) {
-                ani.setScore(score);
-                changed = true;
-            }
-
-            Config config = ConfigUtil.CONFIG;
-            Boolean updateTotalEpisodeNumber = config.getUpdateTotalEpisodeNumber();
-            Boolean forceUpdateTotalEpisodeNumber = config.getForceUpdateTotalEpisodeNumber();
-
-            if (Boolean.TRUE.equals(updateTotalEpisodeNumber)) {
-                Boolean updated = aniService.updateTotalEpisodeNumber(ani, bgmInfo, forceUpdateTotalEpisodeNumber);
-                if (Boolean.TRUE.equals(updated)) {
+                double score = Optional.ofNullable(bgmInfo.getRating())
+                        .map(BgmInfo.Rating::getScore)
+                        .orElse(0.0);
+                Double oldScore = ani.getScore();
+                if (!Objects.equals(oldScore, score)) {
+                    ani.setScore(score);
                     changed = true;
                 }
-            }
 
-            // 请求限流：避免订阅多时打爆 BGM API
-            ThreadUtil.sleep(REQUEST_INTERVAL_MS);
+                Config config = ConfigUtil.CONFIG;
+                Boolean updateTotalEpisodeNumber = config.getUpdateTotalEpisodeNumber();
+                Boolean forceUpdateTotalEpisodeNumber = config.getForceUpdateTotalEpisodeNumber();
+
+                if (Boolean.TRUE.equals(updateTotalEpisodeNumber)) {
+                    Boolean updated = aniService.updateTotalEpisodeNumber(ani, bgmInfo, forceUpdateTotalEpisodeNumber);
+                    if (Boolean.TRUE.equals(updated)) {
+                        changed = true;
+                    }
+                }
+            } catch (Exception e) {
+                // 单个订阅的评分/总集数处理失败不影响其它订阅
+                log.error(e.getMessage(), e);
+            } finally {
+                // 请求限流：避免订阅多时打爆 BGM API
+                ThreadUtil.sleep(REQUEST_INTERVAL_MS);
+            }
         }
 
         if (changed) {

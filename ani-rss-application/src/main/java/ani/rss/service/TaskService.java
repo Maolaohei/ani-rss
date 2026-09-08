@@ -5,13 +5,14 @@ import ani.rss.task.BgmTask;
 import ani.rss.task.RenameTask;
 import ani.rss.task.RssTask;
 import cn.hutool.core.text.NamingCase;
-import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.extra.spring.SpringUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Vector;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 @Slf4j
@@ -22,17 +23,33 @@ public class TaskService {
 
     public synchronized void stop() {
         LOOP.set(false);
+        // 总等待上限 30 秒：任务线程卡在不可中断 IO 时不无限阻塞 restart HTTP 接口
+        long deadline = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(30);
+        List<String> abandonedThreads = new ArrayList<>();
         for (Thread thread : THREADS) {
+            if (!thread.isAlive()) {
+                continue;
+            }
             try {
-                // 等待现有任务结束
+                // 等待现有任务结束：join(timeout) 循环，期间持续中断促使任务尽快退出
                 while (thread.isAlive()) {
                     thread.interrupt();
-                    ThreadUtil.sleep(100);
+                    long remaining = deadline - System.currentTimeMillis();
+                    if (remaining <= 0) {
+                        break;
+                    }
+                    thread.join(Math.min(remaining, 1000));
                 }
-                thread.join();
+                if (thread.isAlive()) {
+                    // 超时放弃等待，记录名单
+                    abandonedThreads.add(thread.getName());
+                }
             } catch (Exception e) {
                 log.error(e.getMessage(), e);
             }
+        }
+        if (!abandonedThreads.isEmpty()) {
+            log.warn("以下任务线程在 30 秒内未退出，已放弃等待: {}", String.join(", ", abandonedThreads));
         }
         THREADS.clear();
     }

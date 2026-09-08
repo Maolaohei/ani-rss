@@ -29,7 +29,6 @@ import cn.hutool.crypto.SecureUtil;
 import cn.hutool.extra.spring.SpringUtil;
 import cn.hutool.system.OsInfo;
 import cn.hutool.system.SystemUtil;
-import lombok.Cleanup;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.File;
@@ -39,12 +38,16 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.UUID;
-import java.util.stream.Stream;
 
 @Slf4j
 public class ConfigUtil {
 
-    public static final Config CONFIG = new Config();
+    /**
+     * 全局配置快照。
+     * volatile + copy-on-write：通过 {@link #updateFromApi(Config)} 原子替换实例，
+     * 读取方永远看到完整一致的配置，不会出现撕裂读。
+     */
+    public static volatile Config CONFIG = new Config();
     public static final String FILE_NAME = "config.v2.json";
 
     /*
@@ -295,7 +298,11 @@ public class ConfigUtil {
             // 首次启动：生成随机登录密码，避免默认弱口令 admin/admin
             String randomPassword = RandomUtil.randomString(16);
             CONFIG.getLogin().setPassword(SecureUtil.sha256(randomPassword));
-            FileUtil.writeUtf8String(GsonStatic.toJson(CONFIG), configFile);
+            // 原子写：先写临时文件再 move 替换，避免首启写盘途中断电留下截断的配置文件
+            File temp = new File(configFile + ".temp");
+            FileUtil.del(temp);
+            FileUtil.writeUtf8String(GsonStatic.toJson(CONFIG), temp);
+            FileUtils.move(temp.toPath(), configFile.toPath());
             String tip = StrFormatter.format(
                     "首次启动：已生成随机登录密码 [{}]（用户名 {}），请登录后立即修改。",
                     randomPassword, CONFIG.getLogin().getUsername());
@@ -304,10 +311,32 @@ public class ConfigUtil {
         }
         String s = FileUtil.readUtf8String(configFile);
 
+        // 解析失败兜底：损坏文件改名保留现场，用当前默认 CONFIG 继续启动，不再 exit
+        Config loaded = null;
+        try {
+            loaded = GsonStatic.fromJson(s, Config.class);
+        } catch (Exception e) {
+            log.error("配置文件解析失败: {}", e.getMessage(), e);
+        }
+
         CopyOptions copyOptions = CopyOptions
                 .create()
                 .setIgnoreNullValue(true);
-        BeanUtil.copyProperties(GsonStatic.fromJson(s, Config.class), CONFIG, copyOptions);
+
+        if (loaded == null) {
+            String ts = DateUtil.format(new Date(), "yyyyMMddHHmmss");
+            File corruptFile = new File(configFile + ".corrupt-" + ts);
+            try {
+                FileUtil.move(configFile, corruptFile, true);
+                log.error("配置文件已损坏, 已改名为 [{}] 保留现场; 本次启动将使用默认配置, 请检查磁盘/权限后重新导入配置", corruptFile.getName());
+            } catch (Exception moveException) {
+                log.error("配置文件已损坏, 且改名保留失败(可能被占用), 请手动处理: {}", configFile);
+                log.error(moveException.getMessage(), moveException);
+            }
+        } else {
+            BeanUtil.copyProperties(loaded, CONFIG, copyOptions);
+        }
+
         migrateMikanHost(CONFIG);
         format(CONFIG);
         LogUtil.loadLogback();
@@ -332,8 +361,21 @@ public class ConfigUtil {
 
     /**
      * 将设置保存到磁盘
+     * <p>
+     * 兼容保留的 void 签名：实际逻辑委托给 {@link #syncChecked()}，保存失败时仅记录错误日志。
      */
-    public static synchronized void sync() {
+    public static void sync() {
+        if (!syncChecked()) {
+            log.error("配置保存失败, 本次修改可能未持久化, 请检查磁盘空间与写入权限");
+        }
+    }
+
+    /**
+     * 将设置保存到磁盘
+     *
+     * @return 保存是否成功
+     */
+    public static synchronized boolean syncChecked() {
         // 配置已变更：下载路径反向索引失效
         DownloadService.invalidateDownloadPathIndex();
         File configFile = getConfigFile();
@@ -347,9 +389,83 @@ public class ConfigUtil {
             FileUtils.move(temp.toPath(), configFile.toPath());
             LogUtil.loadLogback();
             log.debug("保存成功 {}", configFile);
+            return true;
         } catch (Exception e) {
             log.error("保存失败 {}", configFile);
             log.error(e.getMessage(), e);
+            return false;
+        }
+    }
+
+    /**
+     * 接口更新配置（copy-on-write）：锁内合并出新快照后原子交换 CONFIG，
+     * 避免 RSS/下载线程读到「半新半旧」的撕裂配置。
+     *
+     * @param newConfig 接口提交的新配置（允许只传需要修改的字段，null 字段不覆盖）
+     * @return 落盘是否成功
+     */
+    public static synchronized boolean updateFromApi(Config newConfig) {
+        Config current = CONFIG;
+
+        // 与原 setConfig 语义一致：这几个字段不允许通过接口修改
+        newConfig.setExpirationTime(null)
+                .setOutTradeNo(null)
+                .setTryOut(null);
+
+        String username = current.getLogin().getUsername();
+        String password = current.getLogin().getPassword();
+
+        // 深拷贝当前配置形成新快照，不再在共享实例上逐字段写入
+        Config merged = GsonStatic.fromJson(GsonStatic.toJson(current), Config.class);
+
+        CopyOptions copyOptions = CopyOptions
+                .create()
+                .setIgnoreNullValue(true);
+        BeanUtil.copyProperties(newConfig, merged, copyOptions);
+
+        // 用户名/密码留空视为未修改
+        String loginPassword = merged.getLogin().getPassword();
+        if (StrUtil.isBlank(loginPassword)) {
+            merged.getLogin().setPassword(password);
+        }
+        String loginUsername = merged.getLogin().getUsername();
+        if (StrUtil.isBlank(loginUsername)) {
+            merged.getLogin().setUsername(username);
+        }
+
+        // 代理参数校验（与原 setConfig 一致：基于合并后的值判断）
+        Boolean proxy = merged.getProxy();
+        if (proxy != null && proxy) {
+            String proxyHost = merged.getProxyHost();
+            Integer proxyPort = merged.getProxyPort();
+            if (StrUtil.isBlank(proxyHost) || proxyPort == null) {
+                throw new IllegalArgumentException("代理参数不完整");
+            }
+        }
+
+        format(merged);
+        CONFIG = merged;
+        return syncChecked();
+    }
+
+    /**
+     * 爱发电激活成功后写入到期信息。
+     * <p>
+     * 与 {@link #updateFromApi(Config)} 共用类锁，锁内基于最新快照合并后原子交换，
+     * 避免字段级 setter 直接写到旧引用上、随后被并发交换丢弃。
+     *
+     * @param outTradeNo     爱发电订单号
+     * @param expirationTime 到期时间戳
+     * @param tryOut         是否试用
+     */
+    public static synchronized void updateAfdianInfo(String outTradeNo, Long expirationTime, Boolean tryOut) {
+        Config merged = GsonStatic.fromJson(GsonStatic.toJson(CONFIG), Config.class);
+        merged.setOutTradeNo(outTradeNo)
+                .setExpirationTime(expirationTime)
+                .setTryOut(tryOut);
+        CONFIG = merged;
+        if (!syncChecked()) {
+            log.error("爱发电激活信息保存失败, 本次修改可能未持久化, 请检查磁盘空间与写入权限");
         }
     }
 
@@ -376,31 +492,64 @@ public class ConfigUtil {
 
         log.info("正在备份设置 {}", backupFile.getName());
 
+        // 先写入临时文件, 成功后原子替换为最终名, 避免打包中途失败留下半截 zip 被当成当日备份
+        File tempFile = new File(backupDir, date + ".zip.temp");
         try {
-            @Cleanup
-            OutputStream outputStream = FileUtil.getOutputStream(backupFile);
-            backup(outputStream);
+            try (OutputStream outputStream = FileUtil.getOutputStream(tempFile)) {
+                backup(outputStream);
+            }
+            FileUtils.move(tempFile.toPath(), backupFile.toPath());
             log.info("备份设置成功 {}", backupFile.getName());
         } catch (Exception e) {
             log.error("备份失败 {}", backupFile.getName());
             log.error(e.getMessage(), e);
+            // 打包/替换失败: 清理临时文件, 避免残留
+            FileUtil.del(tempFile);
         }
     }
 
-    public static synchronized void backup(OutputStream outputStream) {
-        // 清理残余封面
-        ClearService clearService = SpringUtil.getBean(ClearService.class);
-        clearService.clearCover();
+    /**
+     * 备份到输出流
+     * <p>
+     * 不再加 synchronized：导出先在锁内把待打包文件快照到暂存目录，
+     * 再在锁外打包，避免长时间打包阻塞所有 sync/load。
+     */
+    public static void backup(OutputStream outputStream) {
+        File stagingDir = null;
+        List<File> backupFiles = List.of();
 
-        File configDir = getConfigDir();
-        List<File> backupFiles = Stream.of(
+        synchronized (ConfigUtil.class) {
+            // 清理残余封面
+            ClearService clearService = SpringUtil.getBean(ClearService.class);
+            clearService.clearCover();
+
+            File configDir = getConfigDir();
+            String ts = DateUtil.format(new Date(), "yyyyMMddHHmmss");
+            stagingDir = new File(new File(configDir, "backup"), ".staging-" + ts + "-" + RandomUtil.randomString(6));
+
+            try {
+                FileUtil.mkdir(stagingDir);
+                List<File> staged = new ArrayList<>();
+                for (String name : List.of(
                         "files", "torrents", "database.db",
                         AniUtil.FILE_NAME, ConfigUtil.FILE_NAME
-                )
-                .map(s -> configDir + "/" + s)
-                .map(File::new)
-                .filter(File::exists)
-                .toList();
+                )) {
+                    File src = new File(configDir, name);
+                    if (!src.exists()) {
+                        continue;
+                    }
+                    File dst = new File(stagingDir, name);
+                    // 文件与目录统一快照到暂存目录, 锁内避免读到被并发修改的半截文件
+                    FileUtil.copy(src, dst, true);
+                    staged.add(dst);
+                }
+                backupFiles = staged;
+            } catch (Exception e) {
+                // 快照失败: 清理暂存目录后上抛, 不产出半截备份
+                FileUtil.del(stagingDir);
+                throw new RuntimeException("备份快照失败: " + e.getMessage(), e);
+            }
+        }
 
         try {
             ZipUtil.zip(outputStream, StandardCharsets.UTF_8, true, pathname -> {
@@ -412,6 +561,8 @@ public class ConfigUtil {
                 return !ArrayUtil.isEmpty(files);
             }, backupFiles.toArray(new File[0]));
         } finally {
+            // 无论打包成功与否都清理暂存目录
+            FileUtil.del(stagingDir);
             IoUtil.close(outputStream);
         }
     }

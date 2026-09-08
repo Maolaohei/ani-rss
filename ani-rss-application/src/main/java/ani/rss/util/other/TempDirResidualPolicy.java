@@ -4,6 +4,7 @@ import cn.hutool.core.util.StrUtil;
 
 import java.util.Locale;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * 判定 OpenList 保存目录下「临时目录残留」是否可安全一键清理。
@@ -13,6 +14,37 @@ import java.util.Set;
 public final class TempDirResidualPolicy {
     private TempDirResidualPolicy() {
     }
+
+    /**
+     * 常规媒体目录黑名单: Season 1 / Season_01 / 特典 / 字幕等标准媒体库目录名,
+     * 绝不应被判为临时下载目录(防止整树误删)
+     */
+    private static final Set<String> NORMAL_MEDIA_DIR_NAMES = Set.of(
+            "specials",
+            "special",
+            "sp",
+            "extras",
+            "extra",
+            "subs",
+            "subtitles",
+            "sub"
+    );
+
+    /** Season \d+ 形式(Season 1 / Season_01 / season2 等) */
+    private static final Pattern SEASON_DIR_PATTERN = Pattern.compile(
+            "^season[\\s._-]*\\d+$",
+            Pattern.CASE_INSENSITIVE
+    );
+
+    /** SxxExx 集数标识(目录名或成片文件名中) */
+    private static final Pattern SEASON_EPISODE_PATTERN = Pattern.compile(
+            "s\\d{1,3}\\s*[eE]\\s*\\d{1,4}"
+    );
+
+    /** 纯数字集号(目录名整体) */
+    private static final Pattern EPISODE_NUMBER_PATTERN = Pattern.compile(
+            "^\\d{1,4}$"
+    );
 
     public enum Action {
         /** 最终成片已在顶层，临时目录可强制整树删除 */
@@ -47,8 +79,16 @@ public final class TempDirResidualPolicy {
             return new Decision(Action.PROTECT_ACTIVE, "当前下载占用的临时目录");
         }
         if (hasFinalSibling) {
-            // 与 cleanupTempDownloadDir(force=true) 对齐：最终文件已确认则可整树删
-            return new Decision(Action.FORCE_CLEAN, "最终成片已在顶层，可强制删除临时目录");
+            // 与 cleanupTempDownloadDir(force=true) 对齐：最终文件已确认则可整树删。
+            // 收紧: 要求临时目录名与成片集数存在关联(SxxExx 或纯数字集号),
+            // 目录名没有任何集数标识时降级为普通 CLEAN 建议, 防止无关目录被整树误删。
+            if (hasEpisodeIdentifier(dirName)) {
+                return new Decision(Action.FORCE_CLEAN, "最终成片已在顶层，可强制删除临时目录");
+            }
+            if (junkOnly && !hasProtectedMedia) {
+                return new Decision(Action.JUNK_CLEAN, "最终成片已在顶层但目录名无集数标识, 仅垃圾可清理");
+            }
+            return new Decision(Action.KEEP, "目录名与成片集数无关联且目录内仍有媒体, 需人工确认");
         }
         if (junkOnly && !hasProtectedMedia) {
             return new Decision(Action.JUNK_CLEAN, "临时目录仅垃圾或为空");
@@ -63,11 +103,34 @@ public final class TempDirResidualPolicy {
         if (StrUtil.isBlank(dirName)) {
             return false;
         }
+        // 黑名单: 常规媒体库目录(Season x / Specials / SP / Extras / Subs 等)直接排除
+        if (isNormalMediaDirName(dirName)) {
+            return false;
+        }
         if (StrUtil.isNotBlank(seasonKey) && dirName.toLowerCase(Locale.ROOT).contains(seasonKey.toLowerCase(Locale.ROOT))) {
             return true;
         }
         // 合集源标题目录：不含扩展名的长标题目录常见
         return !dirName.contains(".") && dirName.length() >= 2;
+    }
+
+    private static boolean isNormalMediaDirName(String dirName) {
+        String lower = dirName.trim().toLowerCase(Locale.ROOT);
+        if (NORMAL_MEDIA_DIR_NAMES.contains(lower)) {
+            return true;
+        }
+        return SEASON_DIR_PATTERN.matcher(lower).matches();
+    }
+
+    /**
+     * 目录名是否携带集数标识: SxxExx 形式, 或整体为纯数字集号
+     */
+    private static boolean hasEpisodeIdentifier(String dirName) {
+        String lower = dirName.trim().toLowerCase(Locale.ROOT);
+        if (SEASON_EPISODE_PATTERN.matcher(lower).find()) {
+            return true;
+        }
+        return EPISODE_NUMBER_PATTERN.matcher(lower).matches();
     }
 
     private static boolean containsIgnoreCase(Set<String> set, String value) {

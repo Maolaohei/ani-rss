@@ -1,5 +1,6 @@
 package ani.rss.download;
 
+import ani.rss.commons.ExceptionUtils;
 import ani.rss.commons.FileUtils;
 import ani.rss.commons.GsonStatic;
 import ani.rss.entity.Ani;
@@ -10,6 +11,7 @@ import ani.rss.entity.web.Header;
 import ani.rss.enums.TorrentsTags;
 import ani.rss.util.basic.HttpReq;
 import ani.rss.util.basic.RenameCacheUtil;
+import ani.rss.util.other.ConfigUtil;
 import ani.rss.util.other.RenameUtil;
 import cn.hutool.core.codec.Base64;
 import cn.hutool.core.io.FileUtil;
@@ -19,6 +21,7 @@ import cn.hutool.core.text.StrFormatter;
 import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.core.util.ReUtil;
 import cn.hutool.core.util.StrUtil;
+import cn.hutool.http.HttpRequest;
 import cn.hutool.http.HttpResponse;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -32,6 +35,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Transmission
@@ -40,98 +44,168 @@ import java.util.Set;
 @Service
 @RequiredArgsConstructor
 public class Transmission implements BaseDownload {
-    private String host = "";
-    private String authorization = "";
-    private String sessionId = "";
+    /**
+     * (E2) RPC 会话按 host 隔离: key=host, value=[sessionId, authorization]。
+     * 会话状态不再承载在单例 bean 的实例字段上, 测试登录(test=true)只写自己 host 的会话,
+     * 不再覆盖/偷换其它 host 的运行中会话。
+     */
+    private static final ConcurrentHashMap<String, String[]> SESSIONS = new ConcurrentHashMap<>();
+
+    /**
+     * (E2) 当前运行配置对应的下载器 host
+     */
+    private static String currentHost() {
+        return ConfigUtil.CONFIG.getDownloadToolHost();
+    }
+
+    /**
+     * (E2) 当前 host 的会话(缺失时按当前配置凭据惰性创建, sessionId 由 409 握手补齐)
+     */
+    private static String[] currentSession() {
+        String host = currentHost();
+        String[] session = SESSIONS.get(host);
+        if (session == null) {
+            Config config = ConfigUtil.CONFIG;
+            session = new String[]{"", StrFormatter.format("Basic {}",
+                    Base64.encode(config.getDownloadToolUsername() + ":" + config.getDownloadToolPassword()))};
+            SESSIONS.put(host, session);
+        }
+        return session;
+    }
 
     @Override
     public Boolean login(Boolean test, Config config) {
         String username = config.getDownloadToolUsername();
         String password = config.getDownloadToolPassword();
-        host = config.getDownloadToolHost();
+        String loginHost = config.getDownloadToolHost();
 
-        if (StrUtil.isBlank(host) || StrUtil.isBlank(username)
+        if (StrUtil.isBlank(loginHost) || StrUtil.isBlank(username)
                 || StrUtil.isBlank(password)) {
             log.warn("Transmission 未配置完成");
             return false;
         }
 
-        authorization = StrFormatter.format("Basic {}", Base64.encode(username + ":" + password));
-        Boolean isOk = HttpReq.get(host)
+        String authorization = StrFormatter.format("Basic {}", Base64.encode(username + ":" + password));
+        Boolean isOk = HttpReq.get(loginHost)
                 .header(Header.AUTHORIZATION, authorization)
                 .thenFunction(HttpResponse::isOk);
         if (!isOk) {
             log.error("登录 Transmission 失败");
             return false;
         }
-        getTorrentsInfos();
+        // (E2) 仅注册/更新本 host 的会话, 不影响其它 host
+        String[] session = new String[]{"", authorization};
+        SESSIONS.put(loginHost, session);
+        try {
+            // 预热: 通过 409 握手获取 session id(原实现经 getTorrentsInfos 建立会话)
+            rpc(session, loginHost, ResourceUtil.readUtf8Str("transmission/torrent-get.json"), 0);
+        } catch (Exception e) {
+            // 与原实现一致: 会话预热失败不阻断登录, 交由后续 RPC 的 409 握手自愈
+            log.warn("Transmission 会话预热失败(将由后续 RPC 自愈): {}", ExceptionUtils.getMessage(e));
+        }
         return true;
+    }
+
+    /**
+     * (E2) 统一 RPC 调用封装: 发送请求 → 若 409 则读取 X-Transmission-Session-Id
+     * 更新该 host 的 sessionId 后重发(重试上限 1 次) → 校验 HTTP 状态并解析 JSON。
+     * 原 getTorrentsInfos 的裸递归(无深度上限)由这里的固定 1 次重试取代。
+     */
+    private JsonObject rpc(String body) {
+        return rpc(currentSession(), currentHost(), body, 0);
+    }
+
+    /**
+     * (E2) 统一 RPC 调用封装(自定义超时)
+     */
+    private JsonObject rpc(String body, int timeoutMs) {
+        return rpc(currentSession(), currentHost(), body, timeoutMs);
+    }
+
+    private JsonObject rpc(String[] session, String host, String body, int timeoutMs) {
+        HttpResponse res = sendRpc(host, session[1], session[0], body, timeoutMs);
+        if (res.getStatus() == 409) {
+            // 409: 会话 id 失效(TR 重启等), 读取响应头里的新 id 后重发一次
+            String newSessionId = res.header("X-Transmission-Session-Id");
+            res.close();
+            if (StrUtil.isBlank(newSessionId)) {
+                throw new IllegalStateException("Transmission RPC 409 且未返回新会话ID");
+            }
+            SESSIONS.put(host, new String[]{newSessionId, session[1]});
+            res = sendRpc(host, session[1], newSessionId, body, timeoutMs);
+        }
+        try {
+            HttpReq.assertStatus(res);
+            return GsonStatic.fromJson(res.body(), JsonObject.class);
+        } finally {
+            res.close();
+        }
+    }
+
+    private HttpResponse sendRpc(String host, String authorization, String sessionId, String body, int timeoutMs) {
+        HttpRequest req = HttpReq.post(host + "/transmission/rpc")
+                .header(Header.AUTHORIZATION, authorization)
+                .header("X-Transmission-Session-Id", sessionId)
+                .body(body);
+        if (timeoutMs > 0) {
+            req.timeout(timeoutMs);
+        }
+        return req.execute();
     }
 
     @Override
     public List<TorrentsInfo> getTorrentsInfos() {
         String body = ResourceUtil.readUtf8Str("transmission/torrent-get.json");
         try {
-            return HttpReq.post(host + "/transmission/rpc")
-                    .header(Header.AUTHORIZATION, authorization)
-                    .header("X-Transmission-Session-Id", sessionId)
-                    .body(body)
-                    .thenFunction(res -> {
-                        String id = res.header("X-Transmission-Session-Id");
-                        if (StrUtil.isNotBlank(id)) {
-                            sessionId = id;
-                            return getTorrentsInfos();
-                        }
-                        List<TorrentsInfo> torrentsInfos = new ArrayList<>();
-                        JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                        JsonArray torrents = jsonObject.get("arguments")
-                                .getAsJsonObject()
-                                .get("torrents")
-                                .getAsJsonArray();
-                        for (JsonElement jsonElement : torrents.asList()) {
-                            JsonObject item = jsonElement.getAsJsonObject();
-                            List<String> tags = item.get("labels").getAsJsonArray()
-                                    .asList().stream().map(JsonElement::getAsString)
-                                    .toList();
-                            if (!tags.contains(TorrentsTags.ANI_RSS.getValue())) {
-                                continue;
-                            }
-                            List<String> files = item.get("files").getAsJsonArray().asList()
-                                    .stream().map(JsonElement::getAsJsonObject)
-                                    .map(o -> o.get("name").getAsString())
-                                    .toList();
+            JsonObject jsonObject = rpc(body);
+            List<TorrentsInfo> torrentsInfos = new ArrayList<>();
+            JsonArray torrents = jsonObject.get("arguments")
+                    .getAsJsonObject()
+                    .get("torrents")
+                    .getAsJsonArray();
+            for (JsonElement jsonElement : torrents.asList()) {
+                JsonObject item = jsonElement.getAsJsonObject();
+                List<String> tags = item.get("labels").getAsJsonArray()
+                        .asList().stream().map(JsonElement::getAsString)
+                        .toList();
+                if (!tags.contains(TorrentsTags.ANI_RSS.getValue())) {
+                    continue;
+                }
+                List<String> files = item.get("files").getAsJsonArray().asList()
+                        .stream().map(JsonElement::getAsJsonObject)
+                        .map(o -> o.get("name").getAsString())
+                        .toList();
 
-                            // 状态： https://github.com/jayzcoder/TrguiNG/blob/zh/src/rpc/transmission.ts
+                // 状态： https://github.com/jayzcoder/TrguiNG/blob/zh/src/rpc/transmission.ts
 
-                            TorrentsInfo.State state = TorrentsInfo.State.downloading;
+                TorrentsInfo.State state = TorrentsInfo.State.downloading;
 
-                            // 做种中
-                            if (item.get("status").getAsInt() == 6) {
-                                state = TorrentsInfo.State.stalledUP;
-                            }
+                // 做种中
+                if (item.get("status").getAsInt() == 6) {
+                    state = TorrentsInfo.State.stalledUP;
+                }
 
-                            // 已完成
-                            if (item.get("isFinished").getAsBoolean()) {
-                                state = TorrentsInfo.State.pausedUP;
-                            }
+                // 已完成
+                if (item.get("isFinished").getAsBoolean()) {
+                    state = TorrentsInfo.State.pausedUP;
+                }
 
-                            String downloadDir = item.get("downloadDir").getAsString();
-                            long size = item.get("totalSize").getAsLong();
-                            long completed = item.get("haveValid").getAsLong();
+                String downloadDir = item.get("downloadDir").getAsString();
+                long size = item.get("totalSize").getAsLong();
+                long completed = item.get("haveValid").getAsLong();
 
-                            TorrentsInfo torrentsInfo = new TorrentsInfo();
-                            torrentsInfo.progress(completed, size)
-                                    .setName(item.get("name").getAsString())
-                                    .setTags(tags)
-                                    .setHash(item.get("hashString").getAsString())
-                                    .setState(state)
-                                    .setId(item.get("id").getAsString())
-                                    .setDownloadDir(FileUtils.getAbsolutePath(downloadDir))
-                                    .setFiles(() -> files);
-                            torrentsInfos.add(torrentsInfo);
-                        }
-                        return torrentsInfos;
-                    });
+                TorrentsInfo torrentsInfo = new TorrentsInfo();
+                torrentsInfo.progress(completed, size)
+                        .setName(item.get("name").getAsString())
+                        .setTags(tags)
+                        .setHash(item.get("hashString").getAsString())
+                        .setState(state)
+                        .setId(item.get("id").getAsString())
+                        .setDownloadDir(FileUtils.getAbsolutePath(downloadDir))
+                        .setFiles(() -> files);
+                torrentsInfos.add(torrentsInfo);
+            }
+            return torrentsInfos;
         } catch (Exception e) {
             log.error(e.getMessage(), e);
         }
@@ -163,21 +237,15 @@ public class Transmission implements BaseDownload {
             }
         }
 
-        String id = HttpReq.post(host + "/transmission/rpc")
-                .timeout(1000 * 60)
-                .header(Header.AUTHORIZATION, authorization)
-                .header("X-Transmission-Session-Id", sessionId)
-                .body(body)
-                .thenFunction(res -> {
-                    JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                    JsonObject arguments = jsonObject.getAsJsonObject("arguments");
-                    if (arguments == null || !arguments.has("torrent-added")) {
-                        log.error("Transmission 添加任务失败: {}", res.body());
-                        return null;
-                    }
-                    return arguments.getAsJsonObject("torrent-added")
-                            .get("id").getAsString();
-                });
+        // (E2) 走统一 rpc 封装: 409 握手由封装处理; 原 download 请求的 60s 超时保持不变
+        JsonObject jsonObject = rpc(body, 1000 * 60);
+        JsonObject arguments = jsonObject == null ? null : jsonObject.getAsJsonObject("arguments");
+        if (arguments == null || !arguments.has("torrent-added")) {
+            log.error("Transmission 添加任务失败: {}", jsonObject);
+            return false;
+        }
+        String id = arguments.getAsJsonObject("torrent-added")
+                .get("id").getAsString();
 
         if (StrUtil.isBlank(id)) {
             return false;
@@ -200,11 +268,9 @@ public class Transmission implements BaseDownload {
         String body = ResourceUtil.readUtf8Str("transmission/torrent-remove.json");
         body = StrFormatter.format(body, torrentsInfo.getId(), deleteFiles);
         try {
-            return HttpReq.post(host + "/transmission/rpc")
-                    .header(Header.AUTHORIZATION, authorization)
-                    .header("X-Transmission-Session-Id", sessionId)
-                    .body(body)
-                    .thenFunction(HttpResponse::isOk);
+            // (E2) 走统一 rpc 封装, 409 由封装处理
+            JsonObject jsonObject = rpc(body);
+            return jsonObject != null;
         } catch (Exception e) {
             log.error(e.getMessage(), e);
             return false;
@@ -241,11 +307,14 @@ public class Transmission implements BaseDownload {
 
         log.info("重命名 {} ==> {}", name, reName);
 
-        Boolean ok = HttpReq.post(host + "/transmission/rpc")
-                .header(Header.AUTHORIZATION, authorization)
-                .header("X-Transmission-Session-Id", sessionId)
-                .body(body)
-                .thenFunction(HttpResponse::isOk);
+        boolean ok = false;
+        try {
+            // (E2) 走统一 rpc 封装, 409 由封装处理
+            rpc(body);
+            ok = true;
+        } catch (Exception e) {
+            log.error(e.getMessage(), e);
+        }
         Assert.isTrue(ok, "重命名失败 {} ==> {}", name, reName);
         RenameCacheUtil.remove(id);
 
@@ -275,11 +344,14 @@ public class Transmission implements BaseDownload {
 
         String body = ResourceUtil.readUtf8Str("transmission/torrent-set.json");
         body = StrFormatter.format(body, GsonStatic.toJson(strings), id);
-        return HttpReq.post(host + "/transmission/rpc")
-                .header(Header.AUTHORIZATION, authorization)
-                .header("X-Transmission-Session-Id", sessionId)
-                .body(body)
-                .thenFunction(HttpResponse::isOk);
+        try {
+            // (E2) 走统一 rpc 封装, 409 由封装处理
+            rpc(body);
+            return true;
+        } catch (Exception e) {
+            log.error(e.getMessage(), e);
+            return false;
+        }
     }
 
     @Override
@@ -292,10 +364,11 @@ public class Transmission implements BaseDownload {
         String id = torrentsInfo.getId();
         String body = ResourceUtil.readUtf8Str("transmission/torrent-set-location.json");
         body = StrFormatter.format(body, id, path);
-        HttpReq.post(host + "/transmission/rpc")
-                .header(Header.AUTHORIZATION, authorization)
-                .header("X-Transmission-Session-Id", sessionId)
-                .body(body)
-                .thenFunction(HttpResponse::isOk);
+        try {
+            // (E2) 走统一 rpc 封装, 409 由封装处理
+            rpc(body);
+        } catch (Exception e) {
+            log.error("Transmission 修改保存位置失败 {}: {}", id, e.getMessage());
+        }
     }
 }

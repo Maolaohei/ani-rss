@@ -1,6 +1,7 @@
 package ani.rss.util.other;
 
 import ani.rss.commons.GsonStatic;
+import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.util.StrUtil;
 import lombok.Data;
@@ -11,6 +12,7 @@ import java.io.File;
 import java.io.Serializable;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -61,9 +63,17 @@ public final class FailedDownloadQueue {
             }
             loaded = true;
         } catch (Exception e) {
-            // 解析失败保留内存现状（首次加载则为空）且不清空原文件：
-            // 原实现坏文件会导致整个失败队列被静默丢弃，用户无感知地丢失失败记录
-            log.warn("加载失败队列失败(保留原文件): {}", e.getMessage());
+            // 解析失败: 先把坏文件改名保留现场, 再以空列表继续, 避免下一次 save() 用空列表把原始记录覆盖丢失
+            String ts = DateUtil.format(new Date(), "yyyyMMddHHmmss");
+            File badFile = new File(file.getParentFile(), FILE_NAME + ".bad-" + ts);
+            try {
+                FileUtil.move(file, badFile, true);
+                log.error("失败队列文件解析失败, 已改名为 [{}] 保留现场; 本次以空失败列表继续", badFile.getName());
+            } catch (Exception moveException) {
+                log.error("失败队列文件解析失败, 且改名保留失败(可能被占用): {}", file, moveException);
+            }
+            log.warn("加载失败队列失败: {}", e.getMessage());
+            ITEMS.clear();
             loaded = true;
         }
     }

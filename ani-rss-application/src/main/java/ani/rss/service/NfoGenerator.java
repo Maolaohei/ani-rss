@@ -18,6 +18,10 @@ import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
 import java.io.File;
+import java.io.OutputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
@@ -216,6 +220,8 @@ public class NfoGenerator {
 
     /**
      * 保存
+     * <p>
+     * 先写临时文件再原子替换, 避免写盘中途异常(如磁盘满)把既有完好 nfo 截断。
      *
      * @param doc      Document
      * @param savePath 保存位置
@@ -224,14 +230,24 @@ public class NfoGenerator {
     private void saveXmlDocument(Document doc, String savePath) throws Exception {
         FileUtil.mkdir(new File(savePath).getParentFile());
 
+        Path saveFile = Path.of(savePath);
+        Path tempFile = Path.of(savePath + ".tmp");
+
         TransformerFactory transformerFactory = TransformerFactory.newInstance();
         Transformer transformer = transformerFactory.newTransformer();
         transformer.setOutputProperty(javax.xml.transform.OutputKeys.INDENT, "yes");
         transformer.setOutputProperty("{http://xml.apache.org/xslt}indent-amount", "4");
 
         DOMSource source = new DOMSource(doc);
-        StreamResult result = new StreamResult(new File(savePath));
-        transformer.transform(source, result);
+        try (OutputStream outputStream = Files.newOutputStream(tempFile)) {
+            StreamResult result = new StreamResult(outputStream);
+            transformer.transform(source, result);
+            Files.move(tempFile, saveFile, StandardCopyOption.REPLACE_EXISTING);
+        } catch (Exception e) {
+            // transform/move 失败: 清理临时文件, 保留既有完好 nfo
+            Files.deleteIfExists(tempFile);
+            throw e;
+        }
 
         log.info("已保存NFO {}", savePath);
     }

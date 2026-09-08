@@ -13,12 +13,15 @@ import ani.rss.util.other.AniUtil;
 import ani.rss.util.other.BgmUtil;
 import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.util.StrUtil;
-import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
 
 @Service
 public class AniBTService {
@@ -55,22 +58,38 @@ public class AniBTService {
                 .thenFunction(res -> {
                     HttpReq.assertStatus(res);
                     JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                    JsonObject data = jsonObject.getAsJsonObject("data");
+                    JsonElement dataElement = jsonObject.get("data");
+                    if (Objects.isNull(dataElement) || dataElement.isJsonNull()) {
+                        // data 缺失, 响应异常, 抛出带语义异常而非 NPE
+                        throw new IllegalStateException("AniBT 响应缺少 data 字段");
+                    }
+                    JsonObject data = dataElement.getAsJsonObject();
                     return GsonStatic.fromJson(data, AniBT.class);
                 });
 
         List<AniBT.ByWeekday> byWeekday = aniBT.getByWeekday();
+        if (CollUtil.isEmpty(byWeekday)) {
+            byWeekday = new ArrayList<>();
+            aniBT.setByWeekday(byWeekday);
+        }
 
         for (AniBT.ByWeekday weekday : byWeekday) {
             List<AniBT.Anime> animeList = weekday.getAnimes();
+            if (CollUtil.isEmpty(animeList)) {
+                continue;
+            }
             animeList = animeList.stream()
+                    .filter(Objects::nonNull)
                     .filter(anime -> {
                         if (StrUtil.isBlank(title)) {
-                            return anime.getRssReleaseCount() > 0;
+                            // 计数缺失视为 0
+                            return Optional.ofNullable(anime.getRssReleaseCount()).orElse(0) > 0;
                         }
                         return true;
                     })
-                    .sorted(Comparator.comparingDouble(AniBT.Anime::getRating).reversed())
+                    .sorted(Comparator.comparing(
+                            (AniBT.Anime anime) -> Optional.ofNullable(anime.getRating()).orElse(0.0)
+                    ).reversed())
                     .peek(anime -> {
                         boolean exists = bgmIdList.contains(anime.getBgmId());
                         anime.setExists(exists);
@@ -97,9 +116,18 @@ public class AniBTService {
                 .thenFunction(res -> {
                     HttpReq.assertStatus(res);
                     JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                    JsonArray groups = jsonObject.getAsJsonObject("data")
-                            .getAsJsonArray("groups");
-                    List<AniBT.Group> groupList = GsonStatic.fromJsonList(groups, AniBT.Group.class);
+                    JsonElement dataElement = jsonObject.get("data");
+                    if (Objects.isNull(dataElement) || dataElement.isJsonNull()) {
+                        // data 缺失, 响应异常, 抛出带语义异常而非 NPE
+                        throw new IllegalStateException("AniBT 字幕组响应缺少 data 字段");
+                    }
+                    JsonObject data = dataElement.getAsJsonObject();
+                    JsonElement groupsElement = data.get("groups");
+                    if (Objects.isNull(groupsElement) || groupsElement.isJsonNull()) {
+                        // groups 缺失, 返回空列表 (调用方兼容: 控制器直接返回成功空数组)
+                        return new ArrayList<>();
+                    }
+                    List<AniBT.Group> groupList = GsonStatic.fromJsonList(groupsElement.getAsJsonArray(), AniBT.Group.class);
                     for (AniBT.Group group : groupList) {
                         String slug = group.getSlug();
                         String rss = "https://anibt.net/rss/anime.xml?bgmId={}&groupSlug={}";
@@ -107,6 +135,10 @@ public class AniBTService {
                         group.setRss(rss);
 
                         List<AniBT.Item> items = group.getItems();
+                        if (CollUtil.isEmpty(items)) {
+                            items = new ArrayList<>();
+                            group.setItems(items);
+                        }
                         GroupRegex groupRegx = GroupRegexUtils.toGroupRegx(items, AniBT.Item::getTitle);
 
                         for (AniBT.Item item : items) {

@@ -26,10 +26,8 @@ public class AfdianController extends BaseController {
         int code = result.getCode();
         if (code == 200) {
             Long time = DateUtil.offsetYear(new Date(), 999).getTime();
-            ConfigUtil.CONFIG.setOutTradeNo(outTradeNo)
-                    .setExpirationTime(time)
-                    .setTryOut(false);
-            ConfigUtil.sync();
+            // 锁内快照合并+原子交换, 避免直接写 CONFIG 字段被并发交换丢弃
+            ConfigUtil.updateAfdianInfo(outTradeNo, time, false);
         }
 
         return result;

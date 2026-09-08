@@ -4,6 +4,7 @@ import ani.rss.entity.Config;
 import ani.rss.entity.Log;
 import ani.rss.list.FixedSizeLinkedList;
 import ani.rss.util.other.ConfigUtil;
+import ch.qos.logback.classic.BasicConfigurator;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.LoggerContext;
 import ch.qos.logback.classic.joran.JoranConfigurator;
@@ -56,50 +57,65 @@ public class LogUtil {
             configurator.doConfigure(byteArrayInputStream);
 
             Appender<ILoggingEvent> stdout = rootLogger.getAppender("STDOUT");
-            stdout.clearAllFilters();
-            stdout.addFilter(new AbstractMatcherFilter<>() {
-                @Override
-                public FilterReply decide(ILoggingEvent event) {
-                    String loggerName = event.getLoggerName();
-                    if (HIDDE_LOG_LIST.contains(loggerName)) {
-                        return FilterReply.DENY;
+            // doConfigure 部分失败时 appender 可能缺失, 判空避免 NPE 并保留现场日志
+            if (stdout != null) {
+                stdout.clearAllFilters();
+                stdout.addFilter(new AbstractMatcherFilter<>() {
+                    @Override
+                    public FilterReply decide(ILoggingEvent event) {
+                        String loggerName = event.getLoggerName();
+                        if (HIDDE_LOG_LIST.contains(loggerName)) {
+                            return FilterReply.DENY;
+                        }
+                        return FilterReply.NEUTRAL;
                     }
-                    return FilterReply.NEUTRAL;
-                }
-            });
+                });
+            }
 
             Appender<ILoggingEvent> file = rootLogger.getAppender("FILE");
-            file.clearAllFilters();
-            file.addFilter(new AbstractMatcherFilter<>() {
-                @Override
-                public FilterReply decide(ILoggingEvent event) {
-                    Instant instant = event.getInstant();
-                    String date = DateUtil.format(new Date(instant.toEpochMilli()), DatePattern.NORM_DATETIME_PATTERN);
-                    String level = event.getLevel().toString();
-                    String loggerName = event.getLoggerName();
-                    String formattedMessage = event.getFormattedMessage();
-                    String threadName = event.getThreadName();
-                    StringBuilder log = new StringBuilder(StrFormatter.format("{} {} [{}] {} - {}", date, level, threadName, loggerName, formattedMessage));
-                    IThrowableProxy throwableProxy = event.getThrowableProxy();
-                    addThrowableMsg(log, throwableProxy);
-                    Log logEntity = new Log()
-                            .setMessage(log.toString())
-                            .setLevel(level)
-                            .setLoggerName(loggerName)
-                            .setThreadName(threadName);
+            if (file != null) {
+                file.clearAllFilters();
+                file.addFilter(new AbstractMatcherFilter<>() {
+                    @Override
+                    public FilterReply decide(ILoggingEvent event) {
+                        Instant instant = event.getInstant();
+                        String date = DateUtil.format(new Date(instant.toEpochMilli()), DatePattern.NORM_DATETIME_PATTERN);
+                        String level = event.getLevel().toString();
+                        String loggerName = event.getLoggerName();
+                        String formattedMessage = event.getFormattedMessage();
+                        String threadName = event.getThreadName();
+                        StringBuilder log = new StringBuilder(StrFormatter.format("{} {} [{}] {} - {}", date, level, threadName, loggerName, formattedMessage));
+                        IThrowableProxy throwableProxy = event.getThrowableProxy();
+                        addThrowableMsg(log, throwableProxy);
+                        Log logEntity = new Log()
+                                .setMessage(log.toString())
+                                .setLevel(level)
+                                .setLoggerName(loggerName)
+                                .setThreadName(threadName);
 
-                    if (HIDDE_LOG_LIST.contains(loggerName)) {
-                        return FilterReply.DENY;
-                    }
+                        if (HIDDE_LOG_LIST.contains(loggerName)) {
+                            return FilterReply.DENY;
+                        }
 
-                    synchronized (LOG_LIST) {
-                        LOG_LIST.add(logEntity);
+                        synchronized (LOG_LIST) {
+                            LOG_LIST.add(logEntity);
+                        }
+                        return FilterReply.NEUTRAL;
                     }
-                    return FilterReply.NEUTRAL;
-                }
-            });
+                });
+            }
         } catch (Exception e) {
-            log.error(e.getMessage(), e);
+            // 兜底: context.reset() 后 doConfigure 失败会让 root 上没有任何 appender，全应用静默无日志。
+            // 仅在缺少 STDOUT（黑面前兆）时挂载 logback 1.5.x 的基础控制台配置（ch.qos.logback.classic.BasicConfigurator），
+            // 避免 doConfigure 部分成功时重复追加 appender。
+            if (rootLogger.getAppender("STDOUT") == null) {
+                try {
+                    new BasicConfigurator().configure(context);
+                } catch (Exception basicException) {
+                    System.err.println("logback 基础兜底配置失败: " + basicException.getMessage());
+                }
+            }
+            log.error("加载日志配置失败, 请检查 logback-template.xml", e);
         } finally {
             IoUtil.close(byteArrayInputStream);
         }

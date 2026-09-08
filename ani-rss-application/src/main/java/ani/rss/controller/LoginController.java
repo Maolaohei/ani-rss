@@ -1,6 +1,5 @@
 package ani.rss.controller;
 
-import ani.rss.commons.CacheUtils;
 import ani.rss.entity.Config;
 import ani.rss.entity.Login;
 import ani.rss.entity.web.Result;
@@ -61,7 +60,8 @@ public class LoginController extends BaseController {
         }
         AuthUtil.limitLoginAttempts(true);
         log.warn("登陆失败 {} ip: {}", myUsername, ip);
-        ThreadUtil.sleep(RandomUtil.randomInt(500, 5000));
+        // 收敛随机延迟区间, 减少登录失败时对 Tomcat worker 的占用
+        ThreadUtil.sleep(RandomUtil.randomInt(300, 1500));
         return Result.error("用户名或密码错误");
     }
 
@@ -70,9 +70,7 @@ public class LoginController extends BaseController {
      */
     private void clearLimitLoginAttempts() {
         String ip = AuthUtil.getIp();
-        String key = "LimitLoginAttempts#" + ip;
-        if (CacheUtils.containsKey(key)) {
-            CacheUtils.remove(key);
-        }
+        // AuthUtil.clearLoginAttempts(ip) 由限流重构统一提供 (按 ip 清除登录尝试计数)
+        AuthUtil.clearLoginAttempts(ip);
     }
 }

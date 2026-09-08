@@ -14,6 +14,7 @@ import ani.rss.util.other.BgmUtil;
 import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.util.StrUtil;
+import cn.hutool.core.util.URLUtil;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -45,7 +46,8 @@ public class AnimeGardenService {
             AnimeGarden.Subject subject = new AnimeGarden.Subject();
             subject.setName(name)
                     .setId(bgmId)
-                    .setCover(images.getSmall())
+                    // images 可能缺失
+                    .setCover(Objects.isNull(images) ? "" : StrUtil.nullToEmpty(images.getSmall()))
                     .setExists(true);
 
             week.setWeekLabel("搜索")
@@ -100,8 +102,14 @@ public class AnimeGardenService {
         Map<String, List<AnimeGarden.Subject>> map = subjectList.stream()
                 .peek(subject -> {
                     Date activedAt = subject.getActivedAt();
-                    int i = DateUtil.dayOfWeek(activedAt) - 1;
-                    String weekLabel = weeks.get(i);
+                    String weekLabel;
+                    if (Objects.isNull(activedAt)) {
+                        // 放映时间缺失, 归入"未知"组
+                        weekLabel = "未知";
+                    } else {
+                        int i = DateUtil.dayOfWeek(activedAt) - 1;
+                        weekLabel = weeks.get(i);
+                    }
                     subject.setWeekLabel(weekLabel);
                 })
                 .collect(Collectors.groupingBy(AnimeGarden.Subject::getWeekLabel));
@@ -153,6 +161,7 @@ public class AnimeGardenService {
 
 
         Map<String, List<AnimeGarden.Item>> groupIdMap = items.stream()
+                .filter(it -> StrUtil.isNotBlank(it.getFansub().getId()))
                 .collect(Collectors.groupingBy(it -> it.getFansub().getId()));
 
         List<AnimeGarden.Group> list = items
@@ -163,11 +172,12 @@ public class AnimeGardenService {
                     String name = fansub.getName();
                     Date createdAt = it.getCreatedAt();
 
+                    // fansub 名需编码, 防止特殊字符 (& # 空格等) 拼坏 feed URL
                     String rss = StrUtil.format(
                             "{}/feed.xml?subject={}&fansub={}",
                             HOST,
                             bgmId,
-                            name.replace("&", "%26")
+                            URLUtil.encodeAll(StrUtil.nullToEmpty(name))
                     );
 
                     return new AnimeGarden.Group()
@@ -177,7 +187,10 @@ public class AnimeGardenService {
                             .setRss(rss)
                             .setBgmId(bgmId);
                 })
-                .sorted(Comparator.comparing(AnimeGarden.Group::getLastUpdatedAt).reversed())
+                // 更新时间缺失按 epoch 起点处理, 排到最后
+                .sorted(Comparator.comparing(
+                        (AnimeGarden.Group group) -> Optional.ofNullable(group.getLastUpdatedAt()).orElse(new Date(0))
+                ).reversed())
                 .toList();
 
         list = CollUtil.distinct(list, AnimeGarden.Group::getId, false);

@@ -390,6 +390,20 @@ public class DownloadService {
                 log.debug("离线任务进行中, 跳过本轮 {}", reName);
                 continue;
             }
+            // (E9) 失败队列闸门: 仅非 OpenList 路径(qB/TR/Aria2)。近 24h 内失败过的本集
+            // 不再每轮自动重推, 避免坏种/下载器故障时无限重试风暴; 条目保留在失败队列,
+            // 由用户手动重试。OpenList 路径不加此闸门(其内部已有 10008/adopt 去重)。
+            if (!openListTool) {
+                String failKey = FailedDownloadQueue.keyOf(ani.getId(), item.getInfoHash(), reName);
+                boolean recentFailed = FailedDownloadQueue.list().stream()
+                        .anyMatch(f -> Objects.equals(f.getId(), failKey)
+                                && f.getFailedAt() != null
+                                && System.currentTimeMillis() - f.getFailedAt() < TimeUnit.HOURS.toMillis(24));
+                if (recentFailed) {
+                    log.warn("本集 24h 内下载失败(已保留在失败队列), 跳过本轮推送 {} hash={}", reName, hash);
+                    continue;
+                }
+            }
             File saveTorrent = openListTool
                     ? TorrentUtil.saveTorrentPending(ani, item)
                     : TorrentUtil.saveTorrent(ani, item);
@@ -1031,7 +1045,8 @@ public class DownloadService {
         String title = ani.getTitle().trim();
 
         String pinyin = PinyinUtils.getPinyin(title);
-        String letter = pinyin.substring(0, 1).toUpperCase();
+        // (E11) 标题为空/纯符号时 getPinyin 可能返回空串, substring(0,1) 会越界, 回落 "#"
+        String letter = pinyin.isEmpty() ? "#" : pinyin.substring(0, 1).toUpperCase();
         if (ReUtil.isMatch("^\\d$", letter)) {
             letter = "0";
         } else if (!ReUtil.isMatch("^[a-zA-Z]$", letter)) {

@@ -66,10 +66,34 @@ public class AniUtil {
         File configFile = getAniFile();
 
         if (!configFile.exists()) {
-            FileUtil.writeUtf8String(GsonStatic.toJson(ANI_LIST), configFile);
+            // 原子写：先写临时文件再 move 替换，避免首启写盘途中断电留下截断的订阅文件
+            File temp = new File(configFile + ".temp");
+            FileUtil.del(temp);
+            FileUtil.writeUtf8String(GsonStatic.toJson(ANI_LIST), temp);
+            FileUtils.move(temp.toPath(), configFile.toPath());
         }
         String s = FileUtil.readUtf8String(configFile);
-        List<Ani> anis = GsonStatic.fromJsonList(s, Ani.class);
+
+        // 解析失败兜底：损坏文件改名保留现场，以空列表继续启动，不再向上抛出导致 exit
+        List<Ani> anis = null;
+        try {
+            anis = GsonStatic.fromJsonList(s, Ani.class);
+        } catch (Exception e) {
+            log.error("订阅文件解析失败: {}", e.getMessage(), e);
+        }
+
+        if (anis == null) {
+            String ts = DateUtil.format(new Date(), "yyyyMMddHHmmss");
+            File corruptFile = new File(configFile + ".corrupt-" + ts);
+            try {
+                FileUtil.move(configFile, corruptFile, true);
+                log.error("订阅文件已损坏, 已改名为 [{}] 保留现场; 本次启动将以空订阅列表继续, 请检查磁盘/权限后重新添加订阅", corruptFile.getName());
+            } catch (Exception moveException) {
+                log.error("订阅文件已损坏, 且改名保留失败(可能被占用), 请手动处理: {}", configFile);
+                log.error(moveException.getMessage(), moveException);
+            }
+            anis = new ArrayList<>();
+        }
 
         CopyOptions copyOptions = CopyOptions
                 .create()
