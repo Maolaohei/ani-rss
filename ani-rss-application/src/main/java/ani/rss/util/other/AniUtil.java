@@ -11,6 +11,7 @@ import ani.rss.service.MikanService;
 import ani.rss.util.basic.HttpReq;
 import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.core.bean.copier.CopyOptions;
+import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.date.DatePattern;
 import cn.hutool.core.date.DateTime;
 import cn.hutool.core.date.DateUtil;
@@ -93,6 +94,10 @@ public class AniUtil {
                 ani.setReleaseDate(releaseDate);
             }
 
+            // 存量订阅地址迁移：mikanime.tv 仅是 mikanani.me 的 301 跳板，
+            // 直连 .me 可少建一条 TCP 连接（降低连接超时暴露面）
+            migrateMikanHost(ani);
+
             // 自动修补缺失的封面
             String image = ani.getImage();
             // 回填补全后的封面路径（port upstream 2147d525）
@@ -105,6 +110,40 @@ public class AniUtil {
         // 原子替换：读线程永远不会看到中间状态
         ANI_LIST = newList;
         log.debug("加载订阅 共{}项", ANI_LIST.size());
+    }
+
+    /**
+     * 订阅 RSS 地址迁移：mikanime.tv -> mikanani.me
+     * <p>
+     * mikanime.tv 是 mikanani.me 的 301 跳转域名（且本项目的默认 Mikan Host 已改为 .me）。
+     * 存量订阅的 URL 在添加时写死落盘，此处加载时统一改写主订阅与备用 RSS 地址，
+     * 避免每次抓取多付一次 301 往返。非 .tv 地址原样保留。
+     */
+    private static void migrateMikanHost(Ani ani) {
+        if (ani == null) {
+            return;
+        }
+        String url = ani.getUrl();
+        if (StrUtil.isNotBlank(url) && url.contains("mikanime.tv")) {
+            String migrated = url.replace("mikanime.tv", "mikanani.me");
+            ani.setUrl(migrated);
+            log.info("订阅地址迁移 mikanime.tv -> mikanani.me: {}", ani.getTitle());
+        }
+
+        List<StandbyRss> standbyRssList = ani.getStandbyRssList();
+        if (CollUtil.isEmpty(standbyRssList)) {
+            return;
+        }
+        for (StandbyRss standbyRss : standbyRssList) {
+            if (standbyRss == null) {
+                continue;
+            }
+            String standbyUrl = standbyRss.getUrl();
+            if (StrUtil.isNotBlank(standbyUrl) && standbyUrl.contains("mikanime.tv")) {
+                standbyRss.setUrl(standbyUrl.replace("mikanime.tv", "mikanani.me"));
+                log.info("备用订阅地址迁移 mikanime.tv -> mikanani.me: {}", ani.getTitle());
+            }
+        }
     }
 
     /**

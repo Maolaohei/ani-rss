@@ -67,7 +67,6 @@ import {base64Encode} from "@/js/global.js";
 
 let urls = ref([
   'https://mikanani.me',
-  'https://mikanime.tv',
   'https://nyaa.si',
   'https://acg.rip',
   'https://github.com',

@@ -1,5 +1,5 @@
 export let configData = {
-    "mikanHost": "https://mikanime.tv",
+    "mikanHost": "https://mikanani.me",
     "tmdbApi": "https://api.themoviedb.org",
     "tmdbApiKey": "",
     "tmdbAnime": true,

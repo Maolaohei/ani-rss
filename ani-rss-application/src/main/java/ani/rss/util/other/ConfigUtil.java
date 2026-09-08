@@ -97,7 +97,6 @@ public class ConfigUtil {
 
         String proxyList = """
                 mikanani.me
-                mikanime.tv
                 anibt.net
                 animes.garden
                 nyaa.si
@@ -309,10 +308,26 @@ public class ConfigUtil {
                 .create()
                 .setIgnoreNullValue(true);
         BeanUtil.copyProperties(GsonStatic.fromJson(s, Config.class), CONFIG, copyOptions);
+        migrateMikanHost(CONFIG);
         format(CONFIG);
         LogUtil.loadLogback();
         log.debug("加载配置文件 {}", configFile);
         TorrentUtil.load();
+    }
+
+    /**
+     * 迁移已落盘的 Mikan Host：mikanime.tv -> mikanani.me
+     * <p>
+     * 旧版本曾默认使用 mikanime.tv 并保存到 config.json，该值会覆盖新默认值。
+     * mikanime.tv 仅是 mikanani.me 的 301 跳板，启动时统一改写为正式域名，
+     * 保证新建订阅生成的 RSS/种子链接都走 mikanani.me。
+     */
+    private static void migrateMikanHost(Config config) {
+        String mikanHost = config.getMikanHost();
+        if (StrUtil.isNotBlank(mikanHost) && mikanHost.contains("mikanime.tv")) {
+            config.setMikanHost(mikanHost.replace("mikanime.tv", "mikanani.me"));
+            log.info("Mikan Host 迁移 mikanime.tv -> mikanani.me");
+        }
     }
 
     /**

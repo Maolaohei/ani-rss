@@ -1452,7 +1452,7 @@ class RenameUtilTest {
 
     @Test
     void rssRetryDelayUsesExponentialBackoffWithBoundedStableJitter() {
-        String url = "https://mikanime.tv/RSS/Bangumi?bangumiId=4039";
+        String url = "https://mikanani.me/RSS/Bangumi?bangumiId=4039";
 
         long first = ItemsUtil.rssRetryDelayMs(1, url);
         long second = ItemsUtil.rssRetryDelayMs(2, url);
