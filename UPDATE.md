@@ -18,6 +18,43 @@
 
 ---
 
+## 3.2.31 增量（2026-09）
+
+### 稳定性专项：全部 P0/P1 审计条目修复（45 文件，+2322/−900）
+
+**P0（生产故障级，5 项全修）**
+- **任务线程自愈**：`BaseTask.run` 捕获 Throwable 后 60s 退避续跑，单次异常不再导致对应定时任务永久停摆；BGM 评分/总集数、重命名等任务拆箱 NPE 全项目防护（`Boolean.TRUE.equals` / `ObjectUtil.defaultIfNull`）
+- **RSS 全局锁防挂死**：收尾等待 5 分钟整体 deadline；`getBean`/线程池提交失败兜底释放幽灵锁；手动刷新抢先收进生命周期锁并做世代重验，排队请求不再被误杀
+- **配置文件防损坏死循环**：首次启动 `config.v2.json`/`ani.v2.json` 改 temp+move 原子写；解析失败自动改名 `.corrupt-<时间戳>` 保留现场并以默认配置继续启动（不再 exit 循环）
+- **通知模板防无限递归**：全局模板递归前剥离 `${notification}`；重试逻辑捕获 Throwable（StackOverflowError 只记录不重试），`send()` 返回值纳入重试判定
+- **OpenList 孤儿 pending**：启动即清（远端任务由 10008/adopt 逻辑接管），该集下轮自动重下，不再永久静默跳过
+
+**并发与配置（节选）**
+- `ConfigUtil.CONFIG` 改 volatile 快照（copy-on-write）：`updateFromApi` 锁内深拷贝合并后原子交换，RSS/下载线程不再读到撕裂配置；爱发电激活同步收敛为锁内合并
+- `TaskService.stop` 30s 有界等待；下载器/Aria2 锁内网络调用与 sleep 全部外移；BGM `setToken`/`getSubjectId` 去类锁，全站流量不再被串行化
+- 登录限流迁移独立存储（1 天固定窗口、原子计数、401 不再误计数）；X-Forwarded-For 改信任代理链解析，防伪造绕过白名单
+
+**下载器可靠性**
+- qBittorrent：SID 失效自动重登一次 + 全字段守护 + 查询异常上抛（杜绝"无任务/查询失败"混淆导致的坏种误报删记录）
+- Transmission：RPC 统一封装（409 握手重试），会话按 host 隔离，测试登录不再偷换运行会话
+- Aria2：JSON-RPC error 体判定，登录假成功/删除假成功修复
+- OpenList：同 hash 等待 60s 上限、开工算超时（排队不再挤占窗口）、按 hash 隔离的取消语义、重试次数判空、等待池改有界队列 + 拒绝策略
+- 非 OpenList 路径：失败队列 24h 内同集跳过，坏种/密钥错误不再每轮 RSS 无限重下重推
+
+**数据完整性与解析防御**
+- 备份/导入/清理全链路"先校验、暂存、原子替换"：坏 zip 不再删种子缓存，nfo 写入原子化，临时目录整树误删防护（Season/Specials 黑名单 + 集数标识校验）
+- 日志：解析失败兜底挂载输出（不再零日志黑洞）；文件日志 50MB/1GB 滚动上限
+- Mikan/BGM/AniBT/AnimeGarden/Github/ICS/RSS 全边界判空 + 单条隔离：一条脏数据/改版页面不再打挂整页或整个订阅
+- Cloudflare 挑战页/429/5xx 明确报错；搜索关键词 URL 编码修复特殊标题静默搜索失败
+
+**Web 安全面**
+- 图片代理路径穿越封堵（段白名单 + normalize 断言，`../` 不再可达 config.yaml）；SSRF 校验覆盖 IPv6/十进制 IP/链路本地/DNS 重解析（含重定向环深度上限）
+- 上传接口流式 MD5 + 扩展名白名单（拒绝 svg/html）；播放列表软链环防护 + 字幕 20MiB 上限；WebUI 更新解压改暂存目录 + 失败回滚
+
+验证：`mvn compile` 全绿；既有解析测试通过（tv 99.77% / movie 100% / ova 100%）。
+
+---
+
 ## 3.2.30 增量（2026-09）
 
 ### UI 新版皮肤
