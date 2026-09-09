@@ -18,6 +18,31 @@
 
 ---
 
+## 3.2.32 增量（2026-09）
+
+### RSS 解析可靠度专项：tv 99.92% / movie·ova 100%（8553 条真实标题语料）
+
+**误丢条目级 bug（生产影响）**
+- **`parseInt("10.5")` 崩溃丢条目**：`isYearOrDate` 对长度恰为 4 的 "10.5" 直接 `parseInt` 抛异常，整个 x.5 小数集条目被 catch 后静默丢弃；两处加纯数字守卫
+- **acg.rip 整站拒收**：其种子 URL 为数字 ID 非哈希，infoHash 安全校验将全部条目 continue 丢弃；改为以种子 URL 的 SHA-256 合成稳定且路径安全的 64 位 hex 标识（路径穿越载荷同步被中和）
+- **编号特典挤掉正片**：SP01/OVA01 等原落 S01E01，与正片 E01 按 `season:episode` 去重先到先得；现统一落 **S00 特典季保留集数**（OVA02→S00E02、OAD3.5→S00E03.5），去重查询季号改为优先取 reName 中的 Sxx，特典与正片、特典之间互不碰撞
+- **NCOP/NCED 不再下载**：无版权 OP/ED 单曲（含编号）在兜底链直接拒绝；`第01话+NCOPED` 混装包不受影响仍按正片下载
+
+**解析能力补全（正确拒绝的前提下提成功率：38 → 5 条失败）**
+- 小数集 `139.5`/`OAD3.5`、`第N回`、`467-B`/`490B`、`038_V2`、`084 V2`、`EPISODE.0`、柯南 `-P1` 分部
+- 语义合集：`road to` 系列、欧语 `COMPLETA/COMPLETO`、`正片+SP`、整季 BD/WEB 质量词包（无集数时才触发，不引入新误匹配）
+- 年份/8 位日期守卫贯穿全部新分支；`[1992] XXX_OVA` 年份首匹配即放弃修复
+
+**XML 层护栏（真实 feed 样本入库测试）**
+- mikan×2（420 条）/nyaa（75）/dmhy（500）/acg.rip（30）/bangumi.moe（50）六源 fixture 入库 `src/test/resources/feeds/`，13 项断言：字段提取、magnet 兜底、缺 channel 明确报错、XXE 不回显、enclosure 缺 url 单条跳过
+- `ItemsUtil` 拆分 `buildItems`（纯 XML 层）/`parseItems`（rename 语义层），解析与 HTTP 解耦可测
+
+**回归护栏**
+- `RenameAccuracyTest` 精度语义测试（编号特典/合集/拒绝边界/占位符守卫）；`AdaptAnalyzeTest` 固化 tv 失败 ≤5、misMatch==0、movie/ova 零失败阈值
+- 全量 28 个测试类通过；临时诊断测试清理
+
+---
+
 ## 3.2.31 增量（2026-09）
 
 ### 稳定性专项：全部 P0/P1 审计条目修复（45 文件，+2322/−900）
