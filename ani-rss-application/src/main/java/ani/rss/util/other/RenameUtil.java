@@ -23,13 +23,13 @@ import java.util.regex.Pattern;
 
 @Slf4j
 public class RenameUtil {
-    public static final String REG_STR = "(.*|\\[.*])(( - |Vol |[Ee][Pp]?)\\d+(\\.5)?( ?\\(\\d+\\))?|【\\d+(\\.5)?】|\\[\\d+(\\.5)?( ?\\(\\d+\\))?( ?[vV]\\d)?( ?END)?( ?完)?( ?FIN)?]|（\\d+(\\.5)?）|第\\d+(\\.5)?[话話集]( - END)?|^\\[TOC].* \\d+|^六四位元字幕组.*★\\d+(\\.5)?)";
+    public static final String REG_STR = "(.*|\\[.*])(( - |Vol |[Ee][Pp]?)\\d+(\\.5)?( ?\\(\\d+\\))?|【\\d+(\\.5)?】|\\[\\d+(\\.5)?( ?\\(\\d+\\))?( ?[vV]\\d)?( ?END)?( ?完)?( ?FIN)?]|（\\d+(\\.5)?）|第\\d+(\\.5)?[话話集回]( - END)?|^\\[TOC].* \\d+|^六四位元字幕组.*★\\d+(\\.5)?)";
 
     // 宽松正则：覆盖老番不规范命名
     public static final String REG_LOOSE =
             "(Vol\\.?\\s*\\d{1,3}(?!\\d)(?:\\.5)?)" +
             "|([Ee][Pp]?\\s*\\d{1,3}(?!\\d)(?:\\.5)?)" +
-            "|((?:^|\\s)(?:SP|OVA|OAD|NCOP|NCED)\\s*\\d{1,3}(?!\\d)(?:\\.5)?)" +
+            "|((?:^|[\\s\\u4e00-\\u9fff【】()（）\\[])(?:SP|OVA|OAD|OVD)\\s*[xX×]?\\s*\\d{1,3}(?!\\d)(?:\\.5)?(?:[vV]\\d{1,2})?(?![A-Za-z]))" +
             "|(\\s[-~～]\\s*\\d{1,3}(?!\\d)(?:\\.5)?)" +
             "|(【\\d+(?:\\.5)?】|\\[\\d+(?:\\.5)?(?:\\s*v\\d)?]|（\\d+(?:\\.5)?）)" +
             "|(第\\d+(?:\\.5)?[话話集])" +
@@ -38,16 +38,26 @@ public class RenameUtil {
             "|(_\\d{1,3}(?!\\d)(?:\\.5)?)" +
             "|(★\\d+(?:\\.5)?★)" +
             "|(\\s\\d{2}(?:\\.5)?(?:\\s|\\]|\\[|$))" +
-            // 游戏王等裸数字格式: " 151 720P" / " 151 END" / " 139.5 720P"
-            "|(\\s\\d{1,3}(?:\\.5)?(?=\\s*(?:720|1080|2160)[Pp]|\\s*END\\b))" +
-            // OAD 数字: [OAD2] [OAD02] [OAD1&2]
+            // 游戏王等裸数字格式: " 151 720P" / " 151 END" / " 139.5 720P" / " 084 V2"(版本号变体先于数字)
+            "|(\\s\\d{1,3}(?:\\.5)?(?=\\s*(?:[vV]\\d{1,2}\\b)?\\s*(?:720|1080|2160)[Pp]|\\s*(?:[vV]\\d{1,2}\\b\\s*)?END\\b|\\s*v\\d))" +
+            // OAD 数字: [OAD2] [OAD02] [OAD1&2] (【】全角括号由标记类分支处理)
             "|(\\[OAD\\d+(?:&\\d+)?\\])" +
+            // 哆啦A梦修复版编号: [467-B] / [490B] (后随 ] 防止 10bit 误匹配)
+            "|(\\[\\d{1,3}-[A-Z]\\]|\\b\\d{1,3}[Bb](?=\\]))" +
+            // 下划线+版本号集数: " 038_V2 "
+            "|(\\s\\d{1,3}_V[12](?=\\s))" +
+            // 中文量词"回": 第12回 (允许紧贴 CJK 与"回"量词)
+            "|(第\\d{1,3}(?:\\.5)?回)" +
+            // Episode 前缀: Episode.0 / episode 01
+            "|(episode[.\\s]?\\d{1,3}(?!\\d))" +
+            // 分部 P1/P2 (柯南 - P1 等拆分包)
+            "|((?<![\\p{L}\\p{N}])P[1-9](?![0-9]))" +
             // Erai-raws 双语标题: "ました03|暴怒千金" / "04|最强"
             "|((?<!\\d)\\d{1,3}(?:\\.5)?\\|)" +
             // 冒号集数: "。44:CLOUDY BEACH"
             "|((?<!\\d)\\d{1,3}:)" +
             // 柯南等超长番裸数字格式: [名侦探柯南 1049 目标毛利小五郎] / 1047&1048
-            "|((?<=[\\u4e00-\\u9fff])\\s\\d{3,4}(?:&\\d{3,4})?(?=\\s[\\u4e00-\\u9fff]))";
+            "|((?<=[\\u4e00-\\u9fff])\\s\\d{3,4}(?:&\\d{3,4})?(?=\\s[\\u4e00-\\u9fff]))";;
 
     // 集数范围: 01-06, 01~06, 01～06
     public static final String EP_RANGE_REG = "(\\d+(?:\\.5)?)[\\s]*[-~～][\\s]*(\\d+(?:\\.5)?)";
@@ -70,6 +80,39 @@ public class RenameUtil {
 
     // 合集标题: [01-12 合集], [01-02], 01～24 精校合集 等
     public static final Pattern COLLECTION_TITLE_REG = Pattern.compile("\\d+\\s*[-~～]\\s*\\d+");
+
+    // 语义合集标记: 合集/全集/正片+SP/TV+OVA 混合包/整季+特典/特别篇合集 等
+    // 命中即视为合集种子(episode 置 1 占位, 无范围数字, 不参与 expandMultiEpisode 展开)
+    public static final Pattern SEMANTIC_COLLECTION_REG = Pattern.compile(
+            "(合集|全集|特典映像|全\\d+话(?:\\+|含)?|TV动画|TV動畫|TV\\s*\\+\\s*OVA|TV\\s*\\+\\s*\\d*SP|正片\\s*\\+|\\+\\s*SP\\b|SP\\s*全特典|\\+\\s*OAD|\\+\\s*\\d*OVA|OADs|年度\\[|(?i:serie\\s+completa)|(?i:completa\\b)|(?i:completo\\b)|(?i:road\\s*(?:[.\\s]+)?to\\b))");
+
+    // 无编号剧场版/特别放映/总集篇单集: 无集数标记, 落 S00E01(特典季)
+    public static final Pattern THEATER_SPECIAL_REG = Pattern.compile(
+            "(剧场版|劇場版|Gekijouban|特别放映|特別放映|总集篇|総集篇|剧场总集|无限城篇|無限城篇|Fan Letter|周年纪念|周年紀念|纪念特别|纪念篇)");
+
+    // 无编号特典/单集标记: 纯 SP/[SP]/Special/特别篇/OVA/TVSP(无数字)。
+    // OVA/OAD 需排除合集语境(篇/全集/集/复数s/混合+)
+    public static final Pattern UNNUMBERED_SPECIAL_REG = Pattern.compile(
+            "(?i)(^|[^A-Za-z0-9])(SP|Special|特别篇|特別篇|特别版|特別版|特别演出|特別演出|TVSP|OVA|OAD)(?!s|篇|全集|集|\\+|\\d)([^A-Za-z0-9]|$)");
+
+    // 无编号特典变体: 年份/话数+SP 或 前缀SP ([2024SP] [774SP]) —— 编号是播报期数非集数, S00E01
+    // 注意: SP+明确集数形态(SP01 / SP x2 / SP02.5)由 NUMBERED_SPECIAL 更早拦截, 落 S00 + 保留集数
+    public static final Pattern SPECIAL_TAG_REG = Pattern.compile(
+            "(?i)(\\[\\d{4}SP\\]|\\[\\d{1,4}SP\\]|\\[SP\\d{0,4}\\]|\\[\\d{4}\\s*(?:特別|特别)?SP\\]|\\[SP\\](?=\\s|\\]|$))");
+
+    // 编号特典(SP01 / OVA02 / OAD3.5 / OVD1 / SP x2 / OVA01v3):
+    // 是视频, 保留编号为集数, 落 S00 特典季 —— 不与正片集数碰撞, 多个特典互不冲突
+    public static final Pattern NUMBERED_SPECIAL_REG = Pattern.compile(
+            "(?i)(?:^|[^A-Za-z0-9])(?:SP|OVA|OAD|OVD)\\s*[xX×]?\\s*(\\d{1,3}(?:\\.5)?)(?:[vV]\\d{1,2})?(?![A-Za-z0-9])");
+
+    // 无版权 OP/ED 单曲(NCOP/NCED/NCOPED, 含编号): 非正片内容, 不下载 —— rename 返回 false 丢弃
+    public static final Pattern NC_OP_ED_REG = Pattern.compile(
+            "(?i)(?:^|[^A-Za-z0-9])NC(?:OP|ED|OPED)(?:\\s*[xX×]?\\s*\\d{1,3}(?:\\.5)?)?(?:[vV]\\d{1,2})?(?![A-Za-z0-9])");
+
+    // 哆啦A梦等无编号单集: [播出日期][标题] 形态, 日期不是集数。
+    // 要求日期后紧跟非数字文本(排除 [2010.12.17][1080P] 纯规格标签)
+    public static final Pattern DATE_EPISODE_REG = Pattern.compile(
+            "\\[\\d{4}\\.\\d{2}\\.\\d{2}\\]\\s*\\[?\\s*[^\\]0-9\\s][^\\]]*[\\u4e00-\\u9fff]");
 
     // 版本号: v2, v3, V2 等（位于集数之后）; 限 1-2 位, 避免 v2024 等长数字被当版本号
     public static final String VERSION_REG = "[vV](\\d{1,2})(?:[^\\d]|$)";
@@ -346,6 +389,11 @@ public class RenameUtil {
         itemTitle = itemTitle.replace("\t", " ").trim();
         itemTitle = itemTitle.replaceAll("\\[([A-Z]|\\d){8}]$", "").trim();
 
+        // 编号特典: [00&SP] / [SP&00] 等 —— 标题自带集数身份, 落 S00 特典季避免与正片集数碰撞
+        if (!ova && v2 && ReUtil.contains("\\[\\s*00\\s*&\\s*SP\\s*\\]|\\[\\s*SP\\s*&\\s*00\\s*\\]", itemTitle)) {
+            season = 0;
+        }
+
         // OVA v2: 区分剧场版(电影式)与 OVA(特典式)
         int moviePart = 0;
         if (ova && v2) {
@@ -408,6 +456,18 @@ public class RenameUtil {
             // v2: REG_STR 失败时尝试宽松正则
             if (v2 && StrUtil.isBlank(e)) {
                 e = tryExtractEpisode(itemTitle, ani);
+                // 编号特典由宽松正则命中(如 "OVA 2 [1080p]"): 编号是特典序非正片集数, 落 S00
+                if (StrUtil.isNotBlank(e) && NUMBERED_SPECIAL_REG.matcher(itemTitle).find()) {
+                    season = 0;
+                }
+            }
+        }
+
+        if (!ova && StrUtil.isBlank(e)) {
+            // 无版权 OP/ED 单曲(NCOP/NCED/NCOPED, 含编号): 非正片内容, 不下载
+            // 注: "+NCOPED" 已在上方被剥除, 剩余标题若无集数则按合集/特典正常归类 —— PV+NCOPED 类实为 PV, 亦应丢弃
+            if (v2 && NC_OP_ED_REG.matcher(itemTitle).find()) {
+                return false;
             }
         }
 
@@ -415,10 +475,35 @@ public class RenameUtil {
             // v2: 合集种子不依赖单集 episode 提取，交给 expandMultiEpisode 展开
             if (v2 && COLLECTION_TITLE_REG.matcher(itemTitle).find()) {
                 e = "1";
+            } else if (v2 && SEMANTIC_COLLECTION_REG.matcher(itemTitle).find()) {
+                // 语义合集(无范围数字): 全74话+3OVA / 正片+SP / TV+OVA混合包 / 剧场总集篇 等
+                // episode 置 1 占位; reName 稳定, 去重按 infoHash
+                e = "1";
+            } else if (v2 && NUMBERED_SPECIAL_REG.matcher(itemTitle).find()) {
+                // 编号特典(SP01 / OVA02 / OAD3.5 / NCOP1 / SP x2 / OVA01v3):
+                // 是视频, 保留编号为集数, 落 S00 特典季 —— 不与正片集数碰撞, 多个特典互不冲突
+                Matcher spm = NUMBERED_SPECIAL_REG.matcher(itemTitle);
+                spm.find();
+                e = spm.group(1);
+                season = 0;
+            } else if (v2 && UNNUMBERED_SPECIAL_REG.matcher(itemTitle).find()) {
+                // 无编号特典单集: 纯 SP / Special / 特别篇(不含数字)
+                // 映射为 S00E01(特典季), 同标题新条目由下载入口 infoHash 去重, 不落盘重名
+                e = "1";
+                season = 0;
+            } else if (v2 && SPECIAL_TAG_REG.matcher(itemTitle).find()) {
+                // 编号特典变体: [2024SP] [774SP] —— 编号是播报期数非集数, 同样按特典处理
+                e = "1";
+                season = 0;
+            } else if (v2 && DATE_EPISODE_REG.matcher(itemTitle).find()
+                    && Pattern.compile("\\[\\d{4}\\.\\d{2}\\.\\d{2}\\]\\s*\\[?\\s*[^\\]0-9\\s][^\\]]+\\]").matcher(itemTitle).find()) {
+                // 无编号单集: [2010.12.17][哆啦美小剧场！圣诞特别演出] 形态, 日期非集数
+                e = "1";
+                season = 0;
             } else if (isSeasonPack(itemTitle)) {
                 // VCBD 等整季 BDRip 压制包: 无单集集数, [S1 Fin]/[S2-S4 + OADs]/[Reseed Fin] 标记
                 // 季号取自标题, episode 置 1(合集由下载端按文件结构处理)
-                Matcher sm = Pattern.compile("\\[(S)(\\d+)(?:-S?\\d+)?[^\\]]*\\]").matcher(itemTitle);
+                Matcher sm = Pattern.compile("\\[(S)\\s*\\.?\\s*(\\d+)(?:-S?\\d+)?[^\\]]*\\]").matcher(itemTitle);
                 if (sm.find()) {
                     try {
                         season = Integer.parseInt(sm.group(2));
@@ -426,6 +511,10 @@ public class RenameUtil {
                     }
                 }
                 e = "1";
+            } else if (v2 && THEATER_SPECIAL_REG.matcher(itemTitle).find()) {
+                // 无编号剧场版/总集篇/特别放映(混入 tv 组): 落 S00 特典季, 不丢弃
+                e = "1";
+                season = 0;
             } else {
                 return false;
             }
@@ -589,13 +678,13 @@ public class RenameUtil {
             return e;
         }
 
-        // 宽松正则 fallback
+        // 宽松正则 fallback: 扫描全部候选, 跳过年份/日期伪匹配(如 "[1992] Name_OVA" 应落到 _OVA)
         Matcher m = Pattern.compile(REG_LOOSE, Pattern.CASE_INSENSITIVE).matcher(itemTitle);
-        if (m.find()) {
+        while (m.find()) {
             String loose = m.group();
             // 排除年份/日期: [1996]、[2015]、[20221208] 等标签不应被当集数
             if (isYearOrDate(extractEpisodeNumber(loose))) {
-                return null;
+                continue;
             }
             return loose;
         }
@@ -608,14 +697,24 @@ public class RenameUtil {
      * 不强制 BDRip 质量标记(部分种子不带)。
      */
     private static boolean isSeasonPack(String itemTitle) {
-        return itemTitle.matches(".*\\[[^\\]]*(S\\d{1,2}|Fin|Reseed|LIVE)[^\\]]*\\].*");
+        return itemTitle.matches(".*\\[[^\\]]*(S\\d{1,2}|Fin|Reseed|LIVE)[^\\]]*\\].*")
+                // 无方括号整季标记: "... with You S01v2 [CR WEB-DL]"
+                || itemTitle.matches(".*\\b[Ss]\\d{1,2}v\\d\\b.*")
+                // 裸季号: "S01 (BD Remux" / "S01.Dual.Audio.2160p.BluRay"
+                // 要求季号后紧跟 ( 或 . , 且全串含 BD/Remux/分辨率等质量词, 防止 139.5 等被 S 匹配
+                || itemTitle.matches("(?si).*\\b[Ss]\\d{1,2}\\b\\s*[(.].*(bd|bluray|remux|1080|720|2160|dual|flac|hevc|h264|x264|x265).*")
+                // 无集数 + 独立蓝光/网络源质量词: 整季/剧场包(单集标题几乎必带集数, 走不到这里)
+                || itemTitle.matches("(?si).*[^a-z0-9](bd|bdrip|bluray|remux|web-dl|webrip|uhd-bd)[^a-z0-9].*")
+                // 剧场/特别篇常见质量词(35mm/胶片修复): "[35mm 1080p Restore H264]"
+                || itemTitle.contains("35mm");
     }
 
     /**
      * 判断数字是否为年份(1900-2100)或日期(yyyyMMdd)
      */
     private static boolean isYearOrDate(String num) {
-        if (num == null) {
+        if (num == null || !num.matches("\\d+")) {
+            // "10.5" 等非纯数字不是年份(长度恰好 4 会让 parseInt 炸掉)
             return false;
         }
         if (num.length() == 4) {
@@ -641,10 +740,12 @@ public class RenameUtil {
         String num = extractEpisodeNumber(episodePart);
         if (num == null) return episodePart;
 
-        // 排除4位数年份 (1900-2100)
-        if (num.length() == 4) {
-            int val = Integer.parseInt(num);
-            if (val >= 1900 && val <= 2100) return null;
+        // 排除4位数年份 (1900-2100); 非纯数字(如 "10.5")跳过
+        if (num.matches("\\d+")) {
+            if (num.length() == 4) {
+                int val = Integer.parseInt(num);
+                if (val >= 1900 && val <= 2100) return null;
+            }
         }
 
         // 排除 周年/年 等上下文

@@ -53,7 +53,9 @@ class AdaptAnalyzeTest {
     @Test
     void analyze() throws Exception {
         ConfigUtil.CONFIG.setRenameTemplate(null).setOvaRenameTemplate(null)
-                .setRenameDelYear(false).setRenameDelTmdbId(false);
+                .setRenameDelYear(false).setRenameDelTmdbId(false)
+                // skip5 是用户配置(拒收 x.5 集命名), 度量解析能力时应关闭
+                .setSkip5(false);
 
         Map<String, List<String[]>> problems = new LinkedHashMap<>();
         Map<String, int[]> stats = new LinkedHashMap<>();
@@ -126,7 +128,16 @@ class AdaptAnalyzeTest {
         assertEquals(movieS[0], movieS[0] + movieS[1], "movie 不应有解析失败");
         assertEquals(ovaS[0], ovaS[0] + ovaS[1], "ova 不应有解析失败");
         double tvRate = 100.0 * tvS[0] / (tvS[0] + tvS[1]);
-        assertTrue(tvRate >= 95.0, "tv 适配率过低: " + tvRate + "%(失败 " + tvS[1] + " 条)");
-        System.out.println("适配率底线校验通过: tv=" + String.format("%.2f", tvRate) + "%");
+        // 99.9% 可靠度目标: tv 失败必须 ≤ 5 条(当前 5973 条语料)
+        assertTrue(tvS[1] <= 5, "tv 失败 " + tvS[1] + " 条, 超出 99.9% 可靠度预算");
+        assertTrue(tvRate >= 99.9, "tv 适配率过低: " + tvRate + "%(失败 " + tvS[1] + " 条)");
+        // 误匹配守卫: 任何组不得出现占位符残留/格式污染类问题
+        long mismatches = problems.values().stream()
+                .flatMap(List::stream)
+                .filter(p -> !"解析失败(返回false)".equals(p[1]))
+                .count();
+        assertEquals(0, mismatches, "出现误匹配: " + mismatches + " 条");
+        System.out.println("适配率底线校验通过: tv=" + String.format("%.2f", tvRate)
+                + "%(失败 " + tvS[1] + "), movie=100%, ova=100%, 误匹配=0");
     }
 }

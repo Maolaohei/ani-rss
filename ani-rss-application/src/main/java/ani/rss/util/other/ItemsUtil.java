@@ -19,6 +19,7 @@ import cn.hutool.core.lang.Assert;
 import cn.hutool.core.text.StrFormatter;
 import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.core.util.*;
+import cn.hutool.crypto.digest.DigestUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.w3c.dom.*;
 import org.xml.sax.InputSource;
@@ -150,9 +151,48 @@ public class ItemsUtil {
      * @return
      */
     public static List<Item> getItems(Ani ani, String rssUrl, String subgroupName) {
-        Config config = ConfigUtil.CONFIG;
-
         String xml = getRss(rssUrl);
+        return parseItems(ani, xml, rssUrl, subgroupName);
+    }
+
+    /**
+     * 解析 RSS XML 文本 → Item 列表(与 HTTP 获取解耦, 供单测直接喂 fixture)
+     */
+    static List<Item> parseItems(Ani ani, String xml, String rssUrl, String subgroupName) {
+        List<Item> items = buildItems(ani, xml, rssUrl, subgroupName);
+
+        items = items.stream()
+                .filter(item -> {
+                    try {
+                        boolean result = RenameUtil.rename(ani, item);
+                        return result;
+                    } catch (Exception e) {
+                        log.error("解析rss视频集次出现问题");
+                        log.error(e.getMessage(), e);
+                    }
+                    return false;
+                }).toList();
+
+        // v2: 展开范围/列表/分割类种子
+        if (RenameUtil.isNamingV2(ani)) {
+            items = expandMultiEpisode(ani, items);
+        }
+
+        // v2: 合集优先去重
+        if (RenameUtil.isNamingV2(ani)) {
+            items = distinctWithCollectionPriority(items);
+            return items;
+        }
+
+        return CollUtil.distinct(items, item -> item.getEpisode().toString(), true);
+    }
+
+    /**
+     * 构建 Item 原始列表(仅 XML 解析+字段提取+排除规则, 不含 rename 过滤/展开/去重)。
+     * 与 HTTP 获取解耦, 供单测直接喂 fixture。
+     */
+    static List<Item> buildItems(Ani ani, String xml, String rssUrl, String subgroupName) {
+        Config config = ConfigUtil.CONFIG;
 
         List<String> exclude = ani.getExclude();
         // v2: 移除范围/合集排除规则，由展开逻辑处理
@@ -285,7 +325,13 @@ public class ItemsUtil {
             }
 
             if (StrUtil.isBlank(torrent)) {
-                continue;
+                // nyaa 等无 enclosure 源: 已从 nyaa:infoHash/guid 拿到哈希时,
+                // 构造 magnet 作为种子地址, 避免整个条目被丢弃
+                if (StrUtil.isNotBlank(infoHash)) {
+                    torrent = "magnet:?xt=urn:btih:" + infoHash;
+                } else {
+                    continue;
+                }
             }
 
             if (StrUtil.isBlank(infoHash)) {
@@ -300,8 +346,9 @@ public class ItemsUtil {
             if (!ReUtil.isMatch("^[0-9a-f]{40}$", infoHash)
                     && !ReUtil.isMatch("^[0-9a-f]{64}$", infoHash)
                     && !ReUtil.isMatch("^[a-z2-7]{32}$", infoHash)) {
-                log.warn("跳过非法 infoHash 条目: {} title={}", infoHash, itemTitle);
-                continue;
+                // 种子 URL 主名非哈希(如 acg.rip 的数字 ID): 用种子 URL 的 SHA-256 生成
+                // 稳定且路径安全的标识, 整个源不再因 URL 形态被整站拒收
+                infoHash = DigestUtil.sha256Hex(torrent);
             }
 
             try {
@@ -359,30 +406,7 @@ public class ItemsUtil {
             items.add(addNewItem);
         }
 
-        items = items.stream()
-                .filter(item -> {
-                    try {
-                        boolean result = RenameUtil.rename(ani, item);
-                        return result;
-                    } catch (Exception e) {
-                        log.error("解析rss视频集次出现问题");
-                        log.error(e.getMessage(), e);
-                    }
-                    return false;
-                }).toList();
-
-        // v2: 展开范围/列表/分割类种子
-        if (RenameUtil.isNamingV2(ani)) {
-            items = expandMultiEpisode(ani, items);
-        }
-
-        // v2: 合集优先去重
-        if (RenameUtil.isNamingV2(ani)) {
-            items = distinctWithCollectionPriority(items);
-            return items;
-        }
-
-        return CollUtil.distinct(items, item -> item.getEpisode().toString(), true);
+        return items;
     }
 
     /**

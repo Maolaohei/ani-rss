@@ -30,6 +30,8 @@ import wushuo.tmdb.api.entity.Tmdb;
 
 import java.io.File;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -1302,7 +1304,19 @@ public class DownloadService {
         } else if (episode == null) {
             exists = false;
         } else {
-            exists = localEpisodeIndex.contains(season + ":" + episode);
+            // 季号优先取 reName 中的 Sxx(编号特典落 S00, 与正片集数不碰撞);
+            // reName 无 SxxExx 时退回订阅季号(旧行为)
+            int querySeason = season;
+            if (StrUtil.isNotBlank(reName)) {
+                Matcher sm = Pattern.compile(StringEnum.SEASON_REG).matcher(reName.trim());
+                if (sm.find()) {
+                    try {
+                        querySeason = Integer.parseInt(sm.group(1));
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+            }
+            exists = localEpisodeIndex.contains(querySeason + ":" + episode);
         }
 
         if (exists) {
