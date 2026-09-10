@@ -80,7 +80,6 @@
                   @cover="coverRef?.show"
                   @del="delRef?.show"
                   @rate="bgmRateRef?.show"
-                  @refresh="emit('refresh', $event)"
               />
             </div>
           </div>
@@ -97,7 +96,6 @@
                 @cover="coverRef?.show"
                 @del="delRef?.show"
                 @rate="bgmRateRef?.show"
-                @refresh="emit('refresh', $event)"
             />
           </div>
         </div>
@@ -139,7 +137,7 @@ const allCount = ref(0)
 /** 当前生效的筛选（顶栏搜索词 + 已启用/未启用 + 上映年月） */
 const currentFilter = ref(() => true)
 
-const emit = defineEmits(['add', 'clear-filter', 'refresh', 'update:title'])
+const emit = defineEmits(['add', 'clear-filter', 'update:title'])
 
 /** 骨架屏占位数量：跟随当前网格列数与一屏行数，不写死 */
 const skeletonCount = ref(6)

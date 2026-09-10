@@ -2,12 +2,12 @@
   <el-card shadow="never">
     <div class="list-card-content">
       <div class="list-card-image-container">
-        <!-- 封面可点击换图：用 button 承载，键盘可 Tab + 回车，读屏有名称 -->
+        <!-- 语义化：button 承载点击，键盘可 Tab + 回车，读屏有名称；视觉与原 img 完全一致 -->
         <button
             type="button"
             class="list-card-cover"
             :aria-label="`更换《${item.title}》的封面`"
-            :title="'更换封面'"
+            title="更换封面"
             @click="emit('cover', item)">
           <img :src="coverSrc"
                :alt="item.title"
@@ -34,45 +34,42 @@
               </el-text>
             </el-tooltip>
           </div>
-          <!-- 追番核心状态：更新节奏 / 下载进度 / 漏集 / 禁止下载，放在评分之前 -->
-          <div class="list-card-status">
-            <el-tag v-if="airingText"
-                    size="small"
-                    class="list-card-airing"
-                    :type="isAiringToday ? 'primary' : 'info'">
-              {{ airingText }}
-            </el-tag>
-            <el-tooltip :content="progressTooltip" placement="top">
-              <el-tag size="small" type="warning">{{ progressText }}</el-tag>
-            </el-tooltip>
-            <el-tag v-if="omitCount > 0" size="small" type="danger">
-              疑似漏集 {{ omitCount }}
-            </el-tag>
-            <el-tag v-if="notDownloadCount > 0" size="small" type="info">
-              已禁下 {{ notDownloadCount }} 集
-            </el-tag>
-          </div>
           <div class="list-card-score-container" v-if="showScore">
-            <h4 class="list-card-score"
-                :class="{'is-empty': item['score'] == null}"
-                @click="emit('rate', item)">
-              <template v-if="item['score'] == null">暂无评分</template>
-              <template v-else>{{ item['score'].toFixed(1) }}</template>
+            <!-- 状态收敛为评分旁一个小圆点：不占布局、不改原先高度，点开即可看到原因 -->
+            <el-popover trigger="click" placement="top-start" :width="240">
+              <template #reference>
+                <span class="list-card-dot"
+                      :class="{ 'is-warn': attentionReasons.length }"
+                      :aria-label="attentionSummary"
+                      :title="attentionSummary"
+                      role="img"
+                      tabindex="0"></span>
+              </template>
+              <div class="list-card-info-body">
+                <div class="list-card-info-title">{{ item.title }}</div>
+                <ul class="list-card-info-list">
+                  <li v-for="(reason, index) in attentionReasons" :key="index">{{ reason }}</li>
+                </ul>
+                <div v-if="!attentionReasons.length" class="list-card-info-ok">暂无异常</div>
+              </div>
+            </el-popover>
+            <h4 class="list-card-score" @click="emit('rate', item)">
+              {{ item['score'].toFixed(1) }}
             </h4>
           </div>
-          <!-- 健康原因在触屏不可 hover：改成可点击的 popover -->
+          <!-- 健康原因在触屏无法 hover：改用可点击 popover；标签样式与原版一致 -->
           <el-popover v-if="item.healthScore != null"
                       trigger="click"
                       placement="top-start"
-                      :width="260">
+                      :width="240">
             <template #reference>
               <el-tag size="small" :type="healthTagType" class="list-card-health">
                 健康 {{ item.healthScore }}
               </el-tag>
             </template>
-            <div class="list-card-health-body">
-              <div class="list-card-health-title">运维健康分（非 BGM 评分）</div>
-              <ul class="list-card-health-reasons">
+            <div class="list-card-info-body">
+              <div class="list-card-info-title">运维健康分（非 BGM 评分）</div>
+              <ul class="list-card-info-list">
                 <li v-for="(reason, index) in healthReasons" :key="index">{{ reason }}</li>
               </ul>
             </div>
@@ -84,14 +81,14 @@
                    class="list-card-url">
             {{ safeUrl }}
           </el-text>
-          <div class="list-card-tags">
-            <el-tag v-if="showSeasonTag" type="info">
+          <!-- 沿用原版网格：固定 3 列（桌面）/ 2 列（窄屏），不新增行、不改变卡片高度节奏 -->
+          <div class="list-card-tags"
+               :class="isNotMobile ? 'gtc3' : 'gtc2'"
+          >
+            <el-tag v-if="showSeasonTag">
               第 {{ item.season }} 季
             </el-tag>
-            <el-tag v-if="item.procrastinating" type="warning" title="已开启「摸鱼」：不自动下载新集">
-              摸鱼中
-            </el-tag>
-            <el-tag type="success" v-else-if="item.enable">
+            <el-tag type="success" v-if="item.enable">
               已启用
             </el-tag>
             <el-tag type="info" v-else>
@@ -104,82 +101,58 @@
                 </el-text>
               </el-tooltip>
             </el-tag>
-            <!-- 媒体类型不再用「危险红」：正常态不该是告警色 -->
-            <el-tag type="info">
-              {{ mediaTypeText }}
+            <!-- 进度：仍是原来那一格，紧凑写法不撑开格子；提示里给完整语义 -->
+            <el-tooltip :content="progressTooltip" placement="top">
+              <el-tag type="warning">
+                {{ progressText }}
+              </el-tag>
+            </el-tooltip>
+            <el-tag type="danger" v-if="item.ova">
+              ova
+            </el-tag>
+            <el-tag type="danger" v-else>
+              tv
             </el-tag>
             <el-tag v-if="item.standbyRssList.length > 0">
               备用RSS
             </el-tag>
           </div>
-          <el-text v-if="showLastDownloadTime && item.lastDownloadTime > 0"
-                   size="small"
-                   type="info"
-                   class="list-card-last-download">
-            最近更新 · {{ item.lastDownloadFormat }}
+          <el-text v-if="showLastDownloadTime && item.lastDownloadTime > 0" size="small"
+                   type="info">
+            {{ item.lastDownloadFormat }}
           </el-text>
         </div>
+        <!-- 操作区沿用原版：absolute 竖排浮层，不占布局、悬停表现与原样一致 -->
+        <div class="list-card-actions">
+          <el-button text @click="emit('playlist', item)" bg v-if="showPlaylist"
+                     aria-label="查看视频列表" title="查看视频列表">
+            <el-icon>
+              <Files/>
+            </el-icon>
+          </el-button>
+          <div class="list-card-spacer" v-if="showPlaylist"></div>
+          <el-button bg text @click="emit('edit', item)" aria-label="修改订阅" title="修改订阅">
+            <el-icon>
+              <EditIcon/>
+            </el-icon>
+          </el-button>
+          <div class="list-card-spacer"></div>
+          <el-button type="danger" text @click="emit('del', [item])" bg
+                     aria-label="删除订阅" title="删除订阅">
+            <el-icon>
+              <Delete/>
+            </el-icon>
+          </el-button>
+        </div>
       </div>
-    </div>
-    <!-- 操作区独立成行：横向排列、触控目标更大、编辑与删除之间留出间隔 -->
-    <div class="list-card-actions">
-      <el-tooltip content="立即检查这部番的新集" placement="top">
-        <el-button bg
-                   text
-                   class="list-card-action"
-                   aria-label="立即检查新集"
-                   :loading="refreshing"
-                   @click="checkNewEpisodes">
-          <el-icon>
-            <Refresh/>
-          </el-icon>
-        </el-button>
-      </el-tooltip>
-      <el-tooltip content="查看已下载集数" placement="top" v-if="showPlaylist">
-        <el-button bg
-                   text
-                   class="list-card-action"
-                   aria-label="查看视频列表"
-                   @click="emit('playlist', item)">
-          <el-icon>
-            <Files/>
-          </el-icon>
-        </el-button>
-      </el-tooltip>
-      <el-tooltip content="修改订阅" placement="top">
-        <el-button bg
-                   text
-                   class="list-card-action"
-                   aria-label="修改订阅"
-                   @click="emit('edit', item)">
-          <el-icon>
-            <EditIcon/>
-          </el-icon>
-        </el-button>
-      </el-tooltip>
-      <span class="list-card-action-gap"></span>
-      <el-tooltip content="删除订阅" placement="top">
-        <el-button type="danger"
-                   text
-                   bg
-                   class="list-card-action"
-                   aria-label="删除订阅"
-                   @click="emit('del', [item])">
-          <el-icon>
-            <Delete/>
-          </el-icon>
-        </el-button>
-      </el-tooltip>
     </div>
   </el-card>
 </template>
 
 <script setup>
 import {computed, ref} from "vue";
-import {ElMessage} from "element-plus";
-import {Delete, Edit as EditIcon, Files, Picture, Refresh} from "@element-plus/icons-vue";
-import {showLastDownloadTime, showPlaylist, showScore, toApiFile} from "@/js/global.js";
-import * as http from "@/js/http.js";
+import {isNotMobile, showLastDownloadTime, showPlaylist, showScore, toApiFile} from "@/js/global.js";
+import {Delete, Edit as EditIcon, Files, Picture} from "@element-plus/icons-vue";
 
 let openBgmUrl = (it) => {
   if (it.bgmUrl && it.bgmUrl.length) {
@@ -208,7 +181,7 @@ let decodeURLComponentSafe = (str) => {
   }
 }
 
-const emit = defineEmits(['edit', 'playlist', 'cover', 'del', 'rate', 'refresh'])
+const emit = defineEmits(['edit', 'playlist', 'cover', 'del', 'rate'])
 let props = defineProps(["item"])
 
 const coverFailed = ref(false)
@@ -220,91 +193,57 @@ const coverSrc = computed(() => {
 
 const safeUrl = computed(() => decodeURLComponentSafe(props.item?.url || ''))
 
-const refreshing = ref(false)
-
-/** 单订阅"立即检查新集"：走与其他入口相同的 refreshAni，结果按语义着色 */
-const checkNewEpisodes = () => {
-  if (refreshing.value) {
-    return
-  }
-  refreshing.value = true
-  http.refreshAni({id: props.item?.id})
-      .then(res => {
-        emit('refresh', props.item)
-        const message = res?.message || '已提交刷新'
-        if (message.indexOf('排队') > -1 || message.indexOf('已存在') > -1 || message.indexOf('进行中') > -1) {
-          ElMessage.warning(message)
-        } else {
-          ElMessage.success(message)
-        }
-      })
-      .catch(() => {
-        // api.js 已统一提示；这里只负责复位按钮状态
-      })
-      .finally(() => {
-        refreshing.value = false
-      })
-}
-
-/** 漏集数：仅当该订阅开启了遗漏检测时后端才会给出非 0 值 */
-const omitCount = computed(() => {
-  const n = props.item?.omitCount
-  return typeof n === 'number' && n > 0 ? n : 0
-})
-
-const notDownloadCount = computed(() => {
-  const list = props.item?.notDownload
-  return Array.isArray(list) ? list.length : 0
-})
-
-const currentEpisodeNumber = computed(() => {
-  const n = props.item?.currentEpisodeNumber
-  return typeof n === 'number' ? n : 0
-})
-
-const totalEpisodeNumber = computed(() => {
-  const n = props.item?.totalEpisodeNumber
-  return typeof n === 'number' && n > 0 ? n : 0
-})
-
-const progressText = computed(() => {
-  if (currentEpisodeNumber.value <= 0) {
-    return '尚无下载记录'
-  }
-  if (totalEpisodeNumber.value > 0) {
-    return `已下载到第 ${currentEpisodeNumber.value} 集 / 共 ${totalEpisodeNumber.value} 集`
-  }
-  return `已下载到第 ${currentEpisodeNumber.value} 集`
-})
-
-const progressTooltip = computed(() => progressText.value)
-
-/** 更新节奏：周几更新（releaseDate 形如 2024-10-05 或 2024） */
-const airingText = computed(() => {
-  const weekLabel = props.item?.weekLabel
-  if (weekLabel) {
-    return isAiringToday.value ? '今天更新' : `${weekLabel}更新`
-  }
-  const year = (props.item?.releaseDate || '').match(/^(\d{4})/)?.[1]
-  return year ? `上映 ${year}` : ''
-})
-
-const isAiringToday = computed(() => {
-  const today = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'][new Date().getDay()]
-  return props.item?.weekLabel === today
-})
-
-/** 只在「按星期展示」关闭时需要：分组模式下标题已说明周几 */
+/** 第 1 季是默认值，不必占一格（原版会把 3 列网格挤到第二行） */
 const showSeasonTag = computed(() => {
   const season = props.item?.season
   return typeof season === 'number' && season > 1
 })
 
-const mediaTypeText = computed(() => {
-  if (props.item?.mediaType === 'movie') {
-    return '剧场版'
+/** 进度：仍是原来的紧凑写法，避免长文案把 180px 的格子撑开 */
+const progressText = computed(() => {
+  const current = props.item?.currentEpisodeNumber
+  const total = props.item?.totalEpisodeNumber
+  if (current == null || current <= 0) {
+    return '暂无记录'
   }
-  return props.item?.ova ? 'ova' : 'tv'
+  return `${current} / ${total ? total : '*'}`
+})
+
+const progressTooltip = computed(() => {
+  const current = props.item?.currentEpisodeNumber
+  const total = props.item?.totalEpisodeNumber
+  if (current == null || current <= 0) {
+    return '尚无下载记录'
+  }
+  return total
+      ? `已下载到第 ${current} 集 / 共 ${total} 集`
+      : `已下载到第 ${current} 集（总集数未知）`
+})
+
+/** 需要用户注意的原因，统一收进评分旁的小圆点，不再额外占布局 */
+const attentionReasons = computed(() => {
+  const reasons = []
+  const omit = props.item?.omitCount
+  if (typeof omit === 'number' && omit > 0) {
+    reasons.push(`疑似漏集 ${omit} 处`)
+  }
+  const notDownload = props.item?.notDownload
+  if (Array.isArray(notDownload) && notDownload.length) {
+    reasons.push(`已禁止下载 ${notDownload.length} 集`)
+  }
+  if (props.item?.procrastinating) {
+    reasons.push('摸鱼中：不自动下载新集')
+  }
+  const weekLabel = props.item?.weekLabel
+  if (weekLabel) {
+    const today = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'][new Date().getDay()]
+    reasons.push(weekLabel === today ? '今天更新' : `${weekLabel}更新`)
+  }
+  return reasons
+})
+
+const attentionSummary = computed(() => {
+  return attentionReasons.value.length ? attentionReasons.value.join('；') : '查看订阅状态'
 })
 
 const healthTagType = computed(() => {
@@ -337,7 +276,7 @@ const healthReasons = computed(() => {
   overflow: hidden;
 }
 
-/* 封面按钮：去掉按钮默认外观，只保留图片本身 */
+/* 封面按钮：去掉按钮默认外观，尺寸/圆角/边框与原 img 完全一致 */
 .list-card-cover {
   position: relative;
   display: block;
@@ -380,16 +319,15 @@ const healthReasons = computed(() => {
 
 .list-card-info {
   flex-grow: 1;
-  min-width: 0;
+  position: relative;
 }
 
 .list-card-info-inner {
   margin-left: 8px;
 }
 
-/* 标题不再写死 200px：窄屏/长标题时跟随可用宽度 */
 .list-card-title {
-  max-width: 100%;
+  width: 200px;
   line-height: 1.6;
   letter-spacing: 0.0125em;
   font-weight: 500;
@@ -398,21 +336,31 @@ const healthReasons = computed(() => {
   color: var(--el-text-color-primary);
 }
 
-/* 追番核心状态行：换行不挤压 */
-.list-card-status {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px;
-  margin: 6px 0 4px;
-}
-
-.list-card-airing {
-  font-weight: 500;
-}
-
+/* 原样高度：flex 行高由 h4 决定，圆点不改变容器高度，评分位置不变 */
 .list-card-score-container {
   margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 状态圆点：8px，在评分左侧，不改变容器高度 */
+.list-card-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--el-border-color);
+  cursor: pointer;
+}
+
+.list-card-dot.is-warn {
+  background: var(--el-color-warning);
+}
+
+.list-card-dot:focus-visible {
+  outline: 2px solid var(--el-color-primary-light-5);
+  outline-offset: 2px;
 }
 
 .list-card-score {
@@ -420,40 +368,36 @@ const healthReasons = computed(() => {
   cursor: pointer;
 }
 
-.list-card-score.is-empty {
-  color: var(--el-text-color-placeholder);
-  font-size: 0.9em;
-  font-weight: 400;
-}
-
 .list-card-url {
   max-width: 300px;
 }
 
-.list-card-health-body {
+.list-card-info-body {
   font-size: 12.5px;
   line-height: 1.6;
 }
 
-.list-card-health-title {
+.list-card-info-title {
   font-weight: 600;
   margin-bottom: 6px;
   color: var(--el-text-color-primary);
 }
 
-.list-card-health-reasons {
+.list-card-info-list {
   margin: 0;
   padding-left: 18px;
   color: var(--el-text-color-regular);
 }
 
-/* 标签网格自适应：不再用固定 180px + 2/3 列切换 */
+.list-card-info-ok {
+  color: var(--el-text-color-secondary);
+}
+
+/* 沿用原版固定宽度与列数，保证与改动前的对齐与换行完全一致 */
 .list-card-tags {
-  width: 100%;
-  max-width: 220px;
+  width: 180px;
   display: grid;
   grid-gap: 4px;
-  grid-template-columns: repeat(auto-fill, minmax(78px, 1fr));
 }
 
 .list-card-subgroup {
@@ -461,45 +405,25 @@ const healthReasons = computed(() => {
   color: var(--el-color-info);
 }
 
-.list-card-last-download {
-  display: inline-block;
-  margin-top: 6px;
-}
-
-/* 操作区独立成行：横向排列，触控目标 36px，编辑与删除之间留 16px 间隔 */
 .list-card-actions {
   display: flex;
+  align-items: flex-end;
   justify-content: flex-end;
-  align-items: center;
-  gap: 2px;
-  margin-top: 8px;
-  padding-top: 6px;
-  border-top: 1px solid var(--el-border-color-extra-light);
+  flex-direction: column;
+  position: absolute;
+  right: 0;
+  bottom: 0;
 }
 
-.list-card-action {
-  min-width: 36px;
-  min-height: 36px;
-  padding: 0 8px;
+.list-card-spacer {
+  height: 5px;
 }
 
-.list-card-action :deep(.el-icon) {
-  width: 16px;
-  height: 16px;
+.gtc3 {
+  grid-template-columns: repeat(3, 1fr);
 }
 
-.list-card-action-gap {
-  width: 16px;
-}
-
-@media (max-width: 640px) {
-  .list-card-tags {
-    max-width: 100%;
-  }
-
-  .list-card-action {
-    min-width: 44px;
-    min-height: 44px;
-  }
+.gtc2 {
+  grid-template-columns: repeat(2, 1fr);
 }
 </style>

@@ -134,7 +134,6 @@
           v-model:title="title"
           :filter="filter"
           @add="addRef?.show"
-          @refresh="onAniRefreshed"
           @update:filter="updateFilter"
           @clear-filter="clearFilter"/>
     </div>
@@ -255,11 +254,6 @@ const refreshTitle = computed(() => {
   }
   return '立即刷新全部订阅？'
 })
-
-/** 单订阅「立即检查新集」提交后刷新任务状态与列表（集数/时间可能已变） */
-const onAniRefreshed = () => {
-  refreshTaskState()
-}
 
 // 页面级滚动后顶栏加投影（毛玻璃 sticky 顶栏的滚动反馈）
 const scrolled = ref(false)
