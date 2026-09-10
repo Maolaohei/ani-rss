@@ -3,22 +3,32 @@
   "name": "ANI-RSS",
   "icons": [
     {
-      "src": "/icon-128.png",
+      "src": "./icon-128.png",
       "sizes": "128x128",
       "type": "image/png"
     },
     {
-      "src": "/icon-256.png",
+      "src": "./icon-256.png",
       "sizes": "256x256",
       "type": "image/png"
     },
     {
-      "src": "/icon-512.png",
+      "src": "./icon-512.png",
       "sizes": "512x512",
       "type": "image/png"
+    },
+    {
+      "src": "./icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ],
   "start_url": ".",
+  "scope": ".",
   "display": "standalone",
-  "background_color": "#ffffff"
+  "display_override": ["standalone", "minimal-ui"],
+  "lang": "zh-CN",
+  "background_color": "#f5f5f7",
+  "theme_color": "#f5f5f7"
 }

@@ -32,6 +32,11 @@
           </template>
         </popconfirm>
       </div>
+      <div class="items-hint">
+        <el-text size="small" type="warning">
+          「允许下载 / 禁止下载」只改动编辑表单，需回到「修改订阅」点「确定」才会保存生效。
+        </el-text>
+      </div>
       <div class="items-table-container">
         <el-table :data="showItems" height="500"
                   size="small"
@@ -47,9 +52,13 @@
               <el-tag v-else>是</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="本地存在" min-width="100">
+          <el-table-column label="本地存在" min-width="140">
             <template #default="it">
-              <el-tag v-if="!it.row['hasDownloaded']" type="info">否</el-tag>
+              <!-- 三态：已下载 / 下载中（离线已提交）/ 未下载；避免与任务管理器状态矛盾 -->
+              <el-tooltip v-if="it.row['downloading']" :content="it.row['downloadingState'] || '下载中'" placement="top">
+                <el-tag type="warning">下载中</el-tag>
+              </el-tooltip>
+              <el-tag v-else-if="!it.row['hasDownloaded']" type="info">否</el-tag>
               <el-tag v-else>是</el-tag>
             </template>
           </el-table-column>
@@ -150,6 +159,7 @@ import {computed, ref} from "vue";
 import {ElMessage} from "element-plus";
 import Popconfirm from "@/other/Popconfirm.vue";
 import * as http from "@/js/http.js";
+import {copyText} from "@/js/global.js";
 
 let selectViews = ref([])
 let handleSelectionChange = (selectViewsValue) => {
@@ -206,13 +216,7 @@ const healthReasonText = computed(() => {
 })
 
 let copy = (v) => {
-  const input = document.createElement('input');
-  input.value = v
-  document.body.appendChild(input);
-  input.select();
-  document.execCommand('copy');
-  document.body.removeChild(input);
-  ElMessage.success('已复制')
+  copyText(v)
 }
 
 let show = () => {
@@ -342,6 +346,11 @@ let props = defineProps(['ani'])
   display: flex;
   justify-content: end;
   margin-top: 8px;
+}
+
+.items-hint {
+  margin-top: 6px;
+  text-align: right;
 }
 
 .items-table-container {

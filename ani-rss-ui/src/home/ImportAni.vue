@@ -19,8 +19,8 @@
         <div v-if="data.filename" class="file-selected">
           <el-tag
               closable
-              @close="data.filename = ''"
-              type="success"
+              @close="resetFile"
+              :type="parsed ? 'success' : 'danger'"
               size="large"
               class="file-tag"
           >
@@ -30,8 +30,11 @@
             {{ data.filename }}
           </el-tag>
           <div class="file-info">
-            <el-text type="info" size="small">
+            <el-text v-if="parsed" type="info" size="small">
               已选择文件，共 {{ data.aniList.length }} 条数据
+            </el-text>
+            <el-text v-else type="danger" size="small">
+              {{ parseError || '文件解析中…' }}
             </el-text>
           </div>
         </div>
@@ -53,14 +56,14 @@
               <div class="upload-sub-text">或 <em>点击选择文件</em></div>
             </div>
             <div class="upload-tip">
-              支持 JSON 格式，文件大小不超过 1MB
+              仅支持由本程序「导出」生成的 JSON，文件大小不超过 10MB
             </div>
           </div>
         </el-upload>
       </div>
 
       <!-- 冲突处理设置 -->
-      <div class="conflict-section" v-if="data.filename">
+      <div class="conflict-section" v-if="data.filename && parsed">
         <div class="section-title">
           <el-icon>
             <setting/>
@@ -82,6 +85,14 @@
               </div>
             </el-radio>
           </el-radio-group>
+          <el-alert
+              v-if="data.conflict === 'REPLACE'"
+              class="conflict-alert"
+              type="warning"
+              show-icon
+              :closable="false"
+              :title="conflictAlertText"
+          />
         </div>
       </div>
 
@@ -96,7 +107,7 @@
         <el-button
             type="primary"
             :loading="importDataLoading"
-            :disabled="!data.filename"
+            :disabled="!parsed"
             @click="startImport"
             size="large"
         >
@@ -110,24 +121,59 @@
   </el-dialog>
 </template>
 <script setup>
-import {getCurrentInstance, ref} from "vue";
+import {computed, getCurrentInstance, ref} from "vue";
 import {Document, Setting, Upload, UploadFilled} from "@element-plus/icons-vue";
 import {ElMessage} from "element-plus";
 import {importAni} from "@/js/http.js";
+import * as http from "@/js/http.js";
+
+/** 单文件上限：与界面提示保持一致 */
+const MAX_FILE_SIZE = 10 * 1024 * 1024
 
 let importDataLoading = ref(false);
+/** 是否已成功解析出可用的订阅数组 */
+let parsed = ref(false);
+let parseError = ref('');
+
+const conflictAlertText = computed(() => {
+  if (!replaceCount.value) {
+    return '未检测到与现有订阅同名的数据（导入后会新增）'
+  }
+  return `将覆盖 ${replaceCount.value} 条同名订阅（匹配、排除规则与下载进度会随之丢失）`
+})
+
+/** 与现有订阅同名同季的条数（用于 REPLACE 风险提示与结果核对） */
+let replaceCount = ref(0)
 
 let startImport = () => {
+  if (!parsed.value) {
+    ElMessage.error(parseError.value || '请先选择有效的 JSON 文件')
+    return
+  }
   importDataLoading.value = true;
   importAni(data.value)
       .then(res => {
-        ElMessage.success(res.message)
+        let total = data.value.aniList.length
+        if (res.code !== 200) {
+          ElMessage.error(res.message || '导入失败')
+          return
+        }
+        if (data.value.conflict === 'REPLACE' && replaceCount.value) {
+          ElMessage.success(`导入完成：共 ${total} 条，其中覆盖同名订阅 ${replaceCount.value} 条`)
+        } else if (data.value.conflict === 'SKIP' && replaceCount.value) {
+          ElMessage.success(`导入完成：共 ${total} 条，跳过同名订阅 ${replaceCount.value} 条`)
+        } else {
+          ElMessage.success(`导入完成：新增 ${total} 条`)
+        }
         if (instance.vnode.props.onCallback) {
           emit('callback')
         } else {
           window.$reLoadList()
         }
         dialogVisible.value = false
+      })
+      .catch(err => {
+        ElMessage.error(err?.message || '导入失败，请检查文件内容后重试')
       })
       .finally(() => {
         importDataLoading.value = false
@@ -141,16 +187,73 @@ let data = ref({
   conflict: 'REPLACE'
 })
 
+const resetFile = () => {
+  data.value.filename = ''
+  data.value.aniList = []
+  parsed.value = false
+  parseError.value = ''
+  replaceCount.value = 0
+}
+
 let beforeUpload = (rawFile) => {
+  resetFile()
+  if (!rawFile.name.toLowerCase().endsWith('.json')) {
+    parseError.value = '仅支持 .json 文件'
+    ElMessage.error(parseError.value)
+    return false
+  }
+  if (rawFile.size > MAX_FILE_SIZE) {
+    parseError.value = `文件不能超过 ${MAX_FILE_SIZE / 1024 / 1024}MB`
+    ElMessage.error(parseError.value)
+    return false
+  }
+
   data.value.filename = rawFile.name;
-  (async () => {
-    try {
-      data.value.aniList = await readJSONFile(rawFile)
-    } catch (error) {
-      ElMessage.error(error.message)
-    }
-  })();
+  parseError.value = '文件解析中…'
+  readJSONFile(rawFile)
+      .then(list => {
+        if (!Array.isArray(list)) {
+          throw new Error('文件内容不是订阅数组，请使用本程序「导出」生成的文件')
+        }
+        data.value.aniList = list
+        parsed.value = true
+        parseError.value = ''
+        countConflicts()
+      })
+      .catch(error => {
+        // 解析失败时清空选择，避免出现“已选文件 共 0 条”却还能点导入
+        let message = error?.message || String(error)
+        data.value.aniList = []
+        parsed.value = false
+        parseError.value = message
+        ElMessage.error(message)
+      })
   return false
+}
+
+/** 统计将要被覆盖/跳过的同名同季订阅数量 */
+let countConflicts = () => {
+  replaceCount.value = 0
+  return http.listAni()
+      .then(res => {
+        let existing = new Set()
+        let weekList = res?.data?.weekList || []
+        for (let week of weekList) {
+          for (let item of (week.items || [])) {
+            existing.add(`${(item.title || '').trim()}#${item.season ?? 1}`)
+          }
+        }
+        let count = 0
+        for (let item of data.value.aniList) {
+          if (existing.has(`${(item.title || '').trim()}#${item.season ?? 1}`)) {
+            count++
+          }
+        }
+        replaceCount.value = count
+      })
+      .catch(() => {
+        replaceCount.value = 0
+      })
 }
 
 let readJSONFile = (file) => {
@@ -162,12 +265,13 @@ let readJSONFile = (file) => {
         let jsonData = JSON.parse(event.target.result);
         resolve(jsonData);
       } catch (error) {
-        reject(`JSON解析失败: ${error.message}`);
+        // 抛 Error 而不是字符串，否则调用方取 error.message 会得到 undefined（此前会弹空白 toast）
+        reject(new Error(`JSON 解析失败：${error.message}`));
       }
     };
 
     reader.onerror = () => {
-      reject("文件读取失败");
+      reject(new Error("文件读取失败"));
     };
 
     reader.readAsText(file);
@@ -180,6 +284,9 @@ let show = () => {
     aniList: [],
     conflict: 'REPLACE'
   }
+  parsed.value = false
+  parseError.value = ''
+  replaceCount.value = 0
   dialogVisible.value = true;
 }
 
@@ -286,6 +393,10 @@ const emit = defineEmits(['callback'])
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.conflict-alert {
+  margin-top: 12px;
 }
 
 .conflict-option {

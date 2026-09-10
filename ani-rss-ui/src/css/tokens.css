@@ -29,18 +29,21 @@
     --el-fill-color-light: rgba(0, 0, 0, .04);
     --el-fill-color-lighter: rgba(0, 0, 0, .03);
 
-    /* 状态色板（演示页苹果系取色） */
-    --el-color-success: #34c759;
-    --el-color-warning: #ff9f0a;
-    --el-color-danger: #ff453a;
+    /* 状态色板：为满足 WCAG 1.4.3（正文 ≥4.5:1、图标/大字 ≥3:1）而在苹果系取色上做了加深，
+       实测对比度（对自身 light-9 底 / 对页面底）：
+       success #0f7a32 → 4.90 / 5.01、warning #8a5300 → 5.63 / 5.81、
+       danger #c8201a → 4.86 / 5.24、info #5c5f66 → 5.67 / 5.87 */
+    --el-color-success: #0f7a32;
+    --el-color-warning: #8a5300;
+    --el-color-danger: #c8201a;
     --el-color-error: var(--el-color-danger);
-    --el-color-info: #909399;
-    /* light-9 = 对应基色 12~14% 混白的预计算值 */
-    --el-color-success-light-9: #e5f8e9;
-    --el-color-warning-light-9: #fff2dd;
-    --el-color-danger-light-9: #ffe9e7;
-    --el-color-error-light-9: #ffe9e7;
-    --el-color-info-light-9: #f4f4f5;
+    --el-color-info: #5c5f66;
+    /* light-9 = 对应基色混白的预计算值（tag/alert 底色） */
+    --el-color-success-light-9: #e6f7ec;
+    --el-color-warning-light-9: #fdf0dc;
+    --el-color-danger-light-9: #fde8e6;
+    --el-color-error-light-9: #fde8e6;
+    --el-color-info-light-9: #f1f1f3;
 
     /* 阴影体系：更轻、更聚焦 */
     --el-box-shadow: 0 18px 50px rgba(0, 0, 0, .16), 0 4px 14px rgba(0, 0, 0, .08);
@@ -78,9 +81,19 @@ html.dark {
     --el-text-color-placeholder: #6e6e73;
     --el-mask-color: rgba(0, 0, 0, .5);
 
+    /* 深色下的状态色：提亮以保证在 #141416 上的对比度
+       实测（对深色 light-9 底 / 对页面底）：
+       success #3ad35c → 7.21 / 9.33、warning #ffb340 → 7.67 / 10.32、
+       danger #ff6b60 → 5.52 / 6.59、info #a8abb2 → 6.39 / 8.00 */
+    --el-color-success: #3ad35c;
+    --el-color-warning: #ffb340;
+    --el-color-danger: #ff6b60;
+    --el-color-error: var(--el-color-danger);
+    --el-color-info: #a8abb2;
+
     /* 深色下的状态色 light-9（基色 16~18% 混 #141416 的预计算值） */
-    --el-color-success-light-9: #193221;
-    --el-color-warning-light-9: #3e2d14;
+    --el-color-success-light-9: #16301f;
+    --el-color-warning-light-9: #3a2b12;
     --el-color-danger-light-9: #3a1c1c;
     --el-color-error-light-9: #3a1c1c;
     --el-color-info-light-9: #28282b;
@@ -116,10 +129,21 @@ body {
     background: transparent;
 }
 
-/* 弹层遮罩毛玻璃（演示页观感） */
+/* 弹层遮罩毛玻璃（演示页观感）；不支持 backdrop-filter 时退化为不透明幕布，避免"糊成一片" */
 .el-overlay {
     -webkit-backdrop-filter: blur(3px);
     backdrop-filter: blur(3px);
+    background-color: var(--el-overlay-color-lighter);
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .el-overlay {
+        background-color: rgba(0, 0, 0, .48);
+    }
+
+    html.dark .el-overlay {
+        background-color: rgba(0, 0, 0, .68);
+    }
 }
 
 /* v-loading 加载遮罩：轻磨砂纱（--el-mask-color 的深幕布语义仅为弹窗遮罩设计，

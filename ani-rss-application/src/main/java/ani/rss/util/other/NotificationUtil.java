@@ -107,16 +107,22 @@ public class NotificationUtil {
                             Boolean ok = baseNotification.send(notificationConfig, ani, text, notificationStatusEnum);
                             // 发送成功才结束，返回 false 视为失败进入重试
                             if (Boolean.TRUE.equals(ok)) {
+                                recordLastSend(notificationType, notificationConfig, true, "已发送");
                                 return;
                             }
                             log.warn("通知发送返回失败 {} {}", aClass.getName(), text);
+                            recordLastSend(notificationType, notificationConfig, false, "发送返回失败（参数可能不完整）");
                         } catch (Throwable t) {
                             // StackOverflowError 等 Error 只记录不再重试，避免无限递归反复触发
                             if (t instanceof Error) {
                                 log.error("通知发送出现 Error 停止重试 {}", aClass.getName(), t);
+                                recordLastSend(notificationType, notificationConfig, false,
+                                        StrUtil.blankToDefault(t.getMessage(), t.getClass().getSimpleName()));
                                 return;
                             }
                             log.error(t.getMessage(), t);
+                            recordLastSend(notificationType, notificationConfig, false,
+                                    StrUtil.blankToDefault(t.getMessage(), t.getClass().getSimpleName()));
                         }
                         currentRetry += 1;
                         ThreadUtil.sleep(1000);
@@ -126,7 +132,38 @@ public class NotificationUtil {
                 // 队列满(256)时丢弃本条通知并计数，绝不让 RejectedExecutionException
                 // 上抛中断调用方（download() 中 send 无捕获，曾会中断订阅下载处理）
                 log.warn("通知队列已满，丢弃通知 {} {}", aClass.getName(), text);
+                recordLastSend(notificationType, notificationConfig, false, "通知队列已满，本条被丢弃");
             }
         }
+    }
+
+    /**
+     * 最近一次通知发送结果。
+     * <p>
+     * 运行期通知失败此前只在日志里，用户在设置页完全看不到"通知到底发出去没有"。
+     */
+    public record LastSend(String notificationType, String comment, boolean success, String message, Long at) {
+    }
+
+    private static final java.util.concurrent.atomic.AtomicReference<LastSend> LAST_SEND =
+            new java.util.concurrent.atomic.AtomicReference<>(null);
+
+    private static void recordLastSend(NotificationTypeEnum type, NotificationConfig config,
+                                      boolean success, String message) {
+        try {
+            String comment = config == null ? null : config.getComment();
+            LAST_SEND.set(new LastSend(
+                    type == null ? null : type.name(),
+                    StrUtil.blankToDefault(comment, "无备注"),
+                    success,
+                    StrUtil.blankToDefault(message, success ? "已发送" : "发送失败"),
+                    System.currentTimeMillis()));
+        } catch (Exception e) {
+            log.debug("记录通知发送结果失败: {}", e.getMessage());
+        }
+    }
+
+    public static LastSend getLastSend() {
+        return LAST_SEND.get();
     }
 }

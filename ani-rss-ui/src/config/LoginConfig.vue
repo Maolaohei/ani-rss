@@ -10,7 +10,7 @@
       </el-input>
     </el-form-item>
     <el-form-item label="密码">
-      <el-input v-model:model-value="props.config.login.password" autocomplete="new-password">
+      <el-input v-model:model-value="props.config.login.password" show-password autocomplete="new-password">
         <template #prefix>
           <el-icon class="el-input__icon">
             <Key/>
@@ -38,8 +38,12 @@
     </el-form-item>
     <el-form-item label="IP白名单">
       <div class="full-width">
-        <div>
+        <div class="flex ip-whitelist-switch">
           <el-switch v-model:model-value="config['ipWhitelist']"/>
+          <div class="spacer"></div>
+          <el-button bg text size="small" :loading="whitelistTesting" @click="testWhitelist">
+            检测当前 IP
+          </el-button>
         </div>
         <div class="full-width">
           <el-input class="full-width" type="textarea"
@@ -50,6 +54,13 @@
           <el-text class="mx-1" size="small">
             对IP白名单跳过身份验证, 换行可填写多个
           </el-text>
+          <el-alert
+              v-if="whitelistResult"
+              class="mt-8"
+              :type="whitelistResult.type"
+              :title="whitelistResult.text"
+              :closable="false"
+              show-icon/>
         </div>
       </div>
     </el-form-item>
@@ -75,6 +86,7 @@
 <script setup>
 import {ElMessage, ElText} from "element-plus";
 import {Key, User} from "@element-plus/icons-vue";
+import {copyText} from "@/js/global.js";
 
 let generateRandomString = (length) => {
   const charset = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -91,13 +103,37 @@ let createApiKey = () => {
 }
 
 let copy = (v) => {
-  const input = document.createElement('input');
-  input.value = v
-  document.body.appendChild(input);
-  input.select();
-  document.execCommand('copy');
-  document.body.removeChild(input);
-  ElMessage.success('已复制')
+  if (!v) {
+    ElMessage.warning('Api Key 为空，请先点击「生成」')
+    return
+  }
+  copyText(v)
+}
+
+/** IP 白名单自测：写错 CIDR 会静默失效，此前只能在登录页被动验证 */
+let whitelistTesting = ref(false)
+let whitelistResult = ref(null)
+
+let testWhitelist = () => {
+  whitelistTesting.value = true
+  whitelistResult.value = null
+  http.testIpWhitelist()
+      .then(res => {
+        if (res && res.code === 200) {
+          whitelistResult.value = {type: 'success', text: '当前 IP 命中白名单：已跳过登录验证'}
+        } else {
+          whitelistResult.value = {
+            type: 'info',
+            text: res?.message || '当前 IP 不在白名单内，仍需账号密码登录'
+          }
+        }
+      })
+      .catch(() => {
+        whitelistResult.value = {type: 'warning', text: '检测失败，请确认服务可访问后重试'}
+      })
+      .finally(() => {
+        whitelistTesting.value = false
+      })
 }
 
 let props = defineProps(['config'])
@@ -111,5 +147,14 @@ let props = defineProps(['config'])
 .cors-input {
   width: 360px;
   margin-left: 12px;
+}
+
+.ip-whitelist-switch {
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.mt-8 {
+  margin-top: 8px;
 }
 </style>

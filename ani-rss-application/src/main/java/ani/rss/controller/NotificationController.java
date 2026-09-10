@@ -50,11 +50,29 @@ public class NotificationController extends BaseController {
         tmdb.ifPresent(ani::setTmdb);
 
         try {
-            baseNotification.test(notificationConfig, ani, "test", NotificationStatusEnum.DOWNLOAD_START);
-            return Result.success();
+            Boolean ok = baseNotification.test(notificationConfig, ani, "test", NotificationStatusEnum.DOWNLOAD_START);
+            if (ok == null || !ok) {
+                // 各实现的 send() 在参数不全（token/chatId/key 为空等）时返回 false 而不抛异常，
+                // 此前一律返回 Result.success()（message 字面量为 "success"），
+                // 用户看到绿色 "success" 却根本没收到通知。
+                return Result.error("发送失败：请检查该通知通道的参数是否填写完整（Token / ChatId / Key / 地址等）");
+            }
+            return Result.success("测试通知已发送，请查看接收端是否收到");
         } catch (Exception e) {
-            return Result.error(e.getMessage());
+            return Result.error("发送失败：" + e.getMessage());
         }
+    }
+
+    @Auth
+    @Operation(summary = "最近一次通知发送结果")
+    @PostMapping("/notificationLastSend")
+    public Result<NotificationUtil.LastSend> notificationLastSend() {
+        // 运行期通知失败此前只在日志里，设置页看不到"到底发出去没有"
+        NotificationUtil.LastSend last = NotificationUtil.getLastSend();
+        if (last == null) {
+            return Result.success();
+        }
+        return Result.success(last);
     }
 
     @Auth

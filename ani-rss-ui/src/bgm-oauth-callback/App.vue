@@ -32,11 +32,9 @@
               </el-text>
             </el-descriptions-item>
             <el-descriptions-item label="授权剩余过期时间">
-              <el-tag type="success" v-if="me.expiresDays > 3">
-                {{ me.expiresDays }} 天
-              </el-tag>
-              <el-tag type="danger" v-else>
-                {{ me.expiresDays }} 天
+              <!-- 不只靠颜色区分：色觉障碍用户同样能读出状态 -->
+              <el-tag :type="expiresSoon ? 'danger' : 'success'">
+                {{ me.expiresDays }} 天{{ expiresSoon ? '（即将过期，请及时重新授权）' : '（有效）' }}
               </el-tag>
             </el-descriptions-item>
             <el-descriptions-item label="签名">
@@ -55,11 +53,13 @@
             :type="type"
             v-loading.fullscreen.lock="loading"
             :closable="false"
+            show-icon
         />
       </div>
       <template #footer>
         <div class="footer">
-          <el-button bg text @click="close">关闭</el-button>
+          <el-button bg text @click="backToSettings">返回设置</el-button>
+          <el-button bg text type="primary" @click="close">关闭本页</el-button>
         </div>
       </template>
     </el-card>
@@ -67,7 +67,7 @@
 </template>
 
 <script setup>
-import {onMounted, ref} from 'vue'
+import {computed, onMounted, ref} from 'vue'
 import {init} from "@/js/global.js";
 import api from "@/js/api.js";
 import * as http from "@/js/http.js";
@@ -77,8 +77,25 @@ const text = ref('')
 const loading = ref(false)
 const me = ref(null)
 
+const expiresSoon = computed(() => {
+  const days = me.value?.expiresDays
+  return days != null && Number(days) <= 3
+})
+
 const close = () => {
+  // 非脚本打开的窗口 window.close() 会被浏览器忽略，必须给出兜底说明
   window.close()
+  setTimeout(() => {
+    if (!document.hidden) {
+      text.value = '浏览器阻止了自动关闭，请手动关闭本页'
+      type.value = 'info'
+    }
+  }, 300)
+}
+
+const backToSettings = () => {
+  // 相对路径，兼容子路径部署
+  location.href = './'
 }
 
 const loadMe = async () => {
@@ -101,6 +118,11 @@ const load = async (code) => {
 
         text.value = message
       })
+      .catch(err => {
+        // 此前没有 catch：请求失败会留下一个空白 alert，用户不知道发生了什么
+        type.value = 'error'
+        text.value = err?.message || '授权回调失败，请回到设置页重新发起授权'
+      })
       .finally(() => {
         loading.value = false
       })
@@ -111,7 +133,7 @@ onMounted(() => {
   const code = url.searchParams.get('code')
   if (!code) {
     type.value = 'error'
-    text.value = 'code 为空'
+    text.value = '回调地址缺少 code 参数，请回到设置页重新发起 Bangumi 授权'
     return
   }
   load(code)
@@ -127,7 +149,9 @@ init()
   display: flex;
   justify-content: center;
   align-items: center;
-  height: 100vh;
+  /* 移动端地址栏收起时 100vh 会抖动；并在下方留出手势条安全区 */
+  min-height: 100dvh;
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
 .page {
@@ -135,11 +159,15 @@ init()
   justify-content: center;
   align-items: center;
   width: 100%;
-  height: 100%;
+  min-height: 100%;
+  padding: 12px;
+  box-sizing: border-box;
 }
 
 .card {
-  min-width: 480px;
+  /* 原来固定 min-width:480px，窄屏必然左溢出；改为按容器自适应 */
+  width: 100%;
+  max-width: 520px;
 }
 
 .result {
@@ -149,5 +177,18 @@ init()
 .footer {
   display: flex;
   justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 450px) {
+  .footer {
+    flex-direction: column-reverse;
+  }
+
+  .footer .el-button {
+    width: 100%;
+    margin-left: 0;
+  }
 }
 </style>

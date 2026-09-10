@@ -93,6 +93,44 @@ public class TorrentsInfo implements Serializable {
     private String torrent;
 
     /**
+     * 下载速度（字节/秒）
+     * <p>
+     * 用户判断“是在慢慢下还是已经卡死”的关键数字，此前未从下载器映射出来。
+     */
+    @Schema(description = "下载速度（字节/秒）")
+    private Long downloadSpeed;
+
+    /**
+     * 预计剩余时间（毫秒；未知为 null）
+     */
+    @Schema(description = "预计剩余时间（毫秒）")
+    private Long eta;
+
+    /**
+     * 下载速度（字符串，如 1.2 MB/s）
+     */
+    @Schema(description = "下载速度（字符串）")
+    private String formatDownloadSpeed;
+
+    /**
+     * 剩余时间（字符串，如 3分20秒；未知为 "-"）
+     */
+    @Schema(description = "剩余时间（字符串）")
+    private String formatEta;
+
+    /**
+     * 已下载大小（字符串）
+     */
+    @Schema(description = "已下载大小（字符串）")
+    private String formatCompleted;
+
+    /**
+     * 连接数/做种数等附加计数（下载器支持时填充）
+     */
+    @Schema(description = "做种数")
+    private Integer numSeeds;
+
+    /**
      * 文件列表
      */
     @Schema(description = "文件列表")
@@ -113,7 +151,33 @@ public class TorrentsInfo implements Serializable {
         this.setCompleted(completed);
         this.setSize(size);
         this.setFormatSize(formatSize);
+        this.setFormatCompleted(FileUtils.formatSize(Math.max(0, completed), true));
         return this;
+    }
+
+    /**
+     * 填充速度与剩余时间；下载器不支持/未知时保持"-"，前端据此隐藏该行。
+     */
+    public TorrentsInfo speed(long downloadSpeed, Long etaMs) {
+        this.setDownloadSpeed(downloadSpeed);
+        this.setFormatDownloadSpeed(downloadSpeed > 0 ? FileUtils.formatSize(downloadSpeed, true) + "/s" : "-");
+        this.setEta(etaMs);
+        this.setFormatEta(etaMs != null && etaMs > 0 ? formatEtaText(etaMs) : "-");
+        return this;
+    }
+
+    private static String formatEtaText(long etaMs) {
+        long totalSeconds = etaMs / 1000;
+        long hours = totalSeconds / 3600;
+        long minutes = (totalSeconds % 3600) / 60;
+        long seconds = totalSeconds % 60;
+        if (hours > 0) {
+            return hours + "小时" + minutes + "分";
+        }
+        if (minutes > 0) {
+            return minutes + "分" + seconds + "秒";
+        }
+        return seconds + "秒";
     }
 
     public enum State {

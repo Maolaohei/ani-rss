@@ -1,17 +1,24 @@
 <template>
   <div class="flex-center about-container">
     <div class="flex about-header">
-      <img alt="icon.svg" height="80" src="../../public/icon.svg" width="80"/>
+      <img alt="icon.svg" height="80" src="@/icon/icon.svg" width="80"/>
       <div>
         <h1>ANI-RSS</h1>
         <el-tooltip
             :disabled="!props.config.buildInfo"
             :content="props.config.buildInfo"
             placement="right">
-          <el-text class="mx-1 cursor-pointer" size="small">
+          <el-text class="mx-1 cursor-pointer" size="small" @click="copyVersion">
             &nbsp;v{{ props.config.version }}
+            <el-icon>
+              <DocumentCopy/>
+            </el-icon>
           </el-text>
         </el-tooltip>
+        <br>
+        <el-text v-if="props.config.buildInfo" size="small" type="info" class="build-info">
+          构建信息：{{ props.config.buildInfo }}
+        </el-text>
       </div>
     </div>
     <div class="flex about-buttons">
@@ -31,13 +38,15 @@
         </template>
       </popconfirm>
       <div class="about-action-spacer"></div>
-      <popconfirm title="你确定重启吗?" @confirm="stop(0)">
+      <popconfirm title="重启会中断正在进行的 RSS 扫描/下载；若非 Docker 或进程守护方式运行，需要你手动把程序拉起来。确定重启？"
+                  @confirm="stop(0)">
         <template #reference>
           <el-button bg icon="RefreshRight" text type="warning">重启</el-button>
         </template>
       </popconfirm>
       <div class="about-action-spacer"></div>
-      <popconfirm title="你确定关闭吗?" @confirm="stop(1)">
+      <popconfirm title="关闭会立即停止所有任务，且不会自动拉起，需要你手动启动。确定关闭？"
+                  @confirm="stop(1)">
         <template #reference>
           <el-button bg icon="SwitchButton" text type="danger">关闭</el-button>
         </template>
@@ -113,6 +122,8 @@ import {onMounted, ref} from "vue";
 import {ElMessage, ElText} from "element-plus";
 import Popconfirm from "@/other/Popconfirm.vue";
 import {Book, Github, Telegram} from "@vicons/fa";
+import {DocumentCopy} from "@element-plus/icons-vue";
+import {copyText} from "@/js/global.js";
 
 import markdownit from 'markdown-it'
 import MarkdownItGitHubAlerts from 'markdown-it-github-alerts'
@@ -138,15 +149,28 @@ md.use(MarkdownItGitHubAlerts)
 
 const actionLoading = ref(false)
 
+/**
+ * 重启/关闭：后端在 Windows exe 场景会返回 error（不支持重启），
+ * 此前无论成败都先弹 success，之后再执行，属于"成功→失败反转"。
+ * 这里先校验返回码，只有真正受理才提示并等待重连。
+ */
 const stop = (status) => {
   actionLoading.value = true
   http.stop(status)
       .then(res => {
-        ElMessage.success(res.message)
+        if (res.code !== 200) {
+          ElMessage.error(res.message || '操作失败')
+          return
+        }
+        ElMessage.success(res.message || '已受理，服务正在重启')
         setTimeout(() => {
+          // 重启后仍需重新登录；关闭则不再 reload（服务已停）
           authorization.value = ''
           location.reload()
         }, 5000)
+      })
+      .catch(e => {
+        ElMessage.error(e?.message || '操作失败')
       })
       .finally(() => {
         actionLoading.value = false
@@ -229,6 +253,17 @@ let logout = () => {
 }
 
 let openUrl = (url) => window.open(url)
+
+/**
+ * 版本号此前是 cursor-pointer 但没有点击行为，用户会下意识去点
+ */
+let copyVersion = async () => {
+  const info = [props.config.version, props.config.buildInfo].filter(Boolean).join(' / ')
+  if (!info) {
+    return
+  }
+  await copyText(info)
+}
 
 let dialogVisible = ref(false)
 let props = defineProps(['config'])

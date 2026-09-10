@@ -32,10 +32,11 @@ public class FileMoveNotification implements BaseNotification {
      * @param notificationStatusEnum 通知状态
      */
     @Override
-    public void test(NotificationConfig notificationConfig, Ani ani, String text, NotificationStatusEnum notificationStatusEnum) {
+    public Boolean test(NotificationConfig notificationConfig, Ani ani, String text, NotificationStatusEnum notificationStatusEnum) {
         List<NotificationStatusEnum> statusList = notificationConfig.getStatusList();
 
         Assert.isTrue(statusList.contains(NotificationStatusEnum.DOWNLOAD_END), "请设置为下载完成通知");
+        return send(notificationConfig, ani, text, NotificationStatusEnum.DOWNLOAD_END);
     }
 
     /**

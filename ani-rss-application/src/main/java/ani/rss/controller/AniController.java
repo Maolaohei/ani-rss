@@ -427,8 +427,9 @@ public class AniController extends BaseController {
             return Result.error("修改失败");
         }
         Ani downloadAni = first.get();
-        // 手动刷新：可抢先周期任务；若已有手动刷新则最多排队 1 个
-        String msg = RssTask.submitManualRefresh(List.of(downloadAni));
+        // 单订阅刷新用「温和模式」：用户只想看这一部有没有新集，
+        // 不应因此中断正在跑的整轮周期扫描（此前与"刷新全部"共用抢先路径）。
+        String msg = RssTask.submitManualRefresh(List.of(downloadAni), false);
         return Result.success(msg);
     }
 
@@ -508,6 +509,7 @@ public class AniController extends BaseController {
 
         for (Item item : items) {
             item.setHasDownloaded(false);
+            item.setDownloading(false);
             File torrent = TorrentUtil.getTorrent(ani, item);
             if (torrent.exists()) {
                 item.setHasDownloaded(true);
@@ -515,6 +517,19 @@ public class AniController extends BaseController {
             }
             if (downloadService.itemDownloaded(ani, item, false)) {
                 item.setHasDownloaded(true);
+                continue;
+            }
+            // 已提交离线任务但尚未落地：标记为"下载中"，
+            // 否则同一时刻任务管理器显示"离线处理中 45%"、预览却显示"本地存在：否"，
+            // 用户会误判为没在下而重复点强制下载。
+            try {
+                File pending = TorrentUtil.getPendingTorrent(ani, item);
+                if (pending != null && pending.exists()) {
+                    item.setDownloading(true);
+                    item.setDownloadingState("已提交离线任务，等待完成");
+                }
+            } catch (Exception e) {
+                log.debug("检查 pending 记录失败: {}", e.getMessage());
             }
         }
 

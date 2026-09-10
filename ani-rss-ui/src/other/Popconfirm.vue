@@ -1,5 +1,10 @@
 <template>
-  <el-popconfirm :title="props.title" @confirm="emit('confirm')" :width="160">
+  <el-popconfirm
+      :title="props.title"
+      :width="props.width"
+      :disabled="props.disabled"
+      @confirm="emit('confirm')"
+  >
     <template #reference>
       <slot name="reference"/>
     </template>
@@ -10,7 +15,7 @@
         </div>
         <div>
           <el-button
-              type="danger"
+              :type="props.type"
               size="small"
               @click="confirm"
               bg text
@@ -26,8 +31,22 @@
 
 <script setup>
 let props = defineProps({
-  title: String
+  title: String,
+  width: {
+    type: Number,
+    default: 160
+  },
+  type: {
+    type: String,
+    default: 'danger'
+  },
+  /**
+   * 禁用确认气泡：调用方可在请求进行中置 true，避免重复触发
+   * （el-popconfirm 只弹出气泡，不提供 pending 语义）
+   */
+  disabled: Boolean
 })
+
 const emit = defineEmits(['confirm'])
 </script>
 

@@ -110,9 +110,10 @@ export let refreshAni = (ani) => api.post('api/refreshAni', ani)
 
 /**
  * RSS 任务状态
+ * @param options 透传 api 选项（任务管理器用 silent，自行展示常驻告警）
  * @returns {Promise<unknown>}
  */
-export let rssJobStatus = () => api.post('api/rssJobStatus')
+export let rssJobStatus = (options) => api.post('api/rssJobStatus', undefined, options)
 
 /**
  * 取消当前 RSS 任务
@@ -229,6 +230,12 @@ export let testNotification = (notificationConfig) => api.post('api/testNotifica
 export let newNotification = () => api.post('api/newNotification')
 
 /**
+ * 最近一次通知发送结果（运行期失败此前只在日志里，设置页看不到）
+ * @returns {Promise<unknown>}
+ */
+export let notificationLastSend = () => api.post('api/notificationLastSend')
+
+/**
  * 获取BGM标题
  * @param ani 订阅
  * @returns {Promise<unknown>}
@@ -253,9 +260,10 @@ export let testProxy = (url, config) => api.post(`api/testProxy?url=${url}`, con
 
 /**
  * 下载列表
+ * @param options 透传 api 选项（下载面板用 silent，自行区分“空/失败/过期”三态）
  * @returns {Promise<unknown>}
  */
-export let torrentsInfos = () => api.post('api/torrentsInfos')
+export let torrentsInfos = (options) => api.post('api/torrentsInfos', undefined, options)
 
 /**
  * 订单号校验
@@ -388,6 +396,22 @@ export let login = (user) => {
     user = JSON.parse(JSON.stringify(user))
     user.password = CryptoJS['SHA256'](user.password).toString()
     return api.post('api/login', user)
+}
+
+/**
+ * 登录（登录页专用）
+ *
+ * 与 login 的唯一区别：不弹全局瞬态 toast、且 403（限流）不会触发
+ * api.js 的「清令牌 + 1 秒后强制刷新」——那条路径会把错误提示当场抹掉，
+ * 让用户完全看不到失败原因。登录页改用常驻 el-alert 展示。
+ *
+ * @param user
+ * @returns {Promise<unknown>}
+ */
+export let loginInteractive = (user) => {
+    user = JSON.parse(JSON.stringify(user))
+    user.password = CryptoJS['SHA256'](user.password).toString()
+    return api.post('api/login', user, {silent: true, skipAuthReload: true})
 }
 
 /**

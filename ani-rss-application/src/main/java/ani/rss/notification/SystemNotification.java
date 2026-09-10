@@ -24,8 +24,8 @@ public class SystemNotification implements BaseNotification {
      * @param notificationStatusEnum 通知状态
      */
     @Override
-    public void test(NotificationConfig notificationConfig, Ani ani, String text, NotificationStatusEnum notificationStatusEnum) {
-        send(notificationConfig, ani, text, notificationStatusEnum);
+    public Boolean test(NotificationConfig notificationConfig, Ani ani, String text, NotificationStatusEnum notificationStatusEnum) {
+        return send(notificationConfig, ani, text, notificationStatusEnum);
     }
 
     /**

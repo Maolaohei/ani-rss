@@ -19,11 +19,13 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import jakarta.annotation.Resource;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 public class AnimeGardenService {
     private static final String HOST = "https://api.animes.garden";
@@ -31,8 +33,36 @@ public class AnimeGardenService {
     @Resource
     private CacheService cacheService;
 
-    public List<AnimeGarden.Week> list(String bgmUrl) {
-        List<AnimeGarden.Week> weekList = new ArrayList<>();
+    /**
+     * 关键词 → Bangumi 条目地址。
+     * <p>
+     * AnimeGarden 的 /subjects 接口只提供"当季番剧列表"，没有关键词参数，
+     * 因此此前前端根本没有搜索入口。这里用 Bangumi 搜索把关键词解析成条目，
+     * 再复用已有的 bgmUrl 精确路径，无需改动 AnimeGarden 接口本身。
+     *
+     * @return 条目地址；未命中返回 null
+     */
+    public String searchBgmUrl(String text) {
+        if (StrUtil.isBlank(text)) {
+            return null;
+        }
+        try {
+            List<BgmInfo> list = BgmUtil.search(text.trim());
+            return list.stream()
+                    .map(BgmInfo::getId)
+                    .filter(Objects::nonNull)
+                    .map(String::valueOf)
+                    .filter(StrUtil::isNotBlank)
+                    .map(id -> "https://bgm.tv/subject/" + id)
+                    .findFirst()
+                    .orElse(null);
+        } catch (Exception e) {
+            log.warn("AnimeGarden 关键词搜索失败: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    public List<AnimeGarden.Week> list(String bgmUrl) {        List<AnimeGarden.Week> weekList = new ArrayList<>();
 
         if (StrUtil.isNotBlank(bgmUrl)) {
             AnimeGarden.Week week = new AnimeGarden.Week();

@@ -2,8 +2,10 @@
   <bangumi-me ref="bangumiMeRef"/>
   <el-form @submit.prevent label-width="auto"
            class="full-width">
-    <el-form-item label="BgmApi">
-      <el-input v-model:model-value="props.config['bgmApi']" placeholder="https://api.bgm.tv"/>
+    <el-form-item label="BgmApi（番剧信息接口）">
+      <el-input v-model:model-value="props.config['bgmApi']"
+                placeholder="https://api.bgm.tv"
+                @blur="normalizeBgmApi"/>
     </el-form-item>
     <el-form-item label="获取方式">
       <el-radio-group v-model="props.config['bgmTokenType']">
@@ -98,7 +100,7 @@
 </template>
 
 <script setup>
-import {ElText} from "element-plus";
+import {ElMessage, ElText} from "element-plus";
 import BangumiMe from "@/config/basic/BangumiMe.vue";
 import {onMounted, ref} from "vue";
 import {setConfig} from "@/js/http.js";
@@ -121,14 +123,35 @@ onMounted(() => {
 
 let loading = ref(false);
 
+/**
+ * 接口地址即时校验：缺协议会被后端静默归一化，用户看不出自己填错了
+ */
+let normalizeBgmApi = () => {
+  const raw = (props.config['bgmApi'] || '').trim()
+  if (!raw) {
+    return
+  }
+  if (!/^https?:\/\//i.test(raw)) {
+    const fixed = `https://${raw}`
+    props.config['bgmApi'] = fixed
+    ElMessage.warning(`BgmApi 已自动补全为 ${fixed}，如不是 https 请手动修改`)
+  }
+}
+
 let start = () => {
+  if (!props.config['bgmAppID']) {
+    ElMessage.error('请先填写 App ID（在 Bangumi 开发者平台创建应用后获得）')
+    return
+  }
   loading.value = true;
   setConfig(props.config)
       .then(async res => {
         let redirect = window.encodeURI(props.config['bgmRedirectUri'])
         let url = `https://bgm.tv/oauth/authorize?client_id=${props.config['bgmAppID']}&response_type=code&redirect_uri=${redirect}`
         window.open(url)
-        location.reload()
+        // 不再立刻 location.reload()：会让用户丢掉当前设置上下文与这条提示。
+        // 把 App ID/Secret 落盘后再跳转，用户在新标签页完成授权即可回来手动刷新。
+        ElMessage.success('已保存应用信息并打开授权页；在弹出的页面完成授权后，回到本页刷新即可')
       })
       .finally(() => {
         loading.value = false;

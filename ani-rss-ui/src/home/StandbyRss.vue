@@ -12,40 +12,46 @@
     </el-alert>
     <div class="flex standby-toolbar">
       <div>
-        <el-button text bg icon="Plus" @click="plus" type="primary"/>
+        <el-tooltip content="新增一行备用 RSS" placement="top">
+          <el-button text bg icon="Plus" @click="plus" type="primary"/>
+        </el-tooltip>
       </div>
       <div class="standby-spacer"></div>
       <div>
-        <el-button
-            @click="mikanShow"
-            text bg>
-          <template #icon>
-            <img src="@/icon/icon-Mikan.png" alt="mikan" class="icon"/>
-          </template>
-        </el-button>
+        <el-tooltip content="从 Mikan 选择字幕组" placement="top">
+          <el-button @click="mikanShow" text bg>
+            <template #icon>
+              <img src="@/icon/icon-Mikan.png" alt="mikan" class="icon"/>
+            </template>
+            从 Mikan 添加
+          </el-button>
+        </el-tooltip>
       </div>
       <div class="standby-spacer"></div>
       <div>
-        <el-button
-            @click="aniBTShow"
-            text bg>
-          <template #icon>
-            <img src="@/icon/icon-AniBT.png" alt="ani-bt" class="icon"/>
-          </template>
-        </el-button>
+        <el-tooltip content="从 AniBT 选择字幕组" placement="top">
+          <el-button @click="aniBTShow" text bg>
+            <template #icon>
+              <img src="@/icon/icon-AniBT.png" alt="ani-bt" class="icon"/>
+            </template>
+            从 AniBT 添加
+          </el-button>
+        </el-tooltip>
       </div>
       <div class="standby-spacer"></div>
       <div>
-        <el-button bg text
-                   @click="animeGardenShow">
-          <template #icon>
-            <img src="@/icon/icon-AnimeGarden.png" alt="anime-garden" class="icon"/>
-          </template>
-        </el-button>
+        <el-tooltip content="从 AnimeGarden 选择字幕组" placement="top">
+          <el-button bg text @click="animeGardenShow">
+            <template #icon>
+              <img src="@/icon/icon-AnimeGarden.png" alt="anime-garden" class="icon"/>
+            </template>
+            从 AnimeGarden 添加
+          </el-button>
+        </el-tooltip>
       </div>
     </div>
     <div>
-      <el-table v-model:data="standbyRss" height="400px" size="small">
+      <el-table :data="standbyRss" height="400px" size="small">
         <el-table-column fixed label="字幕组" min-width="100px">
           <template #default="it">
             <div v-if="editIndex !== it.$index">
@@ -82,19 +88,29 @@
           <template #default="it">
             <div class="flex">
               <div>
-                <el-button bg text icon="Edit" @click="editIndex = it.$index" v-if="editIndex !== it.$index"/>
-                <el-button bg text icon="Check" @click="check" type="primary" v-else/>
+                <el-tooltip :content="editIndex === it.$index ? '结束编辑' : '编辑这一行'" placement="top">
+                  <el-button bg text icon="Edit" @click="editIndex = it.$index" v-if="editIndex !== it.$index"/>
+                  <el-button bg text icon="Check" @click="check" type="primary" v-else/>
+                </el-tooltip>
               </div>
               <div class="standby-action-spacer">
-                <el-button bg text @click="del(it.$index)" icon="Delete" type="danger"/>
+                <popconfirm title="删除这条备用 RSS?" @confirm="del(it.$index)">
+                  <template #reference>
+                    <el-button bg text icon="Delete" type="danger"/>
+                  </template>
+                </popconfirm>
               </div>
               <div class="standby-action-spacer">
-                <el-button :disabled="it.$index < 1" bg icon="ArrowUpBold" text type="primary"
-                           @click="move(it.$index,-1)"/>
+                <el-tooltip content="上移" placement="top">
+                  <el-button :disabled="it.$index < 1" bg icon="ArrowUpBold" text type="primary"
+                             @click="move(it.$index,-1)"/>
+                </el-tooltip>
               </div>
               <div class="standby-action-spacer">
-                <el-button :disabled="it.$index >= standbyRss.length-1" bg icon="ArrowDownBold" text type="primary"
-                           @click="move(it.$index,1)"/>
+                <el-tooltip content="下移" placement="top">
+                  <el-button :disabled="it.$index >= standbyRss.length-1" bg icon="ArrowDownBold" text type="primary"
+                             @click="move(it.$index,1)"/>
+                </el-tooltip>
               </div>
             </div>
           </template>
@@ -102,7 +118,15 @@
       </el-table>
     </div>
     <div class="flex standby-footer">
-      <el-button icon="Check" bg text @click="ok" :disabled="editIndex > -1">确定</el-button>
+      <el-text size="small" type="info" class="standby-footer-tip">
+        此处改的是表单内容，点外层「确定」才会生效。
+      </el-text>
+      <span class="standby-spacer"></span>
+      <el-tooltip :disabled="editIndex < 0" content="请先点 ✓ 结束当前行的编辑" placement="top">
+        <span>
+          <el-button icon="Check" bg text @click="ok" :disabled="editIndex > -1">确定</el-button>
+        </span>
+      </el-tooltip>
     </div>
   </el-dialog>
 </template>
@@ -111,7 +135,9 @@
 import {ref} from "vue";
 import Mikan from "./Mikan.vue";
 import AniBT from "@/home/AniBT.vue";
+import {ElMessage} from "element-plus";
 import * as http from "@/js/http.js";
+import Popconfirm from "@/other/Popconfirm.vue";
 import AnimeGarden from "@/home/AnimeGarden.vue";
 
 const editIndex = ref(-1)
@@ -152,20 +178,58 @@ let del = (index) => {
   standbyRss.value = standbyRss.value.filter((s, i) => i !== index)
 }
 
+/**
+ * 结束编辑：trim 后丢弃仍然为空 URL 的行，并明确告知丢了几行
+ */
 let check = () => {
   editIndex.value = -1
+  let before = standbyRss.value.length
   standbyRss.value = standbyRss.value
       .map(it => {
-        it.url = it.url.trim()
+        it.url = (it.url ?? '').trim()
         return it;
       })
       .filter(it => it.url !== '')
+
+  let removed = before - standbyRss.value.length
+  if (removed > 0) {
+    ElMessage.warning(`已丢弃 ${removed} 行未填写 RSS 地址的空行`)
+  }
+}
+
+/**
+ * RSS 地址基本校验：必须能被解析成 http(s) URL
+ */
+let validateRss = () => {
+  for (let it of standbyRss.value) {
+    let url = (it.url ?? '').trim()
+    if (!url) {
+      ElMessage.error(`备用 RSS 中存在未填写的地址，请先删除该行；位置：${it.label || '未知字幕组'}`)
+      return false
+    }
+    let ok = false
+    try {
+      let parsed = new URL(url)
+      ok = parsed.protocol === 'http:' || parsed.protocol === 'https:'
+    } catch (e) {
+      ok = false
+    }
+    if (!ok) {
+      ElMessage.error(`备用 RSS 地址格式不正确（需要 http/https）：${it.label || '未知字幕组'}`)
+      return false
+    }
+  }
+  return true
 }
 
 let ok = () => {
   check()
+  if (!validateRss()) {
+    return
+  }
   props.ani.standbyRssList = standbyRss.value
   dialogVisible.value = false
+  ElMessage.info('已应用，点外层「确定」后保存生效')
 }
 
 let move = (index, offset) => {
@@ -205,11 +269,15 @@ let mikanShow = () => {
   let query = props.ani.mikanTitle ? props.ani.mikanTitle : props.ani.title;
 
   if (props.ani.url) {
-    let url = new URL(props.ani.url);
-    let searchParams = url.searchParams;
-    let mikanId = searchParams.get("bangumiId");
-    if (mikanId) {
-      query = `id: ${mikanId}`
+    // URL 非法时不能再抛异常（会表现为"点了没反应"）
+    try {
+      let url = new URL(props.ani.url);
+      let mikanId = url.searchParams.get("bangumiId");
+      if (mikanId) {
+        query = `id: ${mikanId}`
+      }
+    } catch (e) {
+      ElMessage.warning('当前主 RSS 地址格式不正确，已改为按标题搜索')
     }
   }
 
@@ -228,6 +296,7 @@ let props = defineProps(['ani'])
 
 .standby-toolbar {
   width: 100%;
+  flex-wrap: wrap;
 }
 
 .standby-spacer {
@@ -240,8 +309,13 @@ let props = defineProps(['ani'])
 
 .standby-footer {
   width: 100%;
-  justify-content: end;
+  justify-content: flex-end;
+  align-items: center;
   margin-top: 10px;
+}
+
+.standby-footer-tip {
+  margin-right: auto;
 }
 
 .icon {

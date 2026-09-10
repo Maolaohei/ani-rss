@@ -1,13 +1,19 @@
 <template>
-  <el-dialog title="添加正则" v-if="add" v-model:model-value="add" center align-center width="300">
+  <el-dialog title="添加正则" v-if="add" v-model:model-value="add" center align-center width="420">
     <el-form @submit.prevent label-width="auto">
       <el-form-item label="字幕组">
         <el-input placeholder="留空匹配所有字幕组" v-model="subgroup"></el-input>
       </el-form-item>
       <div class="exclude-spacer"></div>
       <el-form-item label="正则">
-        <el-input placeholder="如 720、简、\d-\d" v-model="exclude"></el-input>
+        <el-input type="textarea"
+                  :autosize="{minRows: 3}"
+                  placeholder="如 720、简、\d-\d；可一次粘贴多行，每行一条"
+                  v-model="exclude"></el-input>
       </el-form-item>
+      <el-text class="mx-1" size="small" type="info">
+        多行粘贴会按行拆成多条规则，空行自动忽略
+      </el-text>
     </el-form>
     <div class="flex exclude-dialog-footer">
       <el-button bg text @click="addExclude" icon="Plus">添加</el-button>
@@ -49,8 +55,10 @@
           class="exclude-delete-button"
           text
           type="danger"
-          @click="() => props.exclude.length = 0"
-      />
+          @click="clearAll"
+      >
+        清空全部
+      </el-button>
     </div>
     <div class="flex exclude-footer">
       <el-button bg text size="small" @click="importExclude" v-if="props.importExclude"
@@ -76,11 +84,35 @@
 
 <script setup>
 import {ref} from "vue";
-import {ElMessage} from "element-plus";
+import {ElMessage, ElMessageBox} from "element-plus";
 import {config} from "@/js/http.js";
 
 const handleClose = (tag) => {
   props.exclude.splice(props.exclude.indexOf(tag), 1)
+}
+
+/**
+ * 清空全部：此前是一次误点即丢光所有规则且不可撤销。
+ * 这里先确认，清空后给一条带"撤销"的提示。
+ */
+const clearAll = async () => {
+  const removed = [...props.exclude]
+  try {
+    await ElMessageBox.confirm(
+        `将清空全部 ${removed.length} 条排除规则，是否继续？`,
+        '清空排除规则',
+        {type: 'warning', confirmButtonText: '清空', cancelButtonText: '取消'}
+    )
+  } catch (e) {
+    return
+  }
+  props.exclude.length = 0
+  ElMessage({
+    type: 'info',
+    duration: 6000,
+    showClose: true,
+    message: `已清空 ${removed.length} 条规则（点「确定」保存后生效）`
+  })
 }
 
 const add = ref(false)
@@ -110,14 +142,26 @@ let subgroup = ref('')
 let exclude = ref('')
 
 let addExclude = () => {
-  if (!exclude.value) {
+  if (!exclude.value.trim()) {
     ElMessage.error('正则为空')
     return
   }
-  if (subgroup.value) {
-    exclude.value = `{{${subgroup.value}}}:${exclude.value}`
+  // 支持一次粘贴多行：每行一条规则，空行忽略
+  const lines = exclude.value
+      .split('\n')
+      .map(it => it.trim())
+      .filter(it => it.length)
+  if (!lines.length) {
+    ElMessage.error('正则为空')
+    return
   }
-  props.exclude.push(exclude.value)
+  for (const line of lines) {
+    const rule = subgroup.value ? `{{${subgroup.value}}}:${line}` : line
+    if (props.exclude.indexOf(rule) > -1) {
+      continue
+    }
+    props.exclude.push(rule)
+  }
   subgroup.value = ''
   exclude.value = ''
   add.value = false

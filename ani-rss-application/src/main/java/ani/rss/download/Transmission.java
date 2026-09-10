@@ -177,25 +177,37 @@ public class Transmission implements BaseDownload {
                         .toList();
 
                 // 状态： https://github.com/jayzcoder/TrguiNG/blob/zh/src/rpc/transmission.ts
+                // 0=停止 1=校验等待 2=校验中 3=下载等待 4=下载中 5=做种等待 6=做种中
+                // 此前只映射 3 种，导致「手动暂停 / 出错停止」也被显示成 downloading
+                int statusCode = item.get("status").getAsInt();
+                boolean finished = item.get("isFinished").getAsBoolean();
 
-                TorrentsInfo.State state = TorrentsInfo.State.downloading;
-
-                // 做种中
-                if (item.get("status").getAsInt() == 6) {
-                    state = TorrentsInfo.State.stalledUP;
-                }
-
-                // 已完成
-                if (item.get("isFinished").getAsBoolean()) {
-                    state = TorrentsInfo.State.pausedUP;
+                TorrentsInfo.State state;
+                if (finished) {
+                    state = statusCode == 5 ? TorrentsInfo.State.queuedUP : TorrentsInfo.State.pausedUP;
+                } else {
+                    switch (statusCode) {
+                        case 0 -> state = TorrentsInfo.State.pausedDL;
+                        case 1, 2 -> state = TorrentsInfo.State.checkingResumeData;
+                        case 3 -> state = TorrentsInfo.State.queuedDL;
+                        case 5 -> state = TorrentsInfo.State.queuedUP;
+                        default -> state = TorrentsInfo.State.downloading;
+                    }
                 }
 
                 String downloadDir = item.get("downloadDir").getAsString();
                 long size = item.get("totalSize").getAsLong();
                 long completed = item.get("haveValid").getAsLong();
 
+                Long rateDownload = getJsonLong(item, "rateDownload");
+                Long etaSeconds = getJsonLong(item, "eta");
+
                 TorrentsInfo torrentsInfo = new TorrentsInfo();
                 torrentsInfo.progress(completed, size)
+                        .speed(
+                                rateDownload == null ? 0L : rateDownload,
+                                etaSeconds == null || etaSeconds < 0 ? null : etaSeconds * 1000L
+                        )
                         .setName(item.get("name").getAsString())
                         .setTags(tags)
                         .setHash(item.get("hashString").getAsString())
@@ -369,6 +381,22 @@ public class Transmission implements BaseDownload {
             rpc(body);
         } catch (Exception e) {
             log.error("Transmission 修改保存位置失败 {}: {}", id, e.getMessage());
+        }
+    }
+
+    /**
+     * 取数值字段：缺失/null 或格式非法返回 null，由调用方决定默认值。
+     * 速度/剩余时间属“有则更好”的展示字段，缺失不应让整个列表失败。
+     */
+    private static Long getJsonLong(JsonObject jsonObject, String key) {
+        JsonElement el = jsonObject.get(key);
+        if (el == null || el.isJsonNull()) {
+            return null;
+        }
+        try {
+            return el.getAsLong();
+        } catch (NumberFormatException e) {
+            return null;
         }
     }
 }

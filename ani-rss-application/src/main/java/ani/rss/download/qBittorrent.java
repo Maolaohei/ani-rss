@@ -376,6 +376,11 @@ public class qBittorrent implements BaseDownload {
 
                 torrentsInfo
                         .progress(completed, size)
+                        .speed(
+                                defaultLong(getJsonLong(jsonObject, "dlspeed")),
+                                normalizeEta(getJsonLong(jsonObject, "eta"))
+                        )
+                        .setNumSeeds(toIntOrNull(getJsonLong(jsonObject, "num_seeds")))
                         .setName(name)
                         .setHash(hash)
                         .setDownloadDir(FileUtils.getAbsolutePath(savePath))
@@ -428,6 +433,22 @@ public class qBittorrent implements BaseDownload {
         } catch (NumberFormatException e) {
             return null;
         }
+    }
+
+    private static long defaultLong(Long value) {
+        return value == null ? 0L : value;
+    }
+
+    /** qB 的 eta 单位为秒，8640000 表示“未知”；负数同样视为未知 */
+    private static Long normalizeEta(Long etaSeconds) {
+        if (etaSeconds == null || etaSeconds < 0 || etaSeconds >= 8640000L) {
+            return null;
+        }
+        return etaSeconds * 1000L;
+    }
+
+    private static Integer toIntOrNull(Long value) {
+        return value == null ? null : value.intValue();
     }
 
     @Override

@@ -79,7 +79,8 @@ public class LogUtil {
                     @Override
                     public FilterReply decide(ILoggingEvent event) {
                         Instant instant = event.getInstant();
-                        String date = DateUtil.format(new Date(instant.toEpochMilli()), DatePattern.NORM_DATETIME_PATTERN);
+                        long timestamp = instant.toEpochMilli();
+                        String date = DateUtil.format(new Date(timestamp), DatePattern.NORM_DATETIME_PATTERN);
                         String level = event.getLevel().toString();
                         String loggerName = event.getLoggerName();
                         String formattedMessage = event.getFormattedMessage();
@@ -90,6 +91,7 @@ public class LogUtil {
                         Log logEntity = new Log()
                                 .setMessage(log.toString())
                                 .setLevel(level)
+                                .setTimestamp(timestamp)
                                 .setLoggerName(loggerName)
                                 .setThreadName(threadName);
 

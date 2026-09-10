@@ -160,4 +160,40 @@ public class RssJobStatus implements Serializable {
 
     @Schema(description = "可观察任务列表（running/pending/openlist/residual/last-finished）")
     private List<RssJobItem> tasks;
+
+    @Schema(description = "本轮失败的订阅明细（含归因与建议，最多 50 条）")
+    private List<FailedSubscription> failedSubscriptions;
+
+    /**
+     * 订阅级失败明细。
+     * <p>
+     * 此前任务管理器只有一个「失败 N」计数，用户不知道是哪几个订阅、
+     * 失败在哪一步；真实信息只存在于日志的 log.error 行里，而日志面板
+     * 又不支持按关键词检索——诊断链在最关键的一环断开。
+     */
+    @Data
+    @Accessors(chain = true)
+    @Schema(description = "订阅级失败明细")
+    public static class FailedSubscription implements Serializable {
+        @Schema(description = "订阅 id")
+        private String aniId;
+
+        @Schema(description = "订阅标题")
+        private String title;
+
+        @Schema(description = "失败阶段: rss/download")
+        private String stage;
+
+        @Schema(description = "归因标题（已人话化）")
+        private String humanizedMessage;
+
+        @Schema(description = "下一步建议")
+        private String suggestion;
+
+        @Schema(description = "原始错误信息")
+        private String rawMessage;
+
+        @Schema(description = "失败时间戳 ms")
+        private Long at;
+    }
 }

@@ -25,7 +25,10 @@ html.dark {
 .el-card {
     border: 1px solid var(--el-border-color-extra-light);
     box-shadow: 0 4px 8px rgba(0, 0, 0, 0.04);
-    transition: all 0.3s ease;
+    /* 只过渡真正会变的属性：transition: all 会让全站卡片参与每一次无关布局变化 */
+    transition: border-color var(--dur) var(--ease-apple),
+    box-shadow var(--dur) var(--ease-apple),
+    background-color var(--dur) var(--ease-apple);
 }
 
 html.dark .el-card {
@@ -36,6 +39,10 @@ html.dark .el-card {
 
 .el-overlay-dialog {
     padding: 12px; /* 最小安全边距 */
+    /* 底部手势条安全区：弹窗底部按钮不被遮挡 */
+    padding-bottom: calc(12px + env(safe-area-inset-bottom));
+    padding-left: calc(12px + env(safe-area-inset-left));
+    padding-right: calc(12px + env(safe-area-inset-right));
 }
 
 .el-dialog {
@@ -122,6 +129,18 @@ html, body, #app {
     height: 100%;
 }
 
+/* 移动端地址栏收起/展开会让 100vh 抖动，优先用 dvh */
+@supports (height: 100dvh) {
+    html, body, #app {
+        height: 100dvh;
+    }
+}
+
+/* 防止弹窗 lockScroll 时 iOS 上仍出现背景滚动穿透/回弹 */
+body {
+    overscroll-behavior: none;
+}
+
 #app {
     margin: 0 auto;
 }
@@ -131,6 +150,14 @@ html, body, #app {
         --el-dialog-width: 100%;
         margin-top: 55px !important;
         margin-bottom: auto !important;
+        /* 矮屏/横屏下保证弹窗内容可滚而不顶出视口 */
+        max-height: calc(100dvh - 70px);
+        display: flex;
+        flex-direction: column;
+    }
+
+    .el-dialog__body {
+        overflow: auto;
     }
 
     :root {
@@ -595,7 +622,9 @@ html.dark .el-input-number > span[role="button"]:hover {
     filter: brightness(1.15);
 }
 
-/* ---- el-alert：紧凑排版（圆角在 tokens 层）；info 变体转主色调（演示页取意，EP 变量随用户主色联动） ---- */
+/* ---- el-alert：紧凑排版（圆角在 tokens 层）；
+       状态色对比度由 tokens 里的加深色板保证；
+       info 提示条另用更深的主色变体，避免默认蓝在浅底上仅 ~2.5:1 ---- */
 .el-alert {
     font-size: 12.5px;
     line-height: 1.6;
@@ -605,7 +634,15 @@ html.dark .el-input-number > span[role="button"]:hover {
 
 .el-alert--info {
     background-color: var(--el-color-primary-light-9);
-    color: var(--el-color-primary);
+    /* 默认主色 #409eff 在浅底上只有 ~2.5:1；这里按主色加深一档做正文色 */
+    color: color-mix(in srgb, var(--el-color-primary) 72%, #000);
+}
+
+/* 不支持 color-mix 时退回纯主色（至少不引入解析失败的声明） */
+@supports not (color: color-mix(in srgb, red 50%, blue)) {
+    .el-alert--info {
+        color: var(--el-color-primary);
+    }
 }
 
 /* ---- el-checkbox：苹果圆角方块（EP 官方变量覆写） ---- */
@@ -699,7 +736,18 @@ html.dark .el-input-number > span[role="button"]:hover {
     -webkit-backdrop-filter: blur(20px) saturate(180%);
     backdrop-filter: blur(20px) saturate(180%);
     border-top: 1px solid rgba(255, 255, 255, .45); /* 材质顶缘受光 */
+    /* 刘海屏安全区：不改变左右原有 10px 内边距，只补足不足的部分 */
+    padding-left: max(0px, env(safe-area-inset-left));
+    padding-right: max(0px, env(safe-area-inset-right));
     transition: background-color var(--dur) var(--ease-apple), box-shadow var(--dur) var(--ease-apple);
+}
+
+/* 不支持 backdrop-filter 的浏览器：毛玻璃会变成半透明糊字，改用不透明底 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    #header,
+    #header.is-scrolled {
+        background: var(--el-bg-color-page);
+    }
 }
 
 #header.is-scrolled {

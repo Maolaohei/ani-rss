@@ -27,6 +27,15 @@ public class Log implements Serializable {
     private String level;
 
     /**
+     * 时间戳（epoch 毫秒）
+     * <p>
+     * 此前前端只能显示 message（时间被拼在字符串里、服务端时区且无法排序/过滤），
+     * 用户排查“某时刻为什么没下载”时无法对齐时间线。
+     */
+    @Schema(description = "时间戳（epoch 毫秒）")
+    private Long timestamp;
+
+    /**
      * 类路径
      */
     @Schema(description = "类路径")

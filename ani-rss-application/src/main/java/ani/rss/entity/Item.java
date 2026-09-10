@@ -65,6 +65,22 @@ public class Item implements Serializable {
     private Boolean hasDownloaded;
 
     /**
+     * 正在下载中（离线提交后存在 .pending 记录 / 下载器队列中存在）
+     * <p>
+     * 此前只有 hasDownloaded 一个布尔，导致"正在离线下载的那一集"在预览里
+     * 显示为"本地存在：否"，与任务管理器的"离线处理中 45%"直接矛盾，
+     * 用户会误判为没在下而重复点强制下载。
+     */
+    @Schema(description = "正在下载中")
+    private Boolean downloading;
+
+    /**
+     * 下载中状态的补充说明（如 "OpenList 离线处理中 45%"）
+     */
+    @Schema(description = "下载中状态说明")
+    private String downloadingState;
+
+    /**
      * 主 rss
      */
     @Schema(description = "主 rss")

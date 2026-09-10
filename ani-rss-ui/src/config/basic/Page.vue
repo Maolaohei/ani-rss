@@ -20,6 +20,13 @@
   </el-dialog>
   <el-form @submit.prevent label-width="auto"
            class="full-width">
+    <el-alert
+        class="page-alert"
+        type="warning"
+        show-icon
+        :closable="false"
+        title="下面「外观 / 主题色 / 最大内容宽度 / 显示项」属于本机偏好，改动会立即生效并只保存在当前浏览器，不受本窗口「取消」影响，也不会被导出设置带走；只有「排序」一项是服务端配置。"
+    />
     <el-form-item label="外观">
       <el-radio-group v-model="store" class="dsh-segmented">
         <el-radio-button label="自动" value="auto">
@@ -48,19 +55,30 @@
                        @active-change="colorChange"/>
     </el-form-item>
     <el-form-item label="排序">
-      <el-select v-model="props.config['sortType']" class="width-150">
-        <el-option value="SCORE" label="评分"/>
-        <el-option value="PINYIN" label="拼音"/>
-        <el-option value="DOWNLOAD_TIME" label="更新时间"/>
-      </el-select>
+      <div class="full-width">
+        <el-select v-model="props.config['sortType']" class="width-150">
+          <el-option value="SCORE" label="评分"/>
+          <el-option value="PINYIN" label="拼音"/>
+          <el-option value="DOWNLOAD_TIME" label="更新时间"/>
+        </el-select>
+        <el-text class="mx-1" size="small" type="info">
+          该项为服务端配置，需要点「确定」保存后生效
+        </el-text>
+      </div>
     </el-form-item>
     <el-form-item label="最大内容宽度">
-      <el-input-number v-model="maxContentWidth"
-                       :min="1200">
-        <template #suffix>
-          <span>px</span>
-        </template>
-      </el-input-number>
+      <div>
+        <el-input-number v-model="maxContentWidth"
+                         :min="1200">
+          <template #suffix>
+            <span>px</span>
+          </template>
+        </el-input-number>
+        <br>
+        <el-text class="mx-1" size="small" type="info">
+          最小 1200px；填更小的值也会被抬到 1200
+        </el-text>
+      </div>
     </el-form-item>
     <el-form-item label="其他">
       <el-checkbox v-model="showScore" label="显示评分"/>
@@ -144,6 +162,10 @@ let props = defineProps(['config'])
 </script>
 
 <style scoped>
+.page-alert {
+  margin-bottom: 12px;
+}
+
 .justify-end {
   justify-content: end;
 }

@@ -242,7 +242,13 @@ public class ConfigController extends BaseController {
         if ("OpenList".equalsIgnoreCase(download) || "Alist".equalsIgnoreCase(download)) {
             return Result.error("登录失败：请检查 Host、Token 与保存位置/临时目录配置。");
         }
-        return Result.error("登录失败");
+        if ("Transmission".equalsIgnoreCase(download)) {
+            return Result.error("登录失败：请检查地址是否带 /transmission/rpc、用户名密码是否正确，以及是否开启「禁止公网访问」导致本机以外的地址被拒。");
+        }
+        if ("Aria2".equalsIgnoreCase(download)) {
+            return Result.error("登录失败：请检查 JsonRPC 地址（通常为 http://host:6800/jsonrpc）与 RPC 密钥是否正确。");
+        }
+        return Result.error("登录失败：请检查下载器地址、账号与网络连通性。");
     }
 
     @Operation(summary = "自定义JS")

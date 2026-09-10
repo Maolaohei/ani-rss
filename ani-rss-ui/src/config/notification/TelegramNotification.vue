@@ -44,10 +44,10 @@
     <el-form-item label="图片">
       <el-switch v-model="notificationConfig['telegramImage']"/>
     </el-form-item>
-    <el-form-item label="格式">
+    <el-form-item label="消息格式">
       <div class="notification-input-width">
-        <el-select v-model="notificationConfig['telegramFormat']" placeholder="None">
-          <el-option label="None" value=""/>
+        <el-select v-model="notificationConfig['telegramFormat']" placeholder="纯文本">
+          <el-option label="纯文本" value=""/>
           <el-option label="Markdown" value="Markdown"/>
           <el-option label="HTML" value="HTML"/>
         </el-select>

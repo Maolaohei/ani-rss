@@ -166,7 +166,7 @@
                   </div>
                   <template #tip>
                     <div class="el-upload__tip flex" style="justify-content: end;">
-                      .torrent 文件小于 5M
+                      .torrent 文件需小于 10MB
                     </div>
                   </template>
                 </el-upload>
@@ -214,15 +214,16 @@ let start = () => {
       .then((res) => {
         ElMessageBox.confirm(
             res.message,
-            'success',
+            '开始添加合集',
             {
-              confirmButtonText: 'OK',
+              confirmButtonText: '知道了',
               confirmButtonClass: 'is-text is-has-bg el-button--primary',
               type: 'success',
               center: true,
               showCancelButton: false
             }
-        )
+        ).catch(() => {
+        })
       })
       .finally(() => {
         startLoading.value = false
@@ -281,6 +282,9 @@ let onSuccess = (res) => {
           ElMessage.success(`字幕组已更新为 ${res.data}`)
         }
       })
+      .catch(() => {
+        ElMessage.warning('未能识别字幕组，可手动填写后再开始')
+      })
 }
 
 let data = ref({
@@ -303,12 +307,14 @@ let aniType = computed({
 
 let beforeAvatarUpload = (rawFile) => {
   data.value.filename = rawFile.name
-  if (!rawFile.name.includes('.torrent')) {
-    ElMessage.error('Avatar picture must be .torrent format!')
+  if (!rawFile.name.toLowerCase().endsWith('.torrent')) {
+    ElMessage.error('仅支持 .torrent 文件，请确认文件类型')
+    data.value.filename = ''
     return false
   }
   if (rawFile.size / 1024 / 1024 > 10) {
-    ElMessage.error('Avatar picture size can not exceed 10MB!')
+    ElMessage.error('种子文件不能超过 10MB')
+    data.value.filename = ''
     return false
   }
   return true

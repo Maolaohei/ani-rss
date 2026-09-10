@@ -4,6 +4,7 @@ import ani.rss.annotation.Auth;
 import ani.rss.entity.AnimeGarden;
 import ani.rss.entity.web.Result;
 import ani.rss.service.AnimeGardenService;
+import cn.hutool.core.util.StrUtil;
 import io.swagger.v3.oas.annotations.Operation;
 import jakarta.annotation.Resource;
 import jakarta.servlet.http.HttpServletRequest;
@@ -26,6 +27,15 @@ public class AnimeGardenController {
     @PostMapping("/animeGardenList")
     public Result<List<AnimeGarden.Week>> animeGardenList(HttpServletRequest request) {
         String bgmUrl = request.getParameter("bgmUrl");
+        // 关键词搜索：前端此前完全没有入口（只能浏览当季 subjects）。
+        // 用 Bangumi 搜索把关键词解析成条目后复用 bgmUrl 精确路径。
+        String text = request.getParameter("text");
+        if (StrUtil.isBlank(bgmUrl) && StrUtil.isNotBlank(text)) {
+            bgmUrl = animeGardenService.searchBgmUrl(text);
+            if (StrUtil.isBlank(bgmUrl)) {
+                return Result.error("没有找到匹配的番剧，请尝试日文原名或更短的关键词");
+            }
+        }
         return Result.success(animeGardenService.list(bgmUrl));
     }
 

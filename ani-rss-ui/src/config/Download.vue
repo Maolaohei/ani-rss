@@ -10,7 +10,9 @@
       </el-select>
     </el-form-item>
     <el-form-item label="地址">
-      <el-input v-model:model-value="props.config.downloadToolHost" placeholder="http://192.168.1.x:8080"/>
+      <el-input v-model:model-value="props.config.downloadToolHost"
+                placeholder="http://192.168.1.x:8080"
+                @blur="normalizeHost"/>
     </el-form-item>
     <template v-if="props.config.downloadToolType === 'qBittorrent'">
       <el-form-item label="用户名">
@@ -132,42 +134,45 @@
         </el-input>
       </el-form-item>
     </template>
-    <el-form-item>
+    <el-form-item label="连接测试">
       <div class="download-test-button">
-        <el-button @click="downloadLoginTest" bg text :loading="downloadLoginTestLoading" icon="Odometer">测试
+        <el-button @click="downloadLoginTest" bg text :loading="downloadLoginTestLoading" icon="Odometer">测试连接
         </el-button>
+        <el-text class="mx-1" size="small" type="info">使用当前表单（未保存）的值，测完记得点确定保存</el-text>
       </div>
+      <el-alert
+          v-if="downloadTestResult"
+          class="download-alert"
+          :type="downloadTestResult.ok ? 'success' : 'error'"
+          show-icon
+          :closable="false"
+          :title="downloadTestResult.ok ? `连接成功：${downloadTestResult.message}` : `连接失败：${downloadTestResult.message}`"
+      />
     </el-form-item>
     <el-form-item label="保存位置">
       <div class="full-width">
         <el-input v-model:model-value="props.config['downloadPathTemplate']"/>
         <el-alert
-            v-if="!testPathTemplate(props.config['downloadPathTemplate'])"
+            v-if="pathTemplateIssue(props.config['downloadPathTemplate'])"
             class="download-alert"
             type="warning"
             show-icon
             :closable="false"
-        >
-          <template #title>
-            你的 保存位置 并未按照模版填写, 可能会遇到下载位置错误
-          </template>
-        </el-alert>
+            :title="pathTemplateIssue(props.config['downloadPathTemplate'])"
+        />
       </div>
     </el-form-item>
     <el-form-item label="剧场版保存位置">
       <div class="full-width">
         <el-input v-model:model-value="props.config['ovaDownloadPathTemplate']"/>
         <el-alert
-            v-if="!testPathTemplate(props.config['ovaDownloadPathTemplate'])"
+            v-if="pathTemplateIssue(props.config['ovaDownloadPathTemplate'])"
             class="download-alert"
             type="warning"
             show-icon
             :closable="false"
-        >
-          <template #title>
-            你的 剧场版保存位置 并未按照模版填写, 可能会遇到下载位置错误
-          </template>
-        </el-alert>
+            :title="pathTemplateIssue(props.config['ovaDownloadPathTemplate'])"
+        />
       </div>
     </el-form-item>
     <el-form-item label="自动删除">
@@ -200,7 +205,9 @@
       <div>
         <el-input-number v-model:model-value="props.config.downloadCount" :min="0"/>
         <div>
-          设置为时 0 不做限制
+          <el-text class="mx-1" size="small">
+            设置为 0 表示不做限制
+          </el-text>
         </div>
       </div>
     </el-form-item>
@@ -283,19 +290,85 @@ const offlineList = ref([
 ])
 
 const downloadLoginTestLoading = ref(false)
+const downloadTestResult = ref(null)
+
 const downloadLoginTest = () => {
   downloadLoginTestLoading.value = true
+  downloadTestResult.value = null
+  // 测试用的是当前表单（可能尚未保存）的值
   http.downloadLoginTest(props.config)
       .then(res => {
-        ElMessage.success(res.message)
+        downloadTestResult.value = {
+          ok: true,
+          message: res.message || '连接成功'
+        }
+      })
+      .catch(e => {
+        downloadTestResult.value = {
+          ok: false,
+          message: e?.message || '连接失败，请检查地址/端口/账号'
+        }
       })
       .finally(() => {
         downloadLoginTestLoading.value = false
       })
 }
 
-let testPathTemplate = (path) => {
-  return new RegExp('\\$\{[A-z]+\}').test(path);
+/**
+ * 与后端一致的路径模板变量白名单。
+ * 参考 DownloadService.getDownloadPath / RenameUtil.replaceField 实际替换的字段。
+ */
+const PATH_TEMPLATE_VARS = [
+  'title', 'themoviedbName', 'subgroup', 'jpTitle',
+  'letter', 'year', 'tmdbYear', 'month', 'monthFormat',
+  'season', 'seasonFormat', 'bgmId', 'tmdbid',
+  'quarter', 'quarterFormat', 'quarterName'
+]
+
+const PATH_TEMPLATE_VAR_SET = new Set(PATH_TEMPLATE_VARS)
+
+/**
+ * 路径模板校验：返回 null 表示没问题，否则返回**具体原因**（不再只给一句"未按模版填写"）。
+ * 1. 未识别的变量会被原样保留在路径里，属于典型配错；
+ * 2. `${` 之前的静态前缀是下载根，缺失会让根目录变成进程工作目录。
+ */
+const pathTemplateIssue = (path) => {
+  const value = (path || '').trim()
+  if (!value) {
+    return '路径模板为空，将使用系统默认下载位置'
+  }
+  const unknown = []
+  const re = /\$\{([^}]*)\}/g
+  let match
+  while ((match = re.exec(value)) !== null) {
+    const name = match[1]
+    if (!PATH_TEMPLATE_VAR_SET.has(name)) {
+      unknown.push(name)
+    }
+  }
+  if (unknown.length) {
+    return `存在无法识别的变量：${unknown.map(it => '${' + it + '}').join('、')}（可用变量：${PATH_TEMPLATE_VARS.join('、')}）`
+  }
+  const staticRoot = value.split('${')[0]
+  if (!staticRoot.trim()) {
+    return '模板以变量开头，下载根目录会变成程序运行目录；建议前面补一个绝对路径，例如 /media 或 D:\\Media'
+  }
+  return null
+}
+
+/**
+ * 下载器地址即时校验：只提示"缺少协议"这类最常见配错，并回显归一化结果。
+ */
+const normalizeHost = () => {
+  const raw = (props.config.downloadToolHost || '').trim()
+  if (!raw) {
+    return
+  }
+  if (!/^https?:\/\//i.test(raw)) {
+    const fixed = `http://${raw}`
+    props.config.downloadToolHost = fixed
+    ElMessage.warning(`地址已自动补全协议为 ${fixed}，如实际是 https 请手动修改`)
+  }
 }
 
 let activeName = ref([])

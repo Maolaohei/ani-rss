@@ -58,7 +58,8 @@
     <div class="flex notification-config-footer">
       <el-button bg text @click="messageTest" icon="Odometer" :loading="messageTestLoading">测试
       </el-button>
-      <el-button @click="dialogVisible = false" text bg icon="Check" type="primary">确定
+      <el-button @click="apply" text bg icon="Check" type="primary">
+        应用到设置
       </el-button>
     </div>
   </el-dialog>
@@ -137,6 +138,21 @@ const messageTest = () => {
 let dialogVisible = ref(false)
 
 let props = defineProps(['config'])
+
+let emit = defineEmits(['confirm'])
+
+/**
+ * 关闭本弹窗。
+ *
+ * 注意：这里只把编辑结果写回父级对象，真正落盘仍需外层「设置」弹窗点确定。
+ * 因此按钮文案不能叫「确定」（会让人以为已经保存），而是「应用到设置」，
+ * 并由父级负责提示「还需点击设置底部的确定才会保存」。
+ */
+let apply = () => {
+  emit('confirm')
+  ElMessage.info('已应用到设置，还需点击底部「确定」才会保存')
+  dialogVisible.value = false
+}
 
 let show = (newNotificationConfig) => {
   notificationConfig.value = newNotificationConfig

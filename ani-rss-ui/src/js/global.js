@@ -1,5 +1,6 @@
 import {useColorMode, useDark, useDebounceFn, useEventListener, useLocalStorage} from "@vueuse/core";
 import {ref} from "vue";
+import {ElMessage} from "element-plus";
 
 /**
  * 保存登录信息
@@ -115,7 +116,8 @@ const initTheme = () => {
         onChanged: dark => {
             // 自动根据夜间模式修改沉浸式状态栏
             const meta = document.getElementById('themeColorMeta');
-            meta.content = dark ? '#000000' : '#ffffff';
+            // 与 tokens.css 的实际页面底色保持一致，避免状态栏与内容割裂
+            meta.content = dark ? '#141416' : '#f5f5f7';
             // 明暗切换后按对应底色重新派生强调色变体
             colorChange(color.value)
         }
@@ -131,8 +133,10 @@ const initTheme = () => {
 const initLayout = () => {
     let app = document.querySelector('#app');
 
-    // 设置最大布局宽度
-    maxContentWidth.value = Math.max(maxContentWidth.value, 1200)
+    // 设置最大布局宽度；尊重用户设置，仅在低于可用最小值时才夹紧
+    if (maxContentWidth.value < 1200) {
+        maxContentWidth.value = 1200
+    }
 
     app
         .style.maxWidth = `${maxContentWidth.value}px`
@@ -197,6 +201,52 @@ const toApiFile = filename => {
     })
 }
 
+/**
+ * 复制文本到剪贴板。
+ *
+ * 优先使用异步 Clipboard API（iOS Safari 与非安全上下文下 execCommand 会静默失败，
+ * 而此前各调用点无论成功与否都提示“已复制”）。
+ */
+const copyText = async (text) => {
+    const value = String(text ?? '')
+    if (!value) {
+        ElMessage.warning('没有可复制的内容')
+        return false
+    }
+
+    try {
+        if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(value)
+            ElMessage.success('已复制')
+            return true
+        }
+    } catch (e) {
+        // 继续走兜底方案
+    }
+
+    try {
+        const input = document.createElement('textarea')
+        input.value = value
+        input.setAttribute('readonly', 'readonly')
+        input.style.position = 'fixed'
+        input.style.top = '-1000px'
+        input.style.opacity = '0'
+        document.body.appendChild(input)
+        input.select()
+        input.setSelectionRange(0, value.length)
+        const ok = document.execCommand('copy')
+        document.body.removeChild(input)
+        if (!ok) {
+            throw new Error('execCommand copy returned false')
+        }
+        ElMessage.success('已复制')
+        return true
+    } catch (e) {
+        ElMessage.error('复制失败，请手动选择文本复制')
+        return false
+    }
+}
+
 export {
     rememberThePassword,
     authorization,
@@ -217,5 +267,6 @@ export {
     toApiUrl,
     proxyImage,
     toApiFile,
-    getBaseUrl
+    getBaseUrl,
+    copyText
 };

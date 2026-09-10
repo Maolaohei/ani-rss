@@ -11,7 +11,7 @@
       </div>
       <div class="flex bgm-rate-button-container">
         <el-button :icon="Ban" bg text @click="clearRate">清空评分</el-button>
-        <el-button :icon="Save" bg text @click="setRate(ani)">保存评分</el-button>
+        <el-button :icon="Save" bg text @click="saveRate">保存评分</el-button>
       </div>
     </div>
   </el-dialog>
@@ -40,9 +40,12 @@ let loading = ref(false);
 
 let show = (v) => {
   ani.value = JSON.parse(JSON.stringify(v))
-  ani.value.score = 0
+  if (ani.value.score == null) {
+    ani.value.score = 0
+  }
 
   let tmpAni = JSON.parse(JSON.stringify(ani.value))
+  // 查询接口以 score=null 为标志（score=0 会走写入分支）
   tmpAni.score = null
 
   rate(tmpAni)
@@ -51,26 +54,34 @@ let show = (v) => {
 }
 
 let clearRate = () => {
+  // 清空评分必须走写入接口(setRate)：此前误调查询接口(rate)，
+  // 返回的旧评分会把本地的 0 覆盖回来，表现为"点了没反应"。
   ani.value.score = 0
-  rate(ani.value)
+  saveRate()
 }
 
+/**
+ * 读取当前评分（查询接口，忽略请求体里的 score）
+ */
 let rate = (v) => {
   loading.value = true
   http.rate(v)
       .then(res => {
-        ani.value.score = res.data
+        ani.value.score = res.data ?? 0
       })
       .finally(() => {
         loading.value = false
       })
 }
 
-let setRate = (v) => {
+/**
+ * 写入评分（清空评分同样走这里，score=0 即清除）
+ */
+let saveRate = () => {
   loading.value = true
-  http.setRate(v)
+  http.setRate(ani.value)
       .then(res => {
-        ani.value.score = res.data
+        ani.value.score = res.data ?? 0
 
         let message = res.message
         if (message) {

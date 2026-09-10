@@ -20,6 +20,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.*;
@@ -65,6 +66,16 @@ public class RssTask implements BaseTask {
         static final AtomicInteger subscriptionActive = new AtomicInteger(0);
         static final AtomicInteger subscriptionCompleted = new AtomicInteger(0);
         static final AtomicInteger subscriptionFailed = new AtomicInteger(0);
+        /**
+         * 本轮失败的订阅明细（含归因与建议）。
+         * <p>
+         * 只有计数时用户无法知道"是哪几个订阅、失败在哪一步"，
+         * 而日志面板又不支持关键词检索，诊断链会断掉。
+         */
+        static final List<RssJobStatus.FailedSubscription> failedSubscriptions =
+                Collections.synchronizedList(new ArrayList<>());
+        /** 明细条数上限，避免长时间运行累积 */
+        static final int FAILED_SUBSCRIPTION_MAX = 50;
 
         // ---- 上一轮状态（recordRoundFinished 写入，任务管理器"最近一次"展示）----
         static final AtomicLong lastFinishedAt = new AtomicLong(0);
@@ -104,6 +115,7 @@ public class RssTask implements BaseTask {
             RssJobState.subscriptionActive.set(0);
             RssJobState.subscriptionCompleted.set(0);
             RssJobState.subscriptionFailed.set(0);
+            RssJobState.failedSubscriptions.clear();
             RssJobState.jobScope.set("starting");
             RssJobState.jobTitle.set("");
             RssJobState.jobAniId.set("");
@@ -271,6 +283,7 @@ public class RssTask implements BaseTask {
             RssJobState.subscriptionActive.set(0);
             RssJobState.subscriptionCompleted.set(0);
             RssJobState.subscriptionFailed.set(0);
+            RssJobState.failedSubscriptions.clear();
             updateProgressMessage(generation);
 
             int poolSize = Math.min(ANI_PARALLELISM, enabled.size());
@@ -306,6 +319,7 @@ public class RssTask implements BaseTask {
                         String message = ExceptionUtils.getMessage(e);
                         log.error("{} {}", title, message);
                         log.error(message, e);
+                        recordSubscriptionFailure(ani, message);
                     } finally {
                         RssJobState.subscriptionActive.decrementAndGet();
                         RssJobState.subscriptionCompleted.incrementAndGet();
@@ -350,7 +364,7 @@ public class RssTask implements BaseTask {
         } catch (Exception e) {
             String message = ExceptionUtils.getMessage(e);
             log.error(message, e);
-            RssJobState.jobMessage.set("异常: " + message);
+            RssJobState.jobMessage.set(humanizeRunningError(message));
         } finally {
             shutdownAndAwaitPool(pool, generation);
             RssJobState.activePool.compareAndSet(pool, null);
@@ -369,6 +383,22 @@ public class RssTask implements BaseTask {
      * @return 给前端的提示文案
      */
     public static String submitManualRefresh(List<Ani> aniList) {
+        return submitManualRefresh(aniList, true);
+    }
+
+    /**
+     * 手动刷新入口（可控是否抢占周期任务）。
+     * <p>
+     * 单订阅刷新（卡片上的“立即检查新集”）用 {@code allowPreempt=false}：
+     * 用户只是想看这一部有没有新集，不应该因此中断正在跑的整轮周期扫描
+     * （周期扫描被打断会让本轮剩余订阅不再处理）。此时改为排队，
+     * 由周期任务收尾后自动接管。
+     *
+     * @param aniList     null=全部启用订阅
+     * @param allowPreempt 是否允许抢占（取消）正在运行的周期任务
+     * @return 给前端的提示文案
+     */
+    public static String submitManualRefresh(List<Ani> aniList, boolean allowPreempt) {
         PendingManual job = buildPending(aniList);
 
         // 快速路径：空闲则抢锁启动
@@ -393,6 +423,16 @@ public class RssTask implements BaseTask {
             } catch (IllegalStateException ignored) {
                 // 继续
             }
+        }
+
+        if (!allowPreempt && RssJobState.download.get()) {
+            // 温和模式：只排队，绝不取消正在运行的任务
+            PendingManual prev = RssJobState.pendingManual.getAndSet(job);
+            RssJobState.jobMessage.set("已排队待执行: " + job.title);
+            if (prev != null) {
+                return "当前任务进行中，已替换先前的待执行刷新";
+            }
+            return "当前任务进行中，已排队，稍后自动执行";
         }
 
         if (RssJobState.download.get() && source == JobSource.PERIODIC) {
@@ -627,7 +667,7 @@ public class RssTask implements BaseTask {
                 String message = ExceptionUtils.getMessage(e);
                 log.error(message, e);
                 if (generation == RssJobState.activeGeneration.get()) {
-                    RssJobState.jobMessage.set("异常: " + message);
+                    RssJobState.jobMessage.set(humanizeRunningError(message));
                 }
             }
         });
@@ -859,6 +899,8 @@ public class RssTask implements BaseTask {
                 .setSubscriptionActive(active)
                 .setSubscriptionCompleted(completed)
                 .setSubscriptionFailed(failed)
+                // 失败明细：让用户直接看到"是哪几个订阅、失败在哪一步、怎么办"
+                .setFailedSubscriptions(List.copyOf(RssJobState.failedSubscriptions))
                 .setLastFinishedAt(finishedAt > 0 ? finishedAt : null)
                 .setLastDurationMs(finishedAt > 0 ? lastDuration : null)
                 .setLastResultMessage(StrUtil.blankToDefault(lastMsg, null))
@@ -1390,5 +1432,60 @@ public class RssTask implements BaseTask {
             log.error(message, e);
         }
         ThreadUtil.sleep(sleepMinutes, TimeUnit.MINUTES);
+    }
+
+    /**
+     * 记录一条订阅级失败明细（供任务管理器展示，最多保留 {@code FAILED_SUBSCRIPTION_MAX} 条）。
+     */
+    private static void recordSubscriptionFailure(Ani ani, String message) {
+        try {
+            String raw = StrUtil.blankToDefault(message, "未知错误");
+            String title = "任务异常";
+            String suggestion = "";
+            try {
+                var h = TaskFailureHumanizer.humanize(raw);
+                title = StrUtil.blankToDefault(h.title(), title);
+                suggestion = StrUtil.blankToDefault(h.suggestion(), "");
+            } catch (Exception ignored) {
+                // 归因失败不影响主流程
+            }
+
+            List<RssJobStatus.FailedSubscription> list = RssJobState.failedSubscriptions;
+            if (list.size() >= RssJobState.FAILED_SUBSCRIPTION_MAX) {
+                list.remove(0);
+            }
+            list.add(new RssJobStatus.FailedSubscription()
+                    .setAniId(ani == null ? null : ani.getId())
+                    .setTitle(ani == null ? null : ani.getTitle())
+                    .setStage("rss")
+                    .setHumanizedMessage(title)
+                    .setSuggestion(suggestion)
+                    .setRawMessage(raw)
+                    .setAt(System.currentTimeMillis()));
+        } catch (Exception e) {
+            log.debug("记录订阅失败明细失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 正在发生的异常也做人话化，而不是把英文堆栈原文丢给用户。
+     * <p>
+     * 此前只有「上一轮结果」与失败队列走了 {@link TaskFailureHumanizer}，
+     * 运行中的 jobMessage 是 {@code "异常: " + rawMessage}，用户看到的是
+     * Connection reset / 各类英文异常；这里统一归因 + 给出下一步建议，
+     * 原始信息仍完整写进日志（上面已 log.error）便于排查。
+     */
+    private static String humanizeRunningError(String message) {
+        String raw = StrUtil.blankToDefault(message, "未知错误");
+        try {
+            var h = TaskFailureHumanizer.humanize(raw);
+            String title = StrUtil.blankToDefault(h.title(), "任务异常");
+            String suggestion = StrUtil.blankToDefault(h.suggestion(), "");
+            return suggestion.isEmpty() ? ("异常：" + title) : ("异常：" + title + " — " + suggestion);
+        } catch (Exception e) {
+            // 人话化失败不能影响主流程
+            log.debug("任务异常人话化失败: {}", e.getMessage());
+            return "异常：" + raw;
+        }
     }
 }

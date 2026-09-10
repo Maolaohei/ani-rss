@@ -14,7 +14,13 @@
       </el-input-number>
     </el-form-item>
     <el-form-item label="最大文件名长度">
-      <el-input-number v-model:model-value="props.config.maxFileNameLength" :min="0"/>
+      <div>
+        <el-input-number v-model:model-value="props.config.maxFileNameLength" :min="0"/>
+        <br>
+        <el-text class="mx-1" size="small">
+          超出该长度的文件名会被截断；填 0 表示不限制
+        </el-text>
+      </div>
     </el-form-item>
     <el-form-item label="重命名模版">
       <div class="full-width">
@@ -31,9 +37,17 @@
               :closable="false"
           >
             <template #title>
-              模板内至少需要保留 S${seasonFormat}E${episodeFormat} or S${season}E${episode} 否则会导致无法正常重命名
+              模板内至少需要保留 S${seasonFormat}E${episodeFormat} 或 S${season}E${episode}，否则会导致无法正常重命名
             </template>
           </el-alert>
+          <el-alert
+              v-if="unknownTemplateVars.length"
+              class="mt-8"
+              type="warning"
+              show-icon
+              :closable="false"
+              :title="`存在无法识别的变量：${unknownTemplateVars.map(it => '${' + it + '}').join('、')}，会被原样写进文件名（可用变量：${RENAME_TEMPLATE_VARS.join('、')}）`"
+          />
         </div>
         <el-text class="mx-1" size="small">
           <el-link
@@ -89,19 +103,42 @@
       <div>
         <el-switch v-model:model-value="props.config.subtitleIndependentFolderEnabled"/>
         <br>
-        <el-input v-model="config.subtitleIndependentFolderName"/>
+        <el-input v-model="config.subtitleIndependentFolderName"
+                  :disabled="!props.config.subtitleIndependentFolderEnabled"
+                  placeholder="字幕"/>
         <br>
         <el-text class="mx-1" size="small">
-          仅支持 qBittorrent
+          仅支持 qBittorrent；只填文件夹名，不要带路径分隔符
         </el-text>
+        <el-alert
+            v-if="folderNameIssue"
+            class="mt-8"
+            type="warning"
+            show-icon
+            :closable="false"
+            :title="folderNameIssue"
+        />
       </div>
     </el-form-item>
   </el-form>
 </template>
 
 <script setup>
+import {computed} from "vue";
 import {ElText} from "element-plus";
 import RenameTemplateTools from "@/config/basic/RenameTemplateTools.vue";
+
+/**
+ * 重命名模板可用变量白名单（与 RenameUtil 实际替换的字段一致）。
+ * 不校验的话，写错的变量会被原样写进文件名。
+ */
+const RENAME_TEMPLATE_VARS = [
+  'title', 'themoviedbName', 'subgroup', 'jpTitle', 'episodeTitle',
+  'season', 'seasonFormat', 'episode', 'episodeFormat',
+  'year', 'resolution', 'tmdbid', 'part'
+]
+
+const RENAME_TEMPLATE_VAR_SET = new Set(RENAME_TEMPLATE_VARS)
 
 let testRenameTemplate = renameTemplate => {
   let test = [
@@ -109,12 +146,42 @@ let testRenameTemplate = renameTemplate => {
     'S${seasonFormat}E${episodeFormat}'
   ]
   for (let s of test) {
-    if (renameTemplate.indexOf(s) > -1) {
+    if ((renameTemplate || '').indexOf(s) > -1) {
       return true;
     }
   }
   return false;
 }
+
+/**
+ * 未知变量的具体清单：只报"未按模版填写"对用户没有帮助
+ */
+const unknownTemplateVars = computed(() => {
+  const value = props.config.renameTemplate || ''
+  const unknown = []
+  const re = /\$\{([^}]*)\}/g
+  let match
+  while ((match = re.exec(value)) !== null) {
+    if (!RENAME_TEMPLATE_VAR_SET.has(match[1])) {
+      unknown.push(match[1])
+    }
+  }
+  return unknown
+})
+
+const folderNameIssue = computed(() => {
+  if (!props.config.subtitleIndependentFolderEnabled) {
+    return null
+  }
+  const name = (props.config.subtitleIndependentFolderName || '').trim()
+  if (!name) {
+    return '已开启字幕独立文件夹但名称为空，将退回默认行为'
+  }
+  if (/[\\/:*?"<>|]/.test(name) || name === '.' || name === '..') {
+    return '文件夹名包含非法字符（\\ / : * ? " < > |）或为相对路径，重命名阶段会失败'
+  }
+  return null
+})
 
 let props = defineProps(['config'])
 

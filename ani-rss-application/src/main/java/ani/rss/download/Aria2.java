@@ -140,9 +140,25 @@ public class Aria2 implements BaseDownload {
             long size = asJsonObject.get("totalLength").getAsLong();
             long completed = asJsonObject.get("completedLength").getAsLong();
 
+            // 速度与剩余时间：用户判断“在慢慢下还是卡死”的关键数字
+            long downloadSpeed = 0L;
+            JsonElement speedEl = asJsonObject.get("downloadSpeed");
+            if (speedEl != null && !speedEl.isJsonNull()) {
+                try {
+                    downloadSpeed = speedEl.getAsLong();
+                } catch (NumberFormatException ignored) {
+                    downloadSpeed = 0L;
+                }
+            }
+            Long etaMs = null;
+            if (downloadSpeed > 0 && size > completed) {
+                etaMs = (long) ((size - completed) * 1000.0 / downloadSpeed);
+            }
+
             TorrentsInfo torrentsInfo = new TorrentsInfo();
             torrentsInfo
                     .progress(completed, size)
+                    .speed(downloadSpeed, etaMs)
                     .setTags(List.of())
                     .setId(gid)
                     .setName(name)

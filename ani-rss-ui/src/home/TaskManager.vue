@@ -1,6 +1,21 @@
 <template>
-  <el-dialog v-model="dialogVisible" center title="任务管理器" width="820px">
+  <el-dialog v-model="dialogVisible" center title="任务管理器" width="min(820px, 100%)">
     <div class="job-body">
+      <!-- 状态不可用时常驻告警：此前会把“接口失败”显示成“空闲” -->
+      <el-alert
+          v-if="statusError"
+          class="status-error"
+          type="error"
+          :closable="false"
+          show-icon
+          :title="`任务状态获取失败：${statusError}`">
+        <template #default>
+          <div class="status-error-body">
+            <span>{{ staleText }}</span>
+            <el-button size="small" bg text type="primary" :loading="loading" @click="refreshNow">重试</el-button>
+          </div>
+        </template>
+      </el-alert>
       <div class="job-summary">
         <div class="job-row">
           <span class="job-label">总览</span>
@@ -32,6 +47,26 @@
         <div class="job-row">
           <span class="job-label">已处理时间</span>
           <span>{{ lastProcessedText }}</span>
+        </div>
+      </div>
+
+      <!-- 订阅级失败明细：此前只有一个"失败 N"计数，用户不知道是哪几个订阅、失败在哪一步 -->
+      <div v-if="failedSubscriptions.length" class="failed-subscriptions">
+        <div class="residual-preview-head">
+          <span class="residual-preview-title">失败的订阅 {{ failedSubscriptions.length }}</span>
+          <span class="muted">按错误归因给出下一步建议</span>
+        </div>
+        <div v-for="(row, index) in failedSubscriptions" :key="`${row.aniId}-${index}`" class="residual-row">
+          <div class="residual-row-main">
+            <el-tag size="small" type="danger">{{ row.humanizedMessage || '任务异常' }}</el-tag>
+            <span class="residual-name" :title="row.title">{{ row.title || row.aniId || '-' }}</span>
+            <el-button size="small" bg text type="primary" @click="focusSubscription(row)">定位订阅</el-button>
+          </div>
+          <div class="residual-row-meta">
+            <span v-if="row.suggestion">{{ row.suggestion }}</span>
+            <span v-if="row.rawMessage" class="mono" :title="row.rawMessage">{{ shortRaw(row.rawMessage) }}</span>
+            <span>{{ formatTime(row.at) }}</span>
+          </div>
         </div>
       </div>
 
@@ -80,7 +115,7 @@
         <div class="residual-preview-head">
           <span class="residual-preview-title">失败队列 {{ status.failedQueueCount }}</span>
           <div class="failed-queue-actions">
-            <el-button size="small" bg text :loading="failedLoading" @click="loadFailedQueue">刷新</el-button>
+            <el-button size="small" bg text :loading="failedLoading" @click="loadFailedQueue">加载明细</el-button>
             <el-button size="small" bg text type="danger" :loading="failedClearing" @click="clearFailedQueue">清空</el-button>
           </div>
         </div>
@@ -158,7 +193,7 @@
     <template #footer>
       <div class="job-footer">
         <div class="job-footer-group">
-          <el-button bg text @click="refreshNow" :loading="loading">刷新</el-button>
+          <el-button bg text @click="refreshNow" :loading="loading">刷新状态</el-button>
           <el-button
               type="success"
               bg
@@ -220,6 +255,7 @@
 
 <script setup>
 import {computed, ref} from "vue";
+import {useIntervalFn} from "@vueuse/core";
 import {ElMessage, ElMessageBox} from "element-plus";
 import * as http from "@/js/http.js";
 
@@ -239,6 +275,10 @@ const failedClearing = ref(false)
 const failedActingId = ref('')
 const failedItems = ref([])
 const status = ref(emptyStatus())
+/** 状态查询失败原因：常驻展示，避免面板停在旧数据上误导用户 */
+const statusError = ref('')
+const lastSuccessAt = ref(0)
+const consecutiveFailures = ref(0)
 
 function emptyStatus() {
   return {
@@ -290,6 +330,7 @@ function emptyStatus() {
     tempDirResidualCleaning: false,
     tempDirResidualMessage: null,
     tempDirResidualItems: [],
+    failedSubscriptions: [],
     tasks: []
   }
 }
@@ -303,6 +344,31 @@ const tempDirPreview = computed(() => {
   const items = status.value.tempDirResidualItems
   return Array.isArray(items) ? items : []
 })
+
+/** 本轮订阅级失败明细（后端 RssJobStatus.failedSubscriptions） */
+const failedSubscriptions = computed(() => {
+  const items = status.value.failedSubscriptions
+  return Array.isArray(items) ? items : []
+})
+
+/** 原始错误只在 title 里保留全文，列表内截断显示 */
+const shortRaw = raw => {
+  const text = String(raw || '')
+  return text.length > 60 ? `${text.slice(0, 60)}…` : text
+}
+
+/** 定位订阅：回到首页并高亮对应卡片（首页已注册 $reLoadList） */
+const focusSubscription = row => {
+  if (!row?.aniId) {
+    return
+  }
+  dialogVisible.value = false
+  if (typeof window.$focusAni === 'function') {
+    window.$focusAni(row.aniId)
+    return
+  }
+  ElMessage.info('请在首页搜索该订阅标题以定位')
+}
 
 const residualCountText = computed(() => {
   const total = Number(status.value.residualTotalCount || 0)
@@ -534,11 +600,37 @@ const applyResponseStatus = (seq, data) => {
 
 const show = () => {
   dialogVisible.value = true
+  statusError.value = ''
   pollStatus()
-  if (Number(status.value.failedQueueCount || 0) > 0 || failedItems.value.length) {
-    loadFailedQueue()
-  }
+  // 先取一次真实状态再决定是否加载失败明细：
+  // 此前判断的是上一次会话残留的 status，首次打开时即使后端有失败记录也不会加载
+  fetchStatus().then(() => {
+    if (Number(status.value.failedQueueCount || 0) > 0) {
+      loadFailedQueue()
+    }
+  })
 }
+
+/** 状态不可用时常驻告警里的“数据已过期”说明（tick 每秒推进以刷新秒数） */
+const tick = ref(0)
+
+useIntervalFn(() => {
+  if (statusError.value) {
+    tick.value++
+  }
+}, 1000)
+
+const staleText = computed(() => {
+  void tick.value
+  if (!lastSuccessAt.value) {
+    return '尚未成功获取过状态'
+  }
+  const seconds = Math.max(0, Math.round((Date.now() - lastSuccessAt.value) / 1000))
+  if (seconds < 60) {
+    return `以下数据来自 ${seconds} 秒前`
+  }
+  return `以下数据来自 ${Math.round(seconds / 60)} 分钟前，可能已过期`
+})
 
 const refreshNow = async () => {
   loading.value = true
@@ -553,9 +645,20 @@ const fetchStatus = async () => {
   if (actionInFlight > 0) return
   const seq = nextRequestSeq()
   try {
-    const res = await http.rssJobStatus()
+    const res = await http.rssJobStatus({silent: true})
     applyResponseStatus(seq, res?.data)
-  } catch (_) {
+    if (statusError.value) {
+      statusError.value = ''
+    }
+    lastSuccessAt.value = Date.now()
+    consecutiveFailures.value = 0
+  } catch (err) {
+    // 此前静默吞掉：面板会停在旧快照上继续显示“空闲/运行中”，
+    // 同时 api.js 每 2~4 秒重复弹同一条错误 toast。这里改为常驻告警 + 轮询退避。
+    consecutiveFailures.value++
+    if (!statusError.value) {
+      statusError.value = err?.message || '无法获取任务状态'
+    }
   }
 }
 
@@ -575,7 +678,10 @@ const pollStatus = async () => {
           if (t.kind === 'residual' || t.kind === 'tempdir_residual' || t.kind === 'last_finished') return false
           return t.status === 'running' || t.status === 'busy' || t.status === 'canceling' || t.status === 'pending'
         })
-    await sleep(busy ? 2000 : 4000)
+    // 连续失败时退避：避免对不可用的服务每 2 秒打一次并持续弹错
+    const failures = consecutiveFailures.value
+    const backoff = failures > 0 ? Math.min(30000, 2000 * Math.pow(2, Math.min(failures, 4))) : 0
+    await sleep(Math.max(busy ? 2000 : 4000, backoff))
   }
 }
 
@@ -714,12 +820,26 @@ const cleanTempDir = async () => {
 
 const repairingLegacy = ref(false)
 const repairLegacy = async () => {
+  // 该操作会归位并清理云盘目录结构（动用户文件），此前单击即执行且无确认
+  try {
+    await ElMessageBox.confirm(
+        '将归位 OpenList/云盘中被错误嵌套的目录并清理空壳，会移动已有文件。是否继续？',
+        '遗留问题修复',
+        {type: 'warning', confirmButtonText: '开始修复', cancelButtonText: '取消'}
+    )
+  } catch (_) {
+    return
+  }
   const seq = nextRequestSeq()
   actionInFlight++
   repairingLegacy.value = true
   try {
     const res = await http.rssJobLegacyRepair()
-    ElMessage.success(res.message || '遗留修复完成')
+    ElMessageBox.alert(res.message || '遗留修复完成', '遗留问题修复结果', {
+      confirmButtonText: '知道了',
+      customClass: 'legacy-repair-result'
+    }).catch(() => {
+    })
     applyResponseStatus(seq, res?.data)
   } catch (_) {
   } finally {
@@ -771,11 +891,22 @@ const removeFailed = async (row) => {
 const retryFailed = async (row) => {
   if (!row?.id) return
   failedActingId.value = row.id
+  const beforeAttempts = row.attempts
+  const beforeFailedAt = row.failedAt
   try {
     const res = await http.failedDownloadQueueRetry(row.id)
-    ElMessage.success(res.message || '已提交精确重下')
-    // 后台成功后才会从队列移除；失败仍保留，刷新列表即可
+    // 接口恒返回 200，真实结果在后台线程里：约 3 秒后回查该条目是否真的被消费，
+    // 避免“绿色成功提示 + 列表纹丝不动”的误导。
+    ElMessage.info(res.message || '已提交精确重下，正在确认结果…')
+    await sleep(3000)
+    await loadFailedQueue()
     await fetchStatus()
+    const still = failedItems.value.find(i => i.id === row.id)
+    if (still && still.attempts === beforeAttempts && still.failedAt === beforeFailedAt) {
+      ElMessage.error(`重下未生效：${still.message || '条目仍留在失败队列中'}${still.suggestion ? `（${still.suggestion}）` : ''}`)
+    } else if (!still) {
+      ElMessage.success('已从失败队列移除，说明重下已受理')
+    }
   } catch (_) {
   } finally {
     failedActingId.value = ''
@@ -790,6 +921,19 @@ defineExpose({show})
 <style scoped>
 .job-body {
   min-height: 260px;
+}
+
+.status-error {
+  margin-bottom: 10px;
+}
+
+.status-error-body {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 4px;
 }
 
 .job-summary {
@@ -900,6 +1044,16 @@ defineExpose({show})
   padding: 10px 12px;
   background: var(--el-fill-color-blank);
   max-height: 240px;
+  overflow: auto;
+}
+
+.failed-subscriptions {
+  margin-top: 10px;
+  border: 1px solid var(--el-color-danger-light-9);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--el-color-danger-light-9);
+  max-height: 200px;
   overflow: auto;
 }
 

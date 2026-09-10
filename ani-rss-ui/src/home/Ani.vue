@@ -339,7 +339,7 @@
 import Exclude from "@/config/Exclude.vue";
 import PrioKeys from "@/config/PrioKeys.vue";
 import Preview from "./Preview.vue";
-import {computed, onMounted, ref} from "vue";
+import {computed, onMounted, ref, watch} from "vue";
 import {ElMessage, ElMessageBox, ElText} from "element-plus";
 import StandbyRss from "./StandbyRss.vue";
 import SwitchMaster from "./SwitchMaster.vue";
@@ -442,6 +442,8 @@ let match = ref()
 
 onMounted(() => {
   init()
+  // 建立"未保存改动"基线
+  resetDirty()
 })
 
 let scrollbarRef = ref()
@@ -542,7 +544,44 @@ let aniType = computed({
     props.ani.mediaType = v === 1 ? 'movie' : (v === 2 ? 'ova' : '')
   }
 })
-const emit = defineEmits(['callback'])
+const emit = defineEmits(['callback', 'update:dirty'])
+
+/**
+ * 未保存改动追踪：订阅表单是就地修改 props.ani 的，
+ * 由这里统一对外广播"是否有未保存改动"，供外层弹窗做关闭确认。
+ */
+let dirty = false
+let initialSnapshot = ''
+
+let emitDirty = (value) => {
+  if (dirty === value) {
+    return
+  }
+  dirty = value
+  emit('update:dirty', value)
+}
+
+let markDirty = () => {
+  if (!initialSnapshot) {
+    return
+  }
+  // 以快照做真实比对：改回原样时也能自动撤销"未保存"标记
+  emitDirty(JSON.stringify(props.ani) !== initialSnapshot)
+}
+
+/**
+ * 保存成功后由外层调用，重置基线避免误报未保存
+ */
+let resetDirty = () => {
+  initialSnapshot = JSON.stringify(props.ani)
+  emitDirty(false)
+}
+
+watch(() => props.ani, () => {
+  markDirty()
+}, {deep: true})
+
+defineExpose({resetDirty})
 </script>
 
 <style scoped>

@@ -32,8 +32,9 @@ public interface BaseNotification {
      * @param ani                    订阅
      * @param text                   通知内容
      * @param notificationStatusEnum 通知状态
+     * @return 是否真正发送成功
      */
-    void test(NotificationConfig notificationConfig, Ani ani, String text, NotificationStatusEnum notificationStatusEnum);
+    Boolean test(NotificationConfig notificationConfig, Ani ani, String text, NotificationStatusEnum notificationStatusEnum);
 
     /**
      * 发送通知

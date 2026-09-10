@@ -1,17 +1,44 @@
 <template>
-  <el-dialog v-model="batchAdditionDialogVisible" align-center center title="正在批量添加订阅"
+  <el-dialog v-model="batchAdditionDialogVisible" align-center center
+             :title="batchAdding ? '正在批量添加订阅' : '批量添加结果'"
              width="500"
-             :close-on-click-modal="false"
-             :close-on-press-escape="false"
-             :show-close="false">
+             :close-on-click-modal="!batchAdding"
+             :close-on-press-escape="!batchAdding"
+             :show-close="!batchAdding">
     <div>
-      <el-progress :percentage="Number.parseInt((batchAdditionNum / rssList.length) * 100.0)"/>
+      <el-progress :percentage="batchPercent" :status="batchProgressStatus"/>
     </div>
     <div>
-      {{ batchAdditionNum }} / {{ rssList.length }}
+      {{ batchAdditionNum }} / {{ batchTotal }}
     </div>
+    <div v-if="!batchAdding && batchResult.length" class="batch-result">
+      <el-text type="success" size="small">成功 {{ batchSuccessCount }} 条</el-text>
+      <div v-if="batchFailedCount">
+        <el-text type="danger" size="small">失败 {{ batchFailedCount }} 条：</el-text>
+        <ul class="batch-failed-list">
+          <li v-for="(f, i) in batchResult.filter(it => !it.ok)" :key="i">
+            <el-text size="small">{{ f.name }}：{{ f.reason }}</el-text>
+          </li>
+        </ul>
+      </div>
+      <el-text v-if="batchCanceled" type="warning" size="small">已取消，剩余条目未添加</el-text>
+    </div>
+    <template #footer>
+      <el-button v-if="batchAdding" type="danger" text bg icon="Close" @click="cancelBatch">取消剩余</el-button>
+      <el-button v-else type="primary" text bg icon="Check"
+                 @click="batchAdditionDialogVisible = false">关闭
+      </el-button>
+    </template>
   </el-dialog>
   <el-dialog v-model="matchDialogVisible" align-center center title="匹配" width="auto">
+    <el-alert
+        v-if="matchExistsHint"
+        class="match-exists-alert"
+        type="warning"
+        show-icon
+        :closable="false"
+        title="该番剧已订阅：继续添加会覆盖同名订阅，如需追加字幕组请到「编辑订阅 → 备用 RSS」"
+    />
     <div class="match-content">
       <el-radio-group v-model="addAni.match">
         <div v-for="regexItems in regexList" class="match-item">
@@ -25,12 +52,11 @@
         </div>
       </el-radio-group>
     </div>
+    <el-text v-if="matchSummary" class="mx-1" size="small">
+      {{ matchSummary }}
+    </el-text>
     <div class="dialog-footer">
-      <el-button icon="Check" @click="async ()=>{
-          emit('callback', addAni)
-          dialogVisible = false
-          matchDialogVisible = false
-      }" text bg>确定
+      <el-button icon="Check" @click="confirmMatch" text bg>确定
       </el-button>
     </div>
   </el-dialog>
@@ -38,6 +64,13 @@
     <el-checkbox-group v-model="rssList">
       <div class="content-wrapper">
         <div class="search-section">
+          <el-alert
+              class="ag-scope-alert"
+              type="info"
+              show-icon
+              :closable="false"
+              title="此处按「当季番剧」浏览，没有关键词搜索框。要精确找某部番，请在「添加订阅 → 编辑页」或订阅编辑里用 AnimeGarden 按钮（会带上 Bangumi 条目）。"
+          />
           <div class="flex season-selector">
             <el-button :disabled="rssList.length < 1" bg icon="Plus" text @click="batchAddition">批量添加</el-button>
           </div>
@@ -75,6 +108,14 @@
                       </template>
                       <div v-if="selectName === anime.id" v-loading="groupLoading"
                            class="group-content">
+                        <el-alert
+                            v-if="anime['exists']"
+                            class="group-exists-alert"
+                            type="info"
+                            show-icon
+                            :closable="false"
+                            title="该番剧已订阅：再加字幕组请到「编辑订阅 → 备用 RSS」管理"
+                        />
                         <el-collapse accordion>
                           <el-collapse-item v-for="group in groups[anime.id]">
                             <template #title>
@@ -84,6 +125,9 @@
                                 </div>
                                 <div class="group-label">
                                   <el-text style="max-width: 100px;" truncated>{{ group.name }}</el-text>
+                                  <el-text v-if="(group.items || []).length" class="mx-1" size="small" type="info">
+                                    · 最近 {{ group.items.length }} 条
+                                  </el-text>
                                 </div>
                                 <div v-if="showTag()">
                                   <el-tag v-for="tag in group['groupRegex']['tags']"
@@ -92,7 +136,7 @@
                                   </el-tag>
                                 </div>
                                 <div class="group-action">
-                                  <el-button bg @click.stop="callback(group)" icon="Plus">
+                                  <el-button bg icon="Plus" @click.stop="callback(group, anime['exists'])">
                                     添加
                                   </el-button>
                                 </div>
@@ -111,7 +155,7 @@
                                         {{ ti['createdAt'] }}
                                       </p>
                                       <div>
-                                        <el-button :icon="DocumentCopy" bg text @click="copy(ti['magnet']  )"/>
+                                        <el-button :icon="DocumentCopy" bg text @click="copy(ti['magnet'])"/>
                                       </div>
                                     </div>
                                   </div>
@@ -126,6 +170,7 @@
                 </div>
               </el-collapse-item>
             </el-collapse>
+            <el-empty v-if="!loading && !data.items.length" description="本周没有可浏览的番剧"/>
           </el-scrollbar>
         </div>
       </div>
@@ -134,11 +179,11 @@
 </template>
 
 <script setup>
-import {ref} from "vue";
+import {computed, ref} from "vue";
 import {ElMessage, ElText} from "element-plus";
 import {DocumentCopy} from "@element-plus/icons-vue";
 import * as http from "@/js/http.js";
-import {proxyImage} from "@/js/global.js";
+import {proxyImage, copyText} from "@/js/global.js";
 
 // 批量添加订阅
 let rssList = ref([]);
@@ -153,6 +198,7 @@ let data = ref({
 
 let show = (bgmUrl = '') => {
   dialogVisible.value = true
+  groups.value = {}
   data.value = {
     'items': []
   }
@@ -170,10 +216,13 @@ let list = async (bgmUrl = '') => {
           ElMessage.warning("搜索结果为空")
         }
 
-        data.value.items = items
-        if (items.length) {
+        data.value.items = items ? items : []
+        if (items && items.length) {
           activeName.value = items[0].weekLabel
         }
+      })
+      .catch(err => {
+        ElMessage.error(err?.message || '获取 AnimeGarden 数据失败')
       })
       .finally(() => {
         loading.value = false
@@ -196,6 +245,9 @@ let collapseChange = (v) => {
       .then(res => {
         groups.value[v] = res.data
       })
+      .catch(err => {
+        ElMessage.error(err?.message || '获取字幕组失败')
+      })
       .finally(() => {
         groupLoading.value = false
       })
@@ -212,18 +264,35 @@ let addAni = ref({
 })
 
 let regexList = ref([])
+/** 该番剧是否已订阅（由 picker 返回的 exists 标记） */
+let matchExistsHint = ref(false)
+/** 匹配弹窗里的可下载摘要 */
+let matchSummary = ref('')
 
-let callback = v => {
-  let {bgmId, rss, name} = v
-  regexList.value = JSON.parse(JSON.stringify(v.groupRegex.regexList))
+let callback = (v, exists = false) => {
+  let {bgmId, rss, name, items} = v
+  let regexItems = v.groupRegex && v.groupRegex.regexList ? v.groupRegex.regexList : []
+  regexList.value = JSON.parse(JSON.stringify(regexItems))
 
   addAni.value.bgmUrl = `https://bgm.tv/subject/${bgmId}`
   addAni.value.url = rss
   addAni.value.subgroup = name
   addAni.value.match = '[]'
 
+  matchExistsHint.value = !!exists
+  let count = Array.isArray(items) ? items.length : 0
+  matchSummary.value = count
+      ? `该字幕组最近有 ${count} 条更新；添加后可在「订阅列表 → 预览」查看将下载的完整集数`
+      : ''
+
   regexList.value.push([])
   matchDialogVisible.value = true
+}
+
+let confirmMatch = () => {
+  emit('callback', addAni.value)
+  dialogVisible.value = false
+  matchDialogVisible.value = false
 }
 
 
@@ -241,24 +310,69 @@ let emit = defineEmits(['callback'])
 
 
 let batchAdditionNum = ref(0)
+let batchTotal = ref(0)
 let batchAdditionDialogVisible = ref(false)
+let batchAdding = ref(false)
+let batchCanceled = ref(false)
+let batchResult = ref([])
 
-let batchAddition = async () => {
+const batchPercent = computed(() => {
+  if (!batchTotal.value) {
+    return 0
+  }
+  return Number.parseInt((batchAdditionNum.value / batchTotal.value) * 100.0)
+})
+const batchProgressStatus = computed(() => {
+  if (batchAdding.value || batchCanceled.value) {
+    return ''
+  }
+  return batchFailedCount.value ? 'exception' : 'success'
+})
+const batchSuccessCount = computed(() => batchResult.value.filter(it => it.ok).length)
+const batchFailedCount = computed(() => batchResult.value.filter(it => !it.ok).length)
+
+const cancelBatch = () => {
+  batchCanceled.value = true
+}
+
+const batchAddition = async () => {
+  if (!rssList.value.length) {
+    ElMessage.warning('请先勾选要添加的字幕组')
+    return
+  }
+
+  let map
+  try {
+    map = rssList.value.reduce((acc, item) => {
+      let parsed = JSON.parse(item)
+      let bgmId = parsed['bgmId']
+      if (!acc[bgmId]) {
+        acc[bgmId] = []
+      }
+      acc[bgmId].push(parsed)
+      return acc
+    }, {})
+  } catch (e) {
+    ElMessage.error('所选条目的数据已损坏，请关闭弹窗重新进入后再试')
+    return
+  }
+
+  let grouped = Object.values(map)
+  let totalCount = grouped.reduce((sum, g) => sum + g.length, 0)
+
   batchAdditionNum.value = 0
+  batchTotal.value = totalCount
+  batchResult.value = []
+  batchCanceled.value = false
+  batchAdding.value = true
   batchAdditionDialogVisible.value = true
 
-  try {
-    ElMessage.success("添加中....")
-    let map = rssList.value.reduce((acc, item) => {
-      let parsedItem = JSON.parse(item);
-      let bgmId = parsedItem['bgmId'];
-      if (!acc[bgmId]) {
-        acc[bgmId] = [];
-      }
-      acc[bgmId].push(parsedItem);
-      return acc;
-    }, {})
-    for (let item of Object.values(map)) {
+  for (let item of grouped) {
+    if (batchCanceled.value) {
+      break
+    }
+    let name = item[0].name || '未知字幕组'
+    try {
       let ani = {
         "url": item[0]['rss'],
         "season": 1,
@@ -283,29 +397,32 @@ let batchAddition = async () => {
               }
             })
       }
-      batchAdditionNum.value += item.length
       await http.addAni(ani)
+      batchResult.value.push({ok: true, name})
+    } catch (e) {
+      // 单条失败不再中断整批，逐条记录失败原因
+      batchResult.value.push({ok: false, name, reason: e?.message || String(e)})
     }
-    ElMessage.success("添加成功")
-
-    // 刷新 AnimeGarden 列表以更新"已订阅"标记
-    list()
-    window.$reLoadList()
-  } catch (e) {
-    ElMessage.error(e)
-  } finally {
-    batchAdditionDialogVisible.value = false
+    batchAdditionNum.value += item.length
   }
+
+  batchAdding.value = false
+
+  if (!batchCanceled.value) {
+    if (batchFailedCount.value) {
+      ElMessage.warning(`批量添加完成：成功 ${batchSuccessCount.value} 条，失败 ${batchFailedCount.value} 条`)
+    } else {
+      ElMessage.success(`批量添加完成：成功 ${batchSuccessCount.value} 条`)
+    }
+  }
+
+  // 刷新 AnimeGarden 列表以更新"已订阅"标记
+  list()
+  window.$reLoadList()
 }
 
 let copy = (v) => {
-  const input = document.createElement('input');
-  input.value = v;
-  document.body.appendChild(input);
-  input.select();
-  document.execCommand('copy');
-  document.body.removeChild(input);
-  ElMessage.success('已复制')
+  copyText(v)
 }
 
 </script>
@@ -440,5 +557,24 @@ let copy = (v) => {
   max-width: 500px;
   min-width: 200px;
   margin-bottom: 4px;
+}
+
+.batch-result {
+  margin-top: 10px;
+}
+
+.batch-failed-list {
+  margin: 4px 0 0 18px;
+  max-height: 160px;
+  overflow: auto;
+}
+
+.match-exists-alert,
+.ag-scope-alert {
+  margin-bottom: 10px;
+}
+
+.group-exists-alert {
+  margin: 4px 0 6px 0;
 }
 </style>

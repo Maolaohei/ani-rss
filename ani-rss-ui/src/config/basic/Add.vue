@@ -56,10 +56,24 @@
       </el-select>
     </el-form-item>
     <el-form-item label="开启全局排除">
-      <el-switch v-model:model-value="props.config.enabledExclude" :disabled="props.config.importExclude"/>
+      <div class="full-width">
+        <el-switch v-model:model-value="props.config.enabledExclude" :disabled="props.config.importExclude"/>
+        <el-text class="mx-1" size="small" type="info">
+          订阅始终跟随「全局排除」页的最新规则
+        </el-text>
+      </div>
     </el-form-item>
     <el-form-item label="导入全局排除">
-      <el-switch v-model:model-value="props.config.importExclude" :disabled="props.config.enabledExclude"/>
+      <div class="full-width">
+        <el-switch v-model:model-value="props.config.importExclude" :disabled="props.config.enabledExclude"/>
+        <el-text class="mx-1" size="small" type="info">
+          只在新建订阅时把当时的全局规则复制进订阅，之后与全局规则各自独立
+        </el-text>
+        <br>
+        <el-text class="mx-1" size="small" type="warning">
+          这两项互斥：开启其中一个，另一个会自动变灰（不是坏了）
+        </el-text>
+      </div>
     </el-form-item>
     <el-form-item label="封面质量">
       <el-select v-model="props.config['bgmImage']" class="width-150">
@@ -88,8 +102,9 @@
         <div>
           <el-switch v-model="props.config['replace']"/>
         </div>
-        <el-text size="small">
-          重名的订阅将允许被替换
+        <el-text size="small" class="mx-1">
+          开启后，添加与现有订阅同标题同季的订阅时会<b>先删除旧订阅</b>再新建：
+          旧的匹配/排除规则、集数进度都会丢失。关闭时重复添加会直接报「订阅标题重复」。
         </el-text>
       </div>
     </el-form-item>
