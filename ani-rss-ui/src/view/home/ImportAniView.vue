@@ -64,6 +64,14 @@
               </div>
             </el-radio>
           </el-radio-group>
+          <el-alert
+              v-if="data.conflict === 'REPLACE'"
+              class="conflict-alert"
+              type="warning"
+              show-icon
+              :closable="false"
+              :title="conflictAlertText"
+          />
         </div>
       </div>
 
@@ -92,10 +100,10 @@
   </el-dialog>
 </template>
 <script setup>
-import {getCurrentInstance, ref} from "vue";
+import {computed, getCurrentInstance, ref} from "vue";
 import {Document, Setting, Upload} from "@element-plus/icons-vue";
 import {ElMessage} from "element-plus";
-import {importAni} from "@/js/http.js";
+import {importAni, listAni} from "@/js/http.js";
 import UploadView from "@/view/custom/UploadView.vue";
 
 let importDataLoading = ref(false);
@@ -128,9 +136,49 @@ let uploadCallback = (res, file) => {
   if (code === 200) {
     data.value.filename = file.name
     data.value.aniList = JSON.parse(res.data)
+    countConflicts()
     return
   }
   ElMessage.error(message)
+}
+
+/**
+ * 与现有订阅同名同季的条数（用于 REPLACE 风险提示与结果核对）
+ */
+let replaceCount = ref(0)
+
+const conflictAlertText = computed(() => {
+  if (!replaceCount.value) {
+    return '未检测到与现有订阅同名的数据（导入后会新增）'
+  }
+  return `将覆盖 ${replaceCount.value} 条同名订阅（匹配、排除规则与下载进度会随之丢失）`
+})
+
+let countConflicts = () => {
+  replaceCount.value = 0
+  if (!data.value.aniList.length) {
+    return
+  }
+  listAni()
+      .then(res => {
+        let existing = new Set()
+        let weekList = res?.data?.weekList || []
+        for (let week of weekList) {
+          for (let item of (week.items || [])) {
+            existing.add(`${(item.title || '').trim()}#${item.season ?? 1}`)
+          }
+        }
+        let count = 0
+        for (let item of data.value.aniList) {
+          if (existing.has(`${(item.title || '').trim()}#${item.season ?? 1}`)) {
+            count++
+          }
+        }
+        replaceCount.value = count
+      })
+      .catch(() => {
+        replaceCount.value = 0
+      })
 }
 
 let show = () => {
