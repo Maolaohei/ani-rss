@@ -17,6 +17,14 @@
       </template>
     </el-input-number>
   </SettingsItem>
+  <SettingsItem label="RSS重试">
+    <el-input-number v-model:model-value="props.config['rssRetry']"
+                     :max="10" :min="1">
+      <template #suffix>
+        <span>次</span>
+      </template>
+    </el-input-number>
+  </SettingsItem>
   <SettingsItem label="自动跳过">
     <div class="full-width">
       <el-switch v-model:model-value="props.config.fileExist" :disabled="!config.rename"/>

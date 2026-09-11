@@ -1,5 +1,6 @@
 import {useColorMode, useDark, useDebounceFn, useEventListener, useLocalStorage} from "@vueuse/core";
 import {ref} from "vue";
+import {ElMessage} from "element-plus";
 
 /**
  * 保存登录信息
@@ -196,6 +197,52 @@ const toApiFile = filename => {
     })
 }
 
+/**
+ * 复制文本到剪贴板
+ *
+ * 优先使用异步 Clipboard API（iOS Safari 与非安全上下文下 execCommand 会静默失败，
+ * 而此前各调用点无论成功与否都提示"已复制"）。
+ */
+const copyText = async (text) => {
+    const value = String(text ?? '')
+    if (!value) {
+        ElMessage.warning('没有可复制的内容')
+        return false
+    }
+
+    try {
+        if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(value)
+            ElMessage.success('已复制')
+            return true
+        }
+    } catch (e) {
+        // 继续走兜底方案
+    }
+
+    try {
+        const input = document.createElement('textarea')
+        input.value = value
+        input.setAttribute('readonly', 'readonly')
+        input.style.position = 'fixed'
+        input.style.top = '-1000px'
+        input.style.opacity = '0'
+        document.body.appendChild(input)
+        input.select()
+        input.setSelectionRange(0, value.length)
+        const ok = document.execCommand('copy')
+        document.body.removeChild(input)
+        if (!ok) {
+            throw new Error('execCommand copy returned false')
+        }
+        ElMessage.success('已复制')
+        return true
+    } catch (e) {
+        ElMessage.error('复制失败，请手动选择文本复制')
+        return false
+    }
+}
+
 export {
     rememberThePassword,
     authorization,
@@ -209,6 +256,7 @@ export {
     showLastDownloadTime,
     color,
     colorChange,
+    copyText,
     isNotMobile,
     elIconClass,
     init,

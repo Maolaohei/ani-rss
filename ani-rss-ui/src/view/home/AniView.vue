@@ -55,6 +55,7 @@
             <el-form-item label="BgmUrl">
               <el-input v-model.trim="props.ani.bgmUrl" placeholder="https://xxx.xxx"/>
             </el-form-item>
+            <SwitchMasterView ref="switchMasterRef" :ani="props.ani"/>
             <el-form-item label="主 RSS">
               <div class="full-width">
                 <div class="flex full-width">
@@ -63,6 +64,7 @@
                   <el-input v-model:model-value="props.ani.url" placeholder="https://xxx.xxx"/>
                 </div>
                 <div style="justify-content: end;" class="flex full-width margin-top-4">
+                  <el-button bg text icon="Switch" @click="switchMasterRef?.show">切换</el-button>
                   <el-button bg text
                              @click="mikanRef?.show(props.ani)">
                     <template #icon>
@@ -121,8 +123,19 @@
             <el-form-item label="全局排除">
               <el-switch v-model:model-value="props.ani['globalExclude']"/>
             </el-form-item>
-            <el-form-item label="剧场版">
-              <el-switch v-model:model-value="props.ani.ova"/>
+            <el-form-item label="类型">
+              <el-radio-group v-model:model-value="aniType">
+                <el-radio :value="0">普通番剧</el-radio>
+                <el-radio :value="1">剧场版(电影)</el-radio>
+                <el-radio :value="2">OVA(特典)</el-radio>
+              </el-radio-group>
+            </el-form-item>
+            <el-form-item label="新版命名">
+              <el-switch v-model:model-value="props.ani['namingVersion']"
+                         :active-value="2" :inactive-value="1"/>
+              <el-text size="small" type="info" style="margin-left: 8px;">
+                范围展开/OVA集数/宽松正则
+              </el-text>
             </el-form-item>
             <el-form-item label="启用">
               <el-switch v-model:model-value="props.ani.enable"/>
@@ -159,7 +172,7 @@
                 <div>
                   <el-input type="textarea" class="full-width" :disabled="!props.ani.customDownloadPath"
                             :autosize="{ minRows: 2}"
-                            v-model:model-value="props.ani.customDownloadPathTemplate"/>
+                            v-model:model-value="props.ani.downloadPath"/>
                 </div>
                 <div style="display: flex;justify-content: space-between;margin-top: 6px;">
                   <el-button :disabled="!props.ani.customDownloadPath" :loading="downloadPathLoading" bg icon="Refresh"
@@ -302,9 +315,10 @@
 import ExcludeView from "@/view/config/ExcludeView.vue";
 import PrioKeysView from "@/view/config/PrioKeysView.vue";
 import PreviewView from "./PreviewView.vue";
-import {onMounted, ref} from "vue";
+import {computed, onMounted, ref} from "vue";
 import {ElMessage, ElMessageBox, ElText} from "element-plus";
 import StandbyRssView from "./StandbyRssView.vue";
+import SwitchMasterView from "./SwitchMasterView.vue";
 import MikanView from "./MikanView.vue";
 import TmdbGroupView from "./TmdbGroupView.vue";
 import CustomTagsView from "@/view/config/CustomTagsView.vue";
@@ -321,6 +335,7 @@ const aniBTRef = ref()
 const mikanRef = ref()
 const animeGardenRef = ref()
 const tmdbGroupRef = ref()
+const switchMasterRef = ref()
 const standbyRssRef = ref()
 
 let previewRef = ref()
@@ -393,7 +408,7 @@ let downloadPath = () => {
   newAni.customDownloadPath = false
   http.downloadPath(newAni)
       .then(res => {
-        props.ani.customDownloadPathTemplate = res.data.downloadPath
+        props.ani.downloadPath = res.data.downloadPath
       })
       .finally(() => {
         downloadPathLoading.value = false
@@ -444,6 +459,17 @@ let aniBTShow = () => {
 }
 
 let props = defineProps(['ani'])
+
+// 媒体类型: 普通番剧(0) / 剧场版电影(1) / OVA特典(2)
+let aniType = computed({
+  get: () => props.ani.ova
+      ? (props.ani.mediaType === 'ova' ? 2 : 1)
+      : 0,
+  set: v => {
+    props.ani.ova = v > 0
+    props.ani.mediaType = v === 1 ? 'movie' : (v === 2 ? 'ova' : '')
+  }
+})
 const emit = defineEmits(['callback'])
 </script>
 

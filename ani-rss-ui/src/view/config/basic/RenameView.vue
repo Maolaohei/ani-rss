@@ -12,7 +12,13 @@
     </el-input-number>
   </SettingsItem>
   <SettingsItem label="最大文件名长度">
-    <el-input-number v-model:model-value="props.config.maxFileNameLength" :min="0"/>
+    <div>
+      <el-input-number v-model:model-value="props.config.maxFileNameLength" :min="0"/>
+      <br>
+      <el-text class="mx-1" size="small">
+        超出该长度的文件名会被截断；填 0 表示不限制
+      </el-text>
+    </div>
   </SettingsItem>
   <SettingsItem label="重命名模版">
     <div class="full-width">
@@ -29,9 +35,17 @@
             :closable="false"
         >
           <template #title>
-            模板内至少需要保留 S${seasonFormat}E${episodeFormat} or S${season}E${episode} 否则会导致无法正常重命名
+            模板内至少需要保留 S${seasonFormat}E${episodeFormat} 或 S${season}E${episode}，否则会导致无法正常重命名
           </template>
         </el-alert>
+        <el-alert
+            v-if="unknownTemplateVars.length"
+            class="mt-8"
+            type="warning"
+            show-icon
+            :closable="false"
+            :title="`存在无法识别的变量：${unknownTemplateVars.map(it => '${' + it + '}').join('、')}，会被原样写进文件名（可用变量：${RENAME_TEMPLATE_VARS.join('、')}）`"
+        />
       </div>
       <el-text class="mx-1" size="small">
         <el-link
@@ -40,6 +54,28 @@
             href="https://docs.wushuo.top/config/basic/rename#rename-template"
             target="_blank">详细说明
         </el-link>
+      </el-text>
+      <RenameTemplateToolsView
+          v-model="props.config.renameTemplate"
+          :preset="EMBY_PRESET"
+          preset-name="官方EMBY标准格式"/>
+    </div>
+  </SettingsItem>
+  <SettingsItem label="剧场版重命名模版(电影式)">
+    <div class="full-width">
+      <div>
+        <el-input v-model:model-value="props.config.ovaRenameTemplate"
+                  placeholder="${title} (${year}) [${subgroup}]"/>
+      </div>
+      <RenameTemplateToolsView
+          v-model="props.config.ovaRenameTemplate"
+          :preset="OVA_PRESET"
+          preset-name="电影格式（内置默认）"/>
+      <el-text class="mx-1" size="small">
+        仅对剧场版生效（媒体类型选"剧场版"），不包含 S/E 占位符，便于 Emby/Jellyfin 识别为电影。
+        多部（上/中/下、Part N）会自动追加 Part N，可用 ${part} 占位符自定义位置。
+        留空使用内置默认 ${title} (${year}) [${subgroup}]。OVA 特典不受此模板影响。
+        注意：开启上方"剔除年份"会把 ${year} 生成的年份一并移除。
       </el-text>
     </div>
   </SettingsItem>
@@ -76,7 +112,23 @@
 
 <script setup>
 import SettingsItem from "@/view/custom/SettingsItem.vue";
+import RenameTemplateToolsView from "@/view/config/basic/RenameTemplateToolsView.vue";
+import {computed} from "vue";
 import {ElText} from "element-plus";
+
+/** 可用模板变量（与后端 RenameUtil 支持的占位符保持一致） */
+const RENAME_TEMPLATE_VARS = [
+  'title', 'themoviedbName', 'subgroup', 'jpTitle', 'episodeTitle',
+  'season', 'seasonFormat', 'episode', 'episodeFormat',
+  'year', 'resolution', 'tmdbid', 'part'
+]
+
+const RENAME_TEMPLATE_VAR_SET = new Set(RENAME_TEMPLATE_VARS)
+
+/** 官方 Emby 标准格式预设（点击覆盖整个模板） */
+const EMBY_PRESET = '${title} (${year}) - S${seasonFormat}E${episodeFormat} - ${episodeTitle} ${resolution}'
+/** 剧场版内置默认预设 */
+const OVA_PRESET = '${title} (${year}) [${subgroup}]'
 
 let testRenameTemplate = renameTemplate => {
   let test = [
@@ -90,6 +142,19 @@ let testRenameTemplate = renameTemplate => {
   }
   return false;
 }
+
+const unknownTemplateVars = computed(() => {
+  const value = props?.config?.renameTemplate || ''
+  const unknown = []
+  const re = /\$\{([^}]*)\}/g
+  let match
+  while ((match = re.exec(value)) !== null) {
+    if (!RENAME_TEMPLATE_VAR_SET.has(match[1])) {
+      unknown.push(match[1])
+    }
+  }
+  return unknown
+})
 
 let props = defineProps(['config'])
 </script>

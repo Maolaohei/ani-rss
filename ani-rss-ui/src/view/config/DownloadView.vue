@@ -72,7 +72,7 @@
         </SettingsItem>
         <SettingsItem label="重试次数">
           <div>
-            <el-input-number v-model="props.config['openListDownloadRetryNumber']" :min="-1"/>
+            <el-input-number v-model="props.config['alistDownloadRetryNumber']" :min="-1"/>
             <br>
             <el-text class="mx-1" size="small">
               设置为 -1 将一直进行重试
@@ -80,11 +80,19 @@
           </div>
         </SettingsItem>
         <SettingsItem label="离线超时">
-          <el-input-number v-model:model-value="props.config['openListDownloadTimeout']" :min="1">
+          <el-input-number v-model:model-value="props.config['alistDownloadTimeout']" :min="1">
             <template #suffix>
               <span>分钟</span>
             </template>
           </el-input-number>
+        </SettingsItem>
+        <SettingsItem label="115 云下载路径">
+          <div class="full-width">
+            <el-input v-model:model-value="props.config['alistCloudDownloadDir']" placeholder="/云下载（留空自动发现）"/>
+            <el-text class="mx-1" size="small">
+              115 离线完成后的文件可能落在根目录「云下载」而非目标路径，填此路径兜底扫描并自动移动/重命名；留空自动发现
+            </el-text>
+          </div>
         </SettingsItem>
       </template>
       <template v-else>
@@ -196,6 +204,19 @@
             <span>分钟</span>
           </template>
         </el-input-number>
+      </SettingsItem>
+      <SettingsItem label="新种子下载等待">
+        <div>
+          <el-input-number v-model:model-value="props.config['newTorrentWaitHours']" :min="0">
+            <template #suffix>
+              <span>小时</span>
+            </template>
+          </el-input-number>
+          <br/>
+          <el-text class="mx-1" size="small">
+            发布时间距今不足该值的种子暂缓下载：新种子云端常无人做种，立即提交只会离线超时失败并反复重提；0 为关闭
+          </el-text>
+        </div>
       </SettingsItem>
       <SettingsItem label="优先保留">
         <div class="full-width">

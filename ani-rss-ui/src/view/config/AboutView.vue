@@ -5,12 +5,20 @@
       <div>
         <h1>ANI-RSS</h1>
         <el-tooltip
-            :content="`${props.config.gitInfo.branch} ${props.config.gitInfo.shortCommitId}`"
+            :disabled="!props.config.buildInfo"
+            :content="props.config.buildInfo"
             placement="right">
-          <el-text class="mx-1 cursor-pointer" size="small">
+          <el-text class="mx-1 cursor-pointer" size="small" @click="copyVersion">
             &nbsp;v{{ props.config.version }}
+            <el-icon>
+              <DocumentCopy/>
+            </el-icon>
           </el-text>
         </el-tooltip>
+        <br>
+        <el-text v-if="props.config.buildInfo" size="small" type="info" class="build-info">
+          构建信息：{{ props.config.buildInfo }}
+        </el-text>
       </div>
     </div>
     <div class="flex about-buttons">
@@ -30,13 +38,14 @@
         </template>
       </PopconfirmView>
       <div class="about-action-spacer"></div>
-      <PopconfirmView title="你确定重启吗?" @confirm="stop(0)">
+      <PopconfirmView title="重启会中断正在进行的 RSS 扫描/下载；若非 Docker 或进程守护方式运行，需要你手动把程序拉起来。确定重启？"
+                      @confirm="stop(0)">
         <template #reference>
           <el-button bg icon="RefreshRight" text type="warning">重启</el-button>
         </template>
       </PopconfirmView>
       <div class="about-action-spacer"></div>
-      <PopconfirmView title="你确定关闭吗?" @confirm="stop(1)">
+      <PopconfirmView title="关闭会立即停止所有任务，且不会自动拉起，需要你手动启动。确定关闭？" @confirm="stop(1)">
         <template #reference>
           <el-button bg icon="SwitchButton" text type="danger">关闭</el-button>
         </template>
@@ -47,6 +56,14 @@
           更新
         </el-button>
       </el-badge>
+      <div class="about-action-spacer"></div>
+      <PopconfirmView title="将从 Fork 仓库强制拉取最新版本并重启，确认更新？" @confirm="forkUpdateAction">
+        <template #reference>
+          <el-button bg icon="Upload" text type="primary">
+            Fork更新
+          </el-button>
+        </template>
+      </PopconfirmView>
     </div>
   </div>
   <el-dialog v-if="dialogVisible" v-model="dialogVisible" align-center center title="版本更新"
@@ -103,6 +120,7 @@
 import SettingsItem from "@/view/custom/SettingsItem.vue";
 import {onMounted, ref} from "vue";
 import {ElMessage, ElText} from "element-plus";
+import {DocumentCopy} from "@element-plus/icons-vue";
 import PopconfirmView from "@/view/custom/PopconfirmView.vue";
 import {Book, Github, Telegram} from "@vicons/fa";
 
@@ -112,7 +130,7 @@ import 'markdown-it-github-alerts/styles/github-colors-light.css'
 import 'markdown-it-github-alerts/styles/github-colors-dark-media.css'
 import 'markdown-it-github-alerts/styles/github-base.css'
 
-import {authorization} from "@/js/global.js";
+import {authorization, copyText} from "@/js/global.js";
 import * as http from "@/js/http.js";
 
 let md = markdownit({
@@ -130,15 +148,27 @@ md.use(MarkdownItGitHubAlerts)
 
 const actionLoading = ref(false)
 
+/**
+ * 重启/关闭：后端在 Windows exe 场景会返回 error（不支持重启），
+ * 此前无论成败都先弹 success，之后再执行，属于"成功→失败反转"。
+ * 这里先校验返回码，只有真正受理才提示并等待重连。
+ */
 const stop = (status) => {
   actionLoading.value = true
   http.stop(status)
       .then(res => {
-        ElMessage.success(res.message)
+        if (res.code !== 200) {
+          ElMessage.error(res.message || '操作失败')
+          return
+        }
+        ElMessage.success(res.message || '已受理，服务正在重启')
         setTimeout(() => {
           authorization.value = ''
           location.reload()
         }, 5000)
+      })
+      .catch(e => {
+        ElMessage.error(e?.message || '操作失败')
       })
       .finally(() => {
         actionLoading.value = false
@@ -186,6 +216,48 @@ onMounted(() => {
         about.value = res.data
       })
 })
+
+const forkUpdateAction = async () => {
+  let sleep = ms => {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  actionLoading.value = true
+  http.doForkUpdate()
+      .then(async res => {
+        ElMessage.success(res.message)
+        for (let i = 0; i < 24; i++) {
+          await sleep(5000)
+          try {
+            let pingRes = await http.ping()
+            if (pingRes.code === 200) {
+              authorization.value = ''
+              location.reload()
+              return
+            }
+          } catch (e) {
+          }
+        }
+        ElMessage.error("重启时遇到错误")
+      })
+      .catch(e => {
+        ElMessage.error(e?.message || '操作失败')
+      })
+      .finally(() => {
+        actionLoading.value = false
+      })
+}
+
+/**
+ * 版本号此前是 cursor-pointer 但没有点击行为，用户会下意识去点
+ */
+let copyVersion = async () => {
+  const info = [props.config.version, props.config.buildInfo].filter(Boolean).join(' / ')
+  if (!info) {
+    return
+  }
+  await copyText(info)
+}
 
 let logout = () => {
   authorization.value = ''

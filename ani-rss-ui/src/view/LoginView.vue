@@ -29,6 +29,14 @@
               </template>
             </el-input>
           </el-form-item>
+          <!-- 登录失败原因常驻展示：不依赖会消失的 toast，避免「表单闪一下」后无从得知原因 -->
+          <el-alert
+              v-if="errorMessage"
+              class="login-error"
+              :title="errorMessage"
+              :type="errorType"
+              :closable="false"
+              show-icon/>
           <div class="flex-center action">
             <el-checkbox v-model:model-value="rememberThePassword.remember">记住密码</el-checkbox>
             <el-button @click="login" :loading="loading" text bg icon="Right">登录</el-button>
@@ -58,6 +66,7 @@ import * as http from "@/js/http.js";
 import {Key} from "@element-plus/icons-vue";
 import {ElMessage} from "element-plus";
 import {authorization, rememberThePassword} from "@/js/global.js";
+import {LOGIN_RATE_LIMITED_CODE} from "@/js/api.js";
 
 let loading = ref(false)
 
@@ -65,6 +74,10 @@ let user = ref({
   username: '',
   password: ''
 })
+
+/** 常驻错误提示（密码错误 / 限流 / 网络异常） */
+let errorMessage = ref('')
+let errorType = ref('error')
 
 /**
  * 登录
@@ -77,9 +90,10 @@ let login = () => {
     return
   }
 
+  errorMessage.value = ''
   loading.value = true
 
-  http.login(user.value)
+  http.loginInteractive(user.value)
       .then(res => {
         // 记住密码
         if (rememberThePassword.value.remember) {
@@ -91,6 +105,15 @@ let login = () => {
         }
 
         authorization.value = res.data
+      })
+      .catch(err => {
+        if (err?.code === LOGIN_RATE_LIMITED_CODE) {
+          errorType.value = 'error'
+          errorMessage.value = '登录失败次数过多，已限制登录 1 天。请稍后再试，或到服务器上直接修改配置中的账号密码'
+          return
+        }
+        errorType.value = 'error'
+        errorMessage.value = err?.message || '登录失败，请检查账号密码'
       })
       .finally(() => {
         loading.value = false
@@ -149,6 +172,11 @@ el-input {
 .action {
   width: 100%;
   justify-content: space-between;
+}
+
+.login-error {
+  margin: 4px 0 8px;
+  width: 240px;
 }
 
 .footer {

@@ -3,6 +3,7 @@
     <AddView ref="addRef"/>
     <CollectionView ref="collectionRef"/>
     <ManageView ref="manageRef"/>
+    <TaskManagerView ref="taskManagerRef"/>
     <PageHeaderView title="订阅" :subtitle="`共 ${subscriptionTotal} 个订阅`"/>
     <div class="subscription-body app-page-content app-page-padding">
       <div class="subscription-toolbar">
@@ -65,6 +66,12 @@
               </el-button>
             </template>
           </PopconfirmView>
+          <el-button aria-label="任务管理器" title="任务管理器" @click="taskManagerRef?.show" bg text>
+            <el-icon class="subscription-action-icon">
+              <List/>
+            </el-icon>
+            <span class="subscription-action-label">任务</span>
+          </el-button>
           <el-button aria-label="管理" @click="manageRef?.show" bg text>
             <el-icon class="subscription-action-icon">
               <Fold/>
@@ -87,11 +94,12 @@
 import {onMounted, ref} from "vue";
 import {ElMessage} from "element-plus";
 import {useLocalStorage} from "@vueuse/core";
-import {Fold, Plus, Refresh} from "@element-plus/icons-vue";
+import {Fold, List, Plus, Refresh} from "@element-plus/icons-vue";
 import SubscriptionListView from "@/view/home/SubscriptionListView.vue";
 import AddView from "@/view/home/AddView.vue";
 import CollectionView from "@/view/home/CollectionView.vue";
 import ManageView from "@/view/home/ManageView.vue";
+import TaskManagerView from "@/view/home/TaskManagerView.vue";
 import PopconfirmView from "@/view/custom/PopconfirmView.vue";
 import PageHeaderView from "@/view/custom/PageHeaderView.vue";
 import {subscriptionViewMode} from "@/js/global.js";
@@ -101,6 +109,7 @@ const listRef = ref()
 const addRef = ref()
 const collectionRef = ref()
 const manageRef = ref()
+const taskManagerRef = ref()
 const title = ref('')
 const releaseDate = ref('')
 const releaseDateList = ref([])

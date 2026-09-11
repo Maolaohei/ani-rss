@@ -67,6 +67,20 @@
   <SettingsItem label="开机自启">
     <el-switch v-model="props.config['autoStart']"/>
   </SettingsItem>
+  <SettingsItem label="网络协议">
+    <div class="full-width">
+      <el-select v-model="props.config['networkPrefer']" style="width: 200px;">
+        <el-option label="系统默认" value=""/>
+        <el-option label="IPv4 优先" value="ipv4"/>
+        <el-option label="IPv6 优先" value="ipv6"/>
+      </el-select>
+      <div class="margin-top-4">
+        <el-text class="mx-1" size="small">
+          部分网络环境下 IPv6 解析/连接会拖慢 RSS 抓取与 TMDB 刮削，可在此强制优先 IPv4；修改后需手动重启程序生效
+        </el-text>
+      </div>
+    </div>
+  </SettingsItem>
 </template>
 
 <script setup>
