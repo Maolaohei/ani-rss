@@ -56,8 +56,16 @@ export let about = () => api.post('api/about')
  */
 export let update = () => api.post('api/update')
 
+/**
+ * Fork 关于信息（fork 自维护的更新通道）
+ * @returns {Promise<unknown>}
+ */
 export let forkAbout = () => api.post('api/forkUpdate')
 
+/**
+ * 执行 fork 更新
+ * @returns {Promise<unknown>}
+ */
 export let doForkUpdate = () => api.post('api/doForkUpdate')
 
 /**
@@ -157,6 +165,7 @@ export let rssJobTempDirResidualScan = () => api.post('api/rssJobTempDirResidual
  * @returns {Promise<unknown>}
  */
 export let rssJobTempDirResidualClean = () => api.post('api/rssJobTempDirResidualClean')
+
 export let rssJobRecheckDownloaded = () => api.post('api/rssJobRecheckDownloaded')
 
 /**
@@ -166,7 +175,6 @@ export let failedDownloadQueue = () => api.post('api/failedDownloadQueue')
 export let failedDownloadQueueRemove = (id) => api.post('api/failedDownloadQueueRemove', {id})
 export let failedDownloadQueueClear = () => api.post('api/failedDownloadQueueClear')
 export let failedDownloadQueueRetry = (id) => api.post('api/failedDownloadQueueRetry', {id})
-
 
 /**
  * 将RSS转换为订阅
@@ -181,6 +189,7 @@ export let rssToAni = (ani) => api.post('api/rssToAni', ani)
  * @returns {Promise<unknown>}
  */
 export let previewAni = (ani) => api.post('api/previewAni', ani)
+
 export let forceDownload = (ani, infoHashes) => api.post('api/forceDownload', {ani, infoHashes})
 
 /**

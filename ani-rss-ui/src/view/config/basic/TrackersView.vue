@@ -1,0 +1,51 @@
+<template>
+  <div>
+    <SettingsItem label="更新地址">
+      <div class="full-width">
+        <div>
+          <el-input v-model:model-value="props.config.trackersUpdateUrls" :autosize="{ minRows: 2}"
+                    placeholder="换行输入多个"
+                    class="full-width" type="textarea"/>
+        </div>
+        <div class="flex justify-space-between" style="margin-top: 8px">
+          <el-checkbox v-model:model-value="props.config.autoTrackersUpdate" label="每天1:00自动更新"/>
+          <el-button :loading="trackersUpdateLoading" bg icon="Refresh" @click="trackersUpdate">更新
+          </el-button>
+        </div>
+        <div>
+          <el-text class="mx-1" size="small">
+            该功能暂不支持 Transmission
+          </el-text>
+        </div>
+      </div>
+    </SettingsItem>
+  </div>
+</template>
+
+<script setup>
+import SettingsItem from "@/view/custom/SettingsItem.vue";
+import {ElMessage, ElText} from "element-plus";
+import {ref} from "vue";
+import * as http from "@/js/http.js";
+
+let trackersUpdateLoading = ref(false)
+
+let trackersUpdate = () => {
+  trackersUpdateLoading.value = true
+  http.trackersUpdate(props.config)
+      .then(res => {
+        ElMessage.success(res.message);
+      })
+      .finally(() => {
+        trackersUpdateLoading.value = false
+      })
+}
+
+let props = defineProps(['config'])
+</script>
+
+<style scoped>
+.justify-space-between {
+  justify-content: space-between;
+}
+</style>

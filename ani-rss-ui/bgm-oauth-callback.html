@@ -1,41 +1,20 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh">
 <head>
     <meta charset="UTF-8"/>
-    <title>ANI-RSS 授权结果</title>
-    <link rel="icon" href="./favicon.ico"/>
-    <link rel="manifest" href="./manifest.json"/>
-    <!-- 与主入口一致：允许用户缩放（原 maximum-scale/user-scalable=0 违反 WCAG 1.4.4），并适配刘海屏 -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <meta name="color-scheme" content="light dark">
-    <meta name="theme-color" id="themeColorMeta" content="#f5f5f7">
+    <title>ANI-RSS</title>
+    <link rel="icon" href="/favicon.ico"/>
+    <link rel="manifest" href="/manifest.json"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0">
+    <meta name="theme-color" id="themeColorMeta" content="#ffffff">
     <meta name="robots" content="noindex">
-    <script>
-        // 首屏防白闪：与 js/global.js 的 useDark 使用同一 localStorage key
-        (() => {
-            try {
-                const saved = localStorage.getItem('vueuse-color-scheme')
-                const preferDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
-                const isDark = saved === 'dark' || (saved !== 'light' && preferDark)
-                if (isDark) {
-                    document.documentElement.classList.add('dark')
-                    const meta = document.querySelector('meta[name="theme-color"]')
-                    if (meta) {
-                        meta.setAttribute('content', '#141416')
-                    }
-                }
-            } catch (e) {
-                // 静默跳过
-            }
-        })()
-    </script>
-    <style>
-        @import "./src/css/tokens.css";
-        @import "./src/style.css";
-    </style>
 </head>
 <body>
 <div id="app"></div>
-<script type="module" src="./src/bgm-oauth-callback/main.js"></script>
+<script type="module" src="/src/bgm-oauth-callback/main.js"></script>
 </body>
+<style>
+    @import "@/css/style.css";
+    @import "@/css/ext.css";
+</style>
 </html>

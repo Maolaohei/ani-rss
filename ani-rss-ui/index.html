@@ -3,29 +3,20 @@
 <head>
     <meta charset="UTF-8"/>
     <title>ANI-RSS</title>
-    <link rel="icon" href="./favicon.ico"/>
-    <link rel="manifest" href="./manifest.json"/>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <meta name="color-scheme" content="light dark">
-    <meta name="theme-color" id="themeColorMeta" content="#f5f5f7">
+    <link rel="icon" href="/favicon.ico"/>
+    <link rel="manifest" href="/manifest.json"/>
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0, viewport-fit=cover">
+    <meta name="theme-color" id="themeColorMeta" content="#ffffff">
     <meta name="robots" content="noindex">
     <meta name="description" content="基于RSS自动追番、订阅、下载、刮削、洗版"/>
-    <script>
-        // 路径规整：无尾斜杠时补上（保持原有行为）
-        (() => {
-            if (location.pathname.endsWith('/')) {
-                return;
-            }
-            location.pathname += '/'
-        })()
-    </script>
     <script>
         // 首屏防白闪：在样式加载前就把深色类与 theme-color 定下来。
         // 与 js/global.js 的 useDark 使用同一 localStorage key，避免状态不一致。
         (() => {
             try {
-                const dark = '#141416'
-                const light = '#f5f5f7'
+                const dark = '#000000'
+                const light = '#ffffff'
                 const saved = localStorage.getItem('vueuse-color-scheme')
                 const preferDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
                 const isDark = saved === 'dark' || (saved !== 'light' && preferDark)
@@ -41,17 +32,25 @@
             }
         })()
     </script>
-    <style>
-        @import "./src/css/tokens.css";
-        @import "./src/style.css";
-    </style>
-    <!--自定义CSS-->
-    <link rel="stylesheet" href="./api/custom.css"/>
 </head>
+<script>
+    (() => {
+        if (location.pathname.endsWith('/')) {
+            return;
+        }
+        location.pathname += '/'
+    })()
+</script>
 <body>
 <div id="app"></div>
-<script type="module" src="./src/main.js"></script>
-<!--自定义JS-->
-<script src="./api/custom.js"></script>
+<script type="module" src="/src/main.js"></script>
 </body>
+<style>
+    @import "@/css/style.css";
+    @import "@/css/ext.css";
+</style>
+<!--自定义CSS-->
+<link rel="stylesheet" href="/api/custom.css"/>
+<!--自定义JS-->
+<script src="/api/custom.js"></script>
 </html>

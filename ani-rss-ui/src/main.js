@@ -1,11 +1,12 @@
 import {createApp} from 'vue'
-import Main from './Main.vue'
+import MainView from '@/view/MainView.vue'
 import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import {ElMessage} from 'element-plus'
 import 'element-plus/dist/index.css'
 import 'element-plus/theme-chalk/dark/css-vars.css'
+import router from '@/router/index.js'
 
-const app = createApp(Main)
+const app = createApp(MainView)
 
 // 全局错误兜底：未捕获的渲染/生命周期异常此前只进浏览器控制台，
 // 用户侧表现为「点了没反应」或整块界面空白，没有任何提示。
@@ -36,4 +37,5 @@ const describeError = err => {
 for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
     app.component(key, component)
 }
+app.use(router)
 app.mount('#app')
