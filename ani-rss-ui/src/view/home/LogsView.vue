@@ -3,8 +3,8 @@
     <PageHeaderView title="日志" :subtitle="`共 ${logs.length} 条 · 显示 ${filteredLogs.length} 条`">
       <template #actions>
         <div class="log-actions">
-          <el-tooltip content="下载日志" placement="bottom">
-            <el-button @click="downloadLogs" bg text>
+          <el-tooltip content="下载完整日志（含历史文件）" placement="bottom">
+            <el-button @click="downloadLogs" :loading="downloadLoading" bg text>
               <el-icon>
                 <DownloadIcon/>
               </el-icon>
@@ -113,6 +113,7 @@
 
 <script setup>
 import {computed, nextTick, onActivated, ref} from "vue";
+import {ElMessage} from "element-plus";
 import {Delete, Download as DownloadIcon, Refresh, Search} from "@element-plus/icons-vue";
 import {authorization} from "@/js/global.js";
 import PopconfirmView from "@/view/custom/PopconfirmView.vue";
@@ -211,8 +212,38 @@ const clearLogs = () => {
       })
 }
 
-const downloadLogs = () => {
-  window.open(`api/downloadLogs?s=${authorization.value}`)
+/**
+ * 下载完整日志。
+ * 不用 window.open 把登录令牌拼在 URL 查询串里（会进浏览器历史与反代 access log），
+ * 改为带 Authorization 头的 fetch + Blob，且能感知失败。
+ */
+const downloadLoading = ref(false)
+
+const downloadLogs = async () => {
+  downloadLoading.value = true
+  try {
+    const res = await fetch('api/downloadLogs', {
+      method: 'GET',
+      headers: authorization.value ? {Authorization: authorization.value} : {}
+    })
+    if (!res.ok) {
+      ElMessage.error(`下载日志失败（HTTP ${res.status}）`)
+      return
+    }
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `ani-rss-logs-${new Date().toISOString().slice(0, 10)}.zip`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  } catch (e) {
+    ElMessage.error('下载日志失败，请稍后重试')
+  } finally {
+    downloadLoading.value = false
+  }
 }
 
 onActivated(getLogs)

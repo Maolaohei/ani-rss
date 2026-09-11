@@ -56,7 +56,7 @@
               </el-dropdown-menu>
             </template>
           </el-dropdown>
-          <PopconfirmView title="立即刷新全部订阅?" @confirm="refreshAni">
+          <PopconfirmView :title="refreshTitle" @confirm="refreshAni">
             <template #reference>
               <el-button aria-label="刷新" :loading="refreshLoading" bg text>
                 <el-icon class="subscription-action-icon">
@@ -91,9 +91,9 @@
 </template>
 
 <script setup>
-import {onMounted, ref} from "vue";
-import {ElMessage} from "element-plus";
-import {useLocalStorage} from "@vueuse/core";
+import {computed, onActivated, onDeactivated, onMounted, ref} from "vue";
+import {ElMessage, ElMessageBox} from "element-plus";
+import {useIntervalFn, useLocalStorage} from "@vueuse/core";
 import {Fold, List, Plus, Refresh} from "@element-plus/icons-vue";
 import SubscriptionListView from "@/view/home/SubscriptionListView.vue";
 import AddView from "@/view/home/AddView.vue";
@@ -160,7 +160,15 @@ const refreshAni = () => {
   refreshLoading.value = true
   http.refreshAll()
       .then(res => {
-        ElMessage.success(res.message)
+        // 忙碌时的"让路/排队"属中性结果，不再统一用绿色成功提示
+        const message = res.message
+        if (taskBusy.value || message.indexOf('排队') > -1) {
+          ElMessageBox.alert(message, '刷新已排队', {type: 'warning', confirmButtonText: '知道了'})
+              .catch(() => {
+              })
+        } else {
+          ElMessage.success(message)
+        }
         listRef.value?.getList()
       })
       .finally(() => {
@@ -168,9 +176,38 @@ const refreshAni = () => {
       })
 }
 
+/**
+ * RSS 任务状态：用于把「刷新」的后果说清楚（空闲=立即刷新；忙碌=会中断当前扫描）
+ */
+const taskBusy = ref(false)
+
+const refreshTaskState = () => {
+  http.rssJobStatus({silent: true})
+      .then(res => {
+        const data = res.data || {}
+        taskBusy.value = !!(data.running || data.pending || data.openListBusy || data.cancelRequested)
+      })
+      .catch(() => {
+        taskBusy.value = false
+      })
+}
+
+// 周期扫描可能在本页打开之后才开始，状态必须持续刷新，否则确认框会一直说"立即刷新"
+const {pause: pauseTaskPoll, resume: resumeTaskPoll} = useIntervalFn(refreshTaskState, 20000)
+
+const refreshTitle = computed(() => {
+  if (taskBusy.value) {
+    return '当前正在扫描，刷新会中断本轮扫描并抢先执行，是否继续？'
+  }
+  return '立即刷新全部订阅？'
+})
+
 onMounted(() => {
   selectChange()
+  refreshTaskState()
 })
+onActivated(resumeTaskPoll)
+onDeactivated(pauseTaskPoll)
 </script>
 
 <style scoped>
