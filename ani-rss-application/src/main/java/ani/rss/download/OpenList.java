@@ -220,6 +220,61 @@ public class OpenList implements BaseDownload, OfflineDownloader {
 
     @Override
     public Boolean download(Ani ani, Item item, String savePath, File torrentFile) {
+        return downloadInternal(ani, item, savePath, torrentFile, null);
+    }
+
+    /**
+     * 添加合集（手动上传种子文件）的离线下载入口：
+     * 复用订阅离线全链路（提交/等待/10008/卡住重提/超时/任务管理器进度），
+     * 收尾按「预览计划」归位 —— 仅预览匹配的文件重命名后移动到下载目录顶层,
+     * 未匹配文件(特典/排除项)随临时目录强制清理, 效果与 qBittorrent 的 filePrio=0 一致。
+     *
+     * @param ani         合集弹窗的订阅信息
+     * @param plan        预览结果(title=种子内路径, reName=最终命名, length=文件大小, episode=解析集数)
+     * @param savePath    下载位置
+     * @param torrentFile 种子文件
+     * @param torrentName 种子根目录名(TorrentFile.getName(), 作为网盘临时目录名)
+     * @return 提交即受理, true=已提交(等待在后台进行)
+     */
+    public Boolean downloadCollection(Ani ani, List<Item> plan, String savePath, File torrentFile, String torrentName) {
+        Assert.notEmpty(plan, "合集预览结果为空");
+        Assert.notNull(ani, "合集信息为空");
+        // message 为 null 时 NotificationUtil.send 会 unboxing NPE: 未显式关闭则默认开启
+        ani.setMessage(!Boolean.FALSE.equals(ani.getMessage()));
+        Item item = buildCollectionItem(plan, torrentName);
+        return downloadInternal(ani, item, savePath, torrentFile, plan);
+    }
+
+    /**
+     * 由预览计划构造离线下载用合成 Item:
+     * title=种子根目录名(isCollection 分支用它做临时目录名),
+     * reName=模板基名(预览首个文件的 reName 主名, 含 SxxExx, 供季数解析/日志/通知),
+     * episodeRange=预览集数集(驱动等待期就绪判定与缺集校验)。
+     */
+    private Item buildCollectionItem(List<Item> plan, String torrentName) {
+        List<Double> episodes = plan.stream()
+                .map(Item::getEpisode)
+                .filter(Objects::nonNull)
+                .distinct()
+                .sorted()
+                .toList();
+        // 基名取第一个「正片」文件的 reName 主名(含 SxxExx):
+        // 计划首项可能是字幕/其他文件(如 xxx.S01E01.JPSC.ass), 用它会把字幕语言段带进基名
+        String firstReName = plan.stream()
+                .filter(p -> FileUtils.isVideoFormat(FileUtil.extName(p.getTitle())))
+                .map(Item::getReName)
+                .filter(StrUtil::isNotBlank)
+                .findFirst()
+                .orElseGet(() -> plan.get(0).getReName());
+        String base = StrUtil.isNotBlank(firstReName) ? FileUtil.mainName(firstReName) : "";
+        return new Item()
+                .setTitle(StrUtil.blankToDefault(torrentName, base))
+                .setReName(base)
+                .setEpisodeRange(episodes)
+                .setEpisode(episodes.isEmpty() ? null : episodes.get(0));
+    }
+
+    private Boolean downloadInternal(Ani ani, Item item, String savePath, File torrentFile, List<Item> collectionPlan) {
         savePath = ReUtil.replaceAll(savePath, "^[A-z]:", "");
 
         String magnet = TorrentUtil.getMagnet(torrentFile);
@@ -239,6 +294,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         // 不回收锁对象：避免等待线程与新线程拿到不同 lock 导致同 hash 并行
         synchronized (lock) {
             OfflineDownloadContext ctx = submitOffline(ani, item, savePath, magnet, hashKey);
+            ctx.collectionPlan = collectionPlan;
             if (ctx.shortCircuit) {
                 return ctx.shortCircuitResult;
             }
@@ -354,6 +410,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         long deadlineMs;
         /** 原始磁力链接：卡住任务删除后重新提交使用 */
         final String magnet;
+        /** 合集预览计划(添加合集入口非空): 收尾按计划归位而非按单集/合集模板重命名 */
+        List<Item> collectionPlan;
 
         String tid;            // 可变：10008 时切换/清空
         long retry;
@@ -1079,8 +1137,17 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         Set<String> cloudSourceDirs = new HashSet<>(scan.cloudSourceDirs());
 
         Boolean rename = config.getRename();
-        Map<String, String> renameMap = buildEpisodeRenameMap(
-                videoList, subtitleList, ctx.finalRenameBase, ctx.isCollection, ani.getSeason());
+        Map<String, String> renameMap = ctx.collectionPlan != null
+                ? buildCollectionPlanRenameMap(ctx.collectionPlan, scan, ctx.finalRenameBase)
+                : buildEpisodeRenameMap(
+                        videoList, subtitleList, ctx.finalRenameBase, ctx.isCollection, ani.getSeason());
+        if (renameMap.isEmpty()) {
+            // 无任何可归位文件: 判失败并保留临时目录, 避免"空归位→清临时目录→误报完成"把产物一并清掉
+            log.error("归位失败: 未匹配到任何可移动文件, 保留临时目录 {} tempDir={} videos={} plan={}",
+                    reName, ctx.tempDirName, videoList.size(),
+                    ctx.collectionPlan == null ? -1 : ctx.collectionPlan.size());
+            return false;
+        }
 
         // renameMap 目标名冲突检测
         Set<String> targetNames = new HashSet<>();
@@ -1116,6 +1183,10 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                             .filter(f -> f.getName().equals(srcName)).findFirst();
                     if (fi.isPresent() && fi.get().getPath().equals(dirPath)) {
                         String newName = renameMap.get(srcName);
+                        if (newName.equals(srcName)) {
+                            // 同名重命名是 no-op: 部分实现对 src==new 会报错, 直接跳过
+                            continue;
+                        }
                         log.info("重命名 {} ==> {}", srcName, newName);
                         renameObjects.add(Map.of("src_name", srcName, "new_name", newName));
                     }
@@ -1196,9 +1267,10 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             }
         }
 
-        NotificationUtil.send(config, ani,
-                StrFormatter.format("{} 下载完成", item.getReName()),
-                NotificationStatusEnum.DOWNLOAD_END);
+        String message = ctx.collectionPlan != null
+                ? StrFormatter.format("{} 合集下载完成, 共归位 {} 个文件", item.getReName(), renameMap.size())
+                : StrFormatter.format("{} 下载完成", item.getReName());
+        NotificationUtil.send(config, ani, message, NotificationStatusEnum.DOWNLOAD_END);
         return true;
     }
 
@@ -1425,6 +1497,58 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             }
             renameMap.put(name, newName + "." + ext);
             log.info("未匹配字幕文件: {} -> {}", name, newName + "." + ext);
+        }
+        return renameMap;
+    }
+
+    /**
+     * 添加合集: 按「预览计划」构建重命名映射。
+     * 以文件主名(basename, 忽略大小写)匹配离线产物, 同名多候选时用文件大小甄别;
+     * 目标名取预览的 reName(已含扩展名/字幕语言后缀)。
+     * 未命中的文件不进入映射(随临时目录强制清理); 目标名冲突时保留原始名, 避免互相覆盖。
+     */
+    private Map<String, String> buildCollectionPlanRenameMap(List<Item> plan, EpisodeScanResult scan,
+                                                             String reName) {
+        Map<String, List<Item>> planByBase = new HashMap<>();
+        for (Item planItem : plan) {
+            String name = FileUtil.getName(planItem.getTitle());
+            if (StrUtil.isBlank(name)) {
+                continue;
+            }
+            planByBase.computeIfAbsent(name.toLowerCase(Locale.ROOT), k -> new ArrayList<>()).add(planItem);
+        }
+        Map<String, String> renameMap = new LinkedHashMap<>();
+        List<OpenListFileInfo> files = scan.openListFileInfos();
+        for (OpenListFileInfo file : files) {
+            if (Boolean.TRUE.equals(file.getIsDir())) {
+                continue;
+            }
+            String fileName = file.getName();
+            List<Item> candidates = planByBase.get(StrUtil.nullToEmpty(fileName).toLowerCase(Locale.ROOT));
+            if (candidates == null || candidates.isEmpty()) {
+                log.debug("合集离线产物不在预览计划中, 将随临时目录清理: {}", fileName);
+                continue;
+            }
+            Item matched = candidates.stream()
+                    .filter(p -> p.getLength() == null
+                            || file.getSize() == null
+                            || p.getLength().longValue() == file.getSize())
+                    .findFirst()
+                    .orElse(candidates.get(0));
+            String target = matched.getReName();
+            if (StrUtil.isBlank(target)) {
+                continue;
+            }
+            if (!renameMap.containsValue(target)) {
+                renameMap.put(fileName, target);
+                log.info("合集归位 {} ==> {}", fileName, target);
+            } else {
+                log.info("合集重命名目标冲突, 保留原名: {} => {}", fileName, fileName);
+                renameMap.put(fileName, fileName);
+            }
+        }
+        if (renameMap.isEmpty()) {
+            log.warn("合集预览计划({} 项)与离线产物({} 项)无任何匹配 {}", plan.size(), files.size(), reName);
         }
         return renameMap;
     }

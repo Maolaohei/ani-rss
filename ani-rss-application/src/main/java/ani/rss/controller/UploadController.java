@@ -6,6 +6,7 @@ import ani.rss.entity.web.Result;
 import ani.rss.util.other.ConfigUtil;
 import cn.hutool.core.codec.Base64;
 import cn.hutool.core.io.FileUtil;
+import cn.hutool.core.io.IoUtil;
 import cn.hutool.core.lang.Assert;
 import cn.hutool.crypto.SecureUtil;
 import io.swagger.v3.oas.annotations.Operation;
@@ -92,6 +93,43 @@ public class UploadController extends BaseController {
      */
     private static boolean isAllowedExt(String extName) {
         return IMAGE_EXT.contains(extName) || SUBTITLE_EXT.contains(extName) || VIDEO_EXT.contains(extName);
+    }
+
+    /**
+     * 上传并读取为 base64 (合集种子上传使用)
+     * 仅回传内容不落盘, 无存储型 XSS 风险, 故不受扩展名白名单约束, 仅限制大小
+     */
+    @Auth
+    @Operation(summary = "上传并读取为 base64")
+    @PostMapping(value = "/uploadAndReadToBase64", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public Result<String> uploadAndReadToBase64(@RequestParam("file") MultipartFile file) throws Exception {
+        Assert.notNull(file, "文件为空");
+        Assert.isTrue(file.getSize() <= MAX_UPLOAD_SIZE, "文件超过大小限制 (10MiB)");
+
+        try (InputStream inputStream = file.getInputStream()) {
+            byte[] fileContent = inputStream.readAllBytes();
+            return Result.success(r ->
+                    r.setData(Base64.encode(fileContent))
+            );
+        }
+    }
+
+    /**
+     * 上传并读取为 UTF-8 文本 (订阅导入使用)
+     */
+    @Auth
+    @Operation(summary = "上传并读取")
+    @PostMapping(value = "/uploadAndRead", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public Result<String> uploadAndRead(@RequestParam("file") MultipartFile file) throws Exception {
+        Assert.notNull(file, "文件为空");
+        Assert.isTrue(file.getSize() <= MAX_UPLOAD_SIZE, "文件超过大小限制 (10MiB)");
+
+        try (InputStream inputStream = file.getInputStream()) {
+            String content = IoUtil.readUtf8(inputStream);
+            return Result.success(r ->
+                    r.setData(content)
+            );
+        }
     }
 
 }
