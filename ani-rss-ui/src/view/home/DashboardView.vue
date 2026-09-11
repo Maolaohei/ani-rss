@@ -7,7 +7,7 @@
     <BgmRateView ref="bgmRateRef"/>
     <PageHeaderView title="首页" :subtitle="`${todayLabel} · ${todayText}`">
       <template #actions>
-        <el-button :loading="refreshLoading" icon="Refresh" bg text @click="loadAll">
+        <el-button :loading="refreshLoading" icon="Refresh" @click="loadAll" class="auto-button">
           刷新
         </el-button>
       </template>
@@ -196,8 +196,9 @@ let timer
 
 const todayLabel = computed(() => weekLabels[new Date().getDay()])
 const flatAnis = computed(() => weekList.value.flatMap(week => week.items || []))
+const enabledAnis = computed(() => flatAnis.value.filter(item => item.enable))
 const subscriptionTotal = computed(() => subscriptionTotalValue.value || flatAnis.value.length)
-const enabledTotal = computed(() => flatAnis.value.filter(item => item.enable).length)
+const enabledTotal = computed(() => enabledAnis.value.length)
 const todayAnis = computed(() => {
   const today = weekList.value.find(week => week.weekLabel === todayLabel.value)
   return (today ? today.items || [] : []).filter(item => item.enable)
@@ -208,8 +209,7 @@ const seedingList = computed(() => torrentsInfos.value.filter(isSeeding))
 const activeTorrents = computed(() => torrentsInfos.value.filter(item => item.state !== 'stoppedUP'))
 const procrastinatingList = computed(() => {
   const threshold = Number(config.value.procrastinatingDay || 14)
-  return flatAnis.value
-      .filter(item => item.enable)
+  return enabledAnis.value
       .filter(item => item.procrastinating !== false)
       .filter(item => !item.totalEpisodeNumber || item.currentEpisodeNumber < item.totalEpisodeNumber)
       .map(item => {
@@ -327,7 +327,6 @@ onUnmounted(stopPolling)
   align-items: center;
   gap: 10px;
   padding: 12px;
-  border: 1px solid var(--el-border-color-light);
   border-radius: 8px;
   background-color: var(--el-bg-color);
 }
@@ -384,7 +383,6 @@ onUnmounted(stopPolling)
 .dashboard-section {
   min-width: 0;
   padding: 12px;
-  border: 1px solid var(--el-border-color-light);
   border-radius: 8px;
   background-color: var(--el-bg-color);
 }

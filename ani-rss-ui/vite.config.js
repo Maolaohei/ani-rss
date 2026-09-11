@@ -15,7 +15,9 @@ export default defineConfig({
         proxy: {
             '/api': {
                 target: serverHost ? serverHost : 'http://127.0.0.1:7789',
-                changeOrigin: false
+                // port upstream 3.2.30: dev 代理支持 https 后端（自签证书）
+                changeOrigin: true,
+                secure: false
             }
         }
     },

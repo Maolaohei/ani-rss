@@ -39,11 +39,8 @@
         </div>
         <div class="subscription-actions">
           <el-dropdown trigger="click">
-            <el-button aria-label="添加" type="primary" bg text>
-              <el-icon class="subscription-action-icon">
-                <Plus/>
-              </el-icon>
-              <span class="subscription-action-label">添加</span>
+            <el-button aria-label="添加" type="primary" class="auto-button" icon="Plus">
+              添加
             </el-button>
             <template #dropdown>
               <el-dropdown-menu>
@@ -58,25 +55,16 @@
           </el-dropdown>
           <PopconfirmView :title="refreshTitle" @confirm="refreshAni">
             <template #reference>
-              <el-button aria-label="刷新" :loading="refreshLoading" bg text>
-                <el-icon class="subscription-action-icon">
-                  <Refresh/>
-                </el-icon>
-                <span class="subscription-action-label">刷新</span>
+              <el-button aria-label="刷新" :loading="refreshLoading" class="auto-button" icon="Refresh">
+                刷新
               </el-button>
             </template>
           </PopconfirmView>
-          <el-button aria-label="任务管理器" title="任务管理器" @click="taskManagerRef?.show" bg text>
-            <el-icon class="subscription-action-icon">
-              <List/>
-            </el-icon>
-            <span class="subscription-action-label">任务</span>
+          <el-button aria-label="任务管理器" title="任务管理器" @click="taskManagerRef?.show" class="auto-button" icon="List">
+            任务
           </el-button>
-          <el-button aria-label="管理" @click="manageRef?.show" bg text>
-            <el-icon class="subscription-action-icon">
-              <Fold/>
-            </el-icon>
-            <span class="subscription-action-label">管理</span>
+          <el-button aria-label="管理" @click="manageRef?.show" class="auto-button" icon="Fold">
+            管理
           </el-button>
         </div>
       </div>
@@ -95,7 +83,6 @@
 import {computed, onActivated, onDeactivated, onMounted, ref} from "vue";
 import {ElMessage, ElMessageBox} from "element-plus";
 import {useIntervalFn, useLocalStorage} from "@vueuse/core";
-import {Fold, List, Plus, Refresh} from "@element-plus/icons-vue";
 import SubscriptionListView from "@/view/home/SubscriptionListView.vue";
 import AddView from "@/view/home/AddView.vue";
 import CollectionView from "@/view/home/CollectionView.vue";
@@ -252,10 +239,6 @@ onDeactivated(pauseTaskPoll)
   margin: 0;
 }
 
-.subscription-action-icon {
-  margin-right: 6px;
-}
-
 .subscription-search {
   width: 220px;
 }
@@ -289,16 +272,6 @@ onDeactivated(pauseTaskPoll)
 
   .subscription-select {
     flex: 1 1 120px;
-  }
-}
-
-@media (max-width: 800px) {
-  .subscription-action-label {
-    display: none;
-  }
-
-  .subscription-action-icon {
-    margin-right: 0;
   }
 }
 

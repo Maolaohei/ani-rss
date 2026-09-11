@@ -39,7 +39,7 @@
               show-icon/>
           <div class="flex-center action">
             <el-checkbox v-model:model-value="rememberThePassword.remember">记住密码</el-checkbox>
-            <el-button @click="login" :loading="loading" text bg icon="Right">登录</el-button>
+            <el-button @click="login" :loading="loading" icon="Right">登录</el-button>
           </div>
         </el-form>
       </div>

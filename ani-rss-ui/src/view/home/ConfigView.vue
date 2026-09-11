@@ -11,15 +11,12 @@
             @input="onSearchSettings"
             @clear="onSearchSettings"/>
         <el-button
-            class="config-save-button"
-            bg text
+            class="auto-button"
+            icon="Check"
             :disabled="loading"
             :loading="configButtonLoading"
             type="primary"
             @click="saveConfig">
-          <el-icon class="el-icon--left">
-            <Check/>
-          </el-icon>
           保存
         </el-button>
       </template>
@@ -70,7 +67,7 @@
 <script setup>
 import {computed, onMounted, ref} from "vue";
 import {ElMessage} from "element-plus";
-import {Check, Search} from "@element-plus/icons-vue";
+import {Search} from "@element-plus/icons-vue";
 import CryptoJS from "crypto-js";
 import ExcludeView from "@/view/config/ExcludeView.vue";
 import NotificationView from "@/view/config/NotificationView.vue";
@@ -196,7 +193,6 @@ onMounted(() => {
   flex: 1;
   min-height: 0;
   overflow: hidden;
-  border: 1px solid var(--el-border-color-light);
   border-radius: 8px;
   background: var(--el-bg-color);
 }
@@ -221,16 +217,6 @@ onMounted(() => {
 }
 
 @media (max-width: 700px) {
-  .config-save-button {
-    min-width: 72px;
-  }
-
-  .config-tabs :deep(.el-tabs__content) {
-    border-right: 0;
-    border-left: 0;
-    border-radius: 0;
-  }
-
   .tab-scroll-content {
     padding: 18px 4px 30px;
   }

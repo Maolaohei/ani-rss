@@ -35,8 +35,6 @@
                     <arguments>
                         <argument>-rf</argument>
                         <argument>./dist</argument>
-                        <argument>pnpm-lock.yaml</argument>
-                        <argument>pnpm-workspace.yaml</argument>
                     </arguments>
                     <workingDirectory>${project.basedir}</workingDirectory>
                 </configuration>

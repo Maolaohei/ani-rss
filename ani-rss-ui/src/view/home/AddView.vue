@@ -111,10 +111,10 @@
       </div>
     </div>
     <div v-if="!showRss" class="ani-step">
-      <el-button class="ani-step-back" bg text @click="showRss = true">
-        <el-icon>
-          <ArrowLeft/>
-        </el-icon>
+      <el-button
+          class="ani-step-back"
+          bg text icon="ArrowLeft"
+          @click="showRss = true">
         返回 RSS
       </el-button>
       <AniView v-model:ani="ani" @callback="addAni"/>
@@ -125,7 +125,7 @@
 <script setup>
 import {ref} from "vue";
 import {ElMessage, ElMessageBox} from "element-plus";
-import {ArrowLeft, ArrowRight, Search} from "@element-plus/icons-vue";
+import {ArrowRight, Search} from "@element-plus/icons-vue";
 import MikanView from "./MikanView.vue";
 import AniView from "./AniView.vue";
 import BgmView from "./BgmView.vue";

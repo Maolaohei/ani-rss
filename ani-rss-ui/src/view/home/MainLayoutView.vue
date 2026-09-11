@@ -78,7 +78,6 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   background: var(--el-bg-color);
-  border-right: 1px solid var(--el-border-color-light);
 }
 
 .app-brand {
@@ -91,7 +90,6 @@ onMounted(() => {
   color: var(--el-text-color-primary);
   font-size: 13px;
   font-weight: 600;
-  border-bottom: 1px solid var(--el-border-color-extra-light);
 }
 
 .app-logo {
