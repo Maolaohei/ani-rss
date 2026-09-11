@@ -9,6 +9,7 @@ import ani.rss.util.other.ConfigUtil;
 import cn.hutool.core.collection.ListUtil;
 import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.lang.Assert;
+import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.core.util.NumberUtil;
 import cn.hutool.core.util.ObjectUtil;
 import cn.hutool.core.util.ReUtil;
@@ -24,12 +25,14 @@ import org.jsoup.nodes.Element;
 import org.jsoup.select.Elements;
 import org.springframework.stereotype.Service;
 
+import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -154,8 +157,10 @@ public class MikanService {
             }
         }
 
-        HttpReq.get(url)
-                .then(res -> {
+        // url 上面被重新赋值, 非 effectively final, lambda 里需用拷贝
+        final String reqUrl = url;
+        withMikanRetry(reqUrl, () -> HttpReq.get(reqUrl)
+                .thenFunction(res -> {
                     HttpReq.assertStatus(res);
                     assertNotChallengePage(res);
                     Document document = Jsoup.parse(res.body());
@@ -263,7 +268,8 @@ public class MikanService {
                             weeks.add(week);
                         }
                     }
-                });
+                    return null;
+                }));
 
         int totalItems = weeks
                 .stream()
@@ -283,7 +289,7 @@ public class MikanService {
      * @return
      */
     public List<Mikan.Group> getGroups(String url) {
-        List<Mikan.Group> groupList = HttpReq.get(url)
+        List<Mikan.Group> groupList = withMikanRetry(url, () -> HttpReq.get(url)
                 .thenFunction(res -> {
                     HttpReq.assertStatus(res);
                     assertNotChallengePage(res);
@@ -342,7 +348,7 @@ public class MikanService {
                     }
 
                     return groups;
-                });
+                }));
 
 
         for (Mikan.Group group : groupList) {
@@ -358,7 +364,7 @@ public class MikanService {
     public static MikanInfo getMikanInfo(String bangumiId) {
         URI host = URLUtil.getHost(URLUtil.url(getMikanHost()));
         String url = host + "/Home/Bangumi/" + bangumiId;
-        return HttpReq.get(url)
+        return withMikanRetry(url, () -> HttpReq.get(url)
                 .thenFunction(res -> {
                     HttpReq.assertStatus(res);
                     assertNotChallengePage(res);
@@ -441,7 +447,7 @@ public class MikanService {
 
                     mikanInfo.setGroups(groups);
                     return mikanInfo;
-                });
+                }));
     }
 
     public static void getMikanInfo(Ani ani, String subgroupId) {
@@ -479,6 +485,45 @@ public class MikanService {
                 && (body.contains("Just a moment") || body.contains("cf-chl"))) {
             throw new IllegalStateException("Mikan 被 Cloudflare 拦截, 请配置代理");
         }
+    }
+
+    /**
+     * Mikan 页面抓取统一入口: 响应体读取偶发超时（Cloudflare/直连慢）自动重试一次,
+     * 重试仍超时则抛出人话化异常, 不再把裸的 SocketTimeoutException 弹给用户。
+     * 非超时类异常原样抛出（Cloudflare 拦截/状态码异常等有自己的语义提示）。
+     */
+    private static <T> T withMikanRetry(String url, Supplier<T> attempt) {
+        try {
+            return attempt.get();
+        } catch (RuntimeException e) {
+            if (!isReadTimeout(e)) {
+                throw e;
+            }
+            log.warn("Mikan 响应读取超时, 自动重试一次: {}", url);
+            ThreadUtil.sleep(1500);
+            try {
+                return attempt.get();
+            } catch (RuntimeException retryEx) {
+                if (isReadTimeout(retryEx)) {
+                    throw new IllegalStateException("Mikan 连接超时, 请检查网络或代理设置");
+                }
+                throw retryEx;
+            }
+        }
+    }
+
+    /**
+     * 异常链中是否为 SocketTimeoutException（hutool HttpException/IORuntimeException 均可能包装）
+     */
+    private static boolean isReadTimeout(Throwable e) {
+        Throwable cur = e;
+        while (cur != null) {
+            if (cur instanceof SocketTimeoutException) {
+                return true;
+            }
+            cur = cur.getCause();
+        }
+        return false;
     }
 
     /**
