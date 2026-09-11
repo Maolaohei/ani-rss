@@ -1,8 +1,22 @@
 <template>
   <div class="tpl-tools">
     <div class="tpl-live">
-      <span class="tpl-live-label">当前模板效果</span>
-      <code class="tpl-live-code" v-html="liveHtml"></code>
+      <span class="tpl-live-label">模板</span>
+      <code class="tpl-live-code" v-html="templateHtml"></code>
+    </div>
+    <div class="tpl-live is-effect">
+      <span class="tpl-live-label">效果</span>
+      <code class="tpl-live-code" v-html="effectHtml"></code>
+      <el-button
+          class="tpl-copy"
+          text
+          bg
+          size="small"
+          icon="CopyDocument"
+          :disabled="!props.modelValue"
+          @click="copyEffect">
+        复制
+      </el-button>
     </div>
     <el-collapse class="tpl-collapse">
       <el-collapse-item name="vars">
@@ -33,6 +47,7 @@
 <script setup>
 import {computed} from "vue";
 import {ElMessage} from "element-plus";
+import {copyText} from "@/js/global.js";
 
 /**
  * 模板变量与示例值均来自官方文档 docs.wushuo.top/config/basic/rename#rename-template
@@ -87,9 +102,12 @@ const props = defineProps({
 
 const emit = defineEmits(['update:modelValue'])
 
-const liveHtml = computed(() => {
-  const t = props.modelValue ?? ''
-  let html = ''
+/**
+ * 把模板解析为段：text（字面量）/ var（已知变量）/ unknown（未知变量）。
+ * 「模板」行显示变量名，「效果」行显示示例值，两行共用同一段落结构保证逐段对应。
+ */
+const parseTemplate = t => {
+  const segments = []
   let buf = ''
   let i = 0
   while (i < t.length) {
@@ -98,20 +116,61 @@ const liveHtml = computed(() => {
       if (end > -1) {
         const name = t.slice(i + 2, end)
         if (buf) {
-          html += esc(buf)
+          segments.push({type: 'text', text: buf})
           buf = ''
         }
-        const sample = SAMPLE[name]
-        html += '<span class="v"' + (sample === undefined ? ' style="color:var(--el-color-danger)"' : ' title="' + esc(sample) + '"') + '>${' + name + '}</span>'
+        segments.push(SAMPLE[name] === undefined ? {type: 'unknown', name} : {type: 'var', name})
         i = end + 1
         continue
       }
     }
     buf += t[i++]
   }
-  html += esc(buf)
-  return html || '<span style="opacity:.5">（空）</span>'
+  if (buf) {
+    segments.push({type: 'text', text: buf})
+  }
+  return segments
+}
+
+const templateHtml = computed(() => {
+  const segments = parseTemplate(props.modelValue ?? '')
+  if (!segments.length) {
+    return '<span style="opacity:.5">（空）</span>'
+  }
+  return segments.map(segment => {
+    if (segment.type === 'var') {
+      const sample = SAMPLE[segment.name]
+      return '<span class="v" title="' + esc(sample) + '">${' + esc(segment.name) + '}</span>'
+    }
+    if (segment.type === 'unknown') {
+      return '<span class="u">${' + esc(segment.name) + '}</span>'
+    }
+    return esc(segment.text)
+  }).join('')
 })
+
+const effectHtml = computed(() => {
+  const segments = parseTemplate(props.modelValue ?? '')
+  if (!segments.length) {
+    return '<span style="opacity:.5">（空）</span>'
+  }
+  return segments.map(segment => {
+    if (segment.type === 'var') {
+      return '<span class="v">' + esc(SAMPLE[segment.name]) + '</span>'
+    }
+    if (segment.type === 'unknown') {
+      return '<span class="u">${' + esc(segment.name) + '}</span>'
+    }
+    return esc(segment.text)
+  }).join('')
+})
+
+const effectText = computed(() => {
+  const segments = parseTemplate(props.modelValue ?? '')
+  return segments.map(segment => segment.type === 'var' ? SAMPLE[segment.name] : segment.type === 'unknown' ? '${' + segment.name + '}' : segment.text).join('')
+})
+
+const copyEffect = () => copyText(effectText.value)
 
 const appendVar = name => emit('update:modelValue', (props.modelValue ?? '') + '${' + name + '}')
 
@@ -147,6 +206,7 @@ const applyPreset = () => {
   color: var(--el-text-color-secondary);
   font-weight: 600;
   flex: none;
+  width: 26px;
 }
 
 .tpl-live-code {
@@ -156,6 +216,7 @@ const applyPreset = () => {
   color: var(--el-color-primary);
   word-break: break-all;
   min-width: 0;
+  flex: 1;
 }
 
 .tpl-live-code :deep(.v) {
@@ -163,6 +224,28 @@ const applyPreset = () => {
   border-radius: 4px;
   padding: 0 3px;
   margin: 0 1px;
+}
+
+.tpl-live-code :deep(.u) {
+  color: var(--el-color-danger);
+  background: var(--el-color-danger-light-9);
+  border-radius: 4px;
+  padding: 0 3px;
+  margin: 0 1px;
+}
+
+/* 效果行：真实文件名观感，替换值保留浅底呼应模板行 */
+.tpl-live.is-effect .tpl-live-code {
+  color: var(--el-text-color-regular);
+}
+
+.tpl-live.is-effect .tpl-live-code :deep(.v) {
+  color: var(--el-color-primary);
+}
+
+.tpl-copy {
+  flex: none;
+  margin-left: auto;
 }
 
 .tpl-collapse {
@@ -283,6 +366,11 @@ html.dark .tpl-chip:hover {
     flex-direction: column;
     align-items: flex-start;
     gap: 4px;
+  }
+
+  .tpl-copy {
+    align-self: flex-end;
+    margin-left: 0;
   }
 
   .tpl-collapse-tip {
