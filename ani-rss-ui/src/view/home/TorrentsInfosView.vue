@@ -1,7 +1,7 @@
 <template>
   <div class="torrents-page app-page-layout">
     <PageHeaderView title="任务" :subtitle="subtitle"/>
-    <div class="torrents-body app-page-content app-page-padding">
+    <div class="torrents-body app-page-content">
       <el-tabs v-model="viewTab" class="center-tabs">
         <el-tab-pane label="下载器任务" name="downloader"/>
         <el-tab-pane label="追番流水线" name="pipeline"/>
@@ -262,12 +262,18 @@ onUnmounted(pausePolling)
 </script>
 
 <style scoped>
-/* 内容区白底卡片化：与首页 metric/分区同一视觉语言 */
+/* 白底卡片左右边缘与页头标题文字对齐（app-page-padding 的 24px/移动端 12px） */
 .torrents-body {
   background: var(--el-bg-color);
   border-radius: 8px;
-  padding-top: 8px;
-  padding-bottom: 12px;
+  margin: 0 24px;
+  padding: 8px 16px 12px;
+}
+
+@media (max-width: 800px) {
+  .torrents-body {
+    margin: 0 12px;
+  }
 }
 
 .center-tabs {
