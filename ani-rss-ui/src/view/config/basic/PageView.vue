@@ -18,6 +18,13 @@
       <el-button bg icon="Close" text @click="cssDialogVisible = false">关闭</el-button>
     </div>
   </el-dialog>
+  <el-alert
+      class="page-alert"
+      type="warning"
+      show-icon
+      :closable="false"
+      title="下面「外观 / 主题色 / 订阅布局 / 启动页 / 最大内容宽度 / 显示项」属于本机偏好，改动立即生效并只保存在当前浏览器，不受「保存」影响，也不会被导出设置带走；只有「排序」是服务端配置。"
+  />
   <SettingsItem label="外观">
     <el-radio-group v-model="store">
       <el-radio-button label="自动" value="auto">
@@ -46,11 +53,17 @@
                      @active-change="colorChange"/>
   </SettingsItem>
   <SettingsItem label="排序">
-    <el-select v-model="props.config['sortType']" class="width-150">
-      <el-option value="SCORE" label="评分"/>
-      <el-option value="PINYIN" label="拼音"/>
-      <el-option value="DOWNLOAD_TIME" label="更新时间"/>
-    </el-select>
+    <div>
+      <el-select v-model="props.config['sortType']" class="width-150">
+        <el-option value="SCORE" label="评分"/>
+        <el-option value="PINYIN" label="拼音"/>
+        <el-option value="DOWNLOAD_TIME" label="更新时间"/>
+      </el-select>
+      <br>
+      <el-text class="mx-1" size="small" type="info">
+        该项为服务端配置，需要点「保存」后生效
+      </el-text>
+    </div>
   </SettingsItem>
   <SettingsItem label="订阅布局">
     <el-select v-model="subscriptionViewMode" class="width-150">
@@ -65,12 +78,18 @@
     </el-select>
   </SettingsItem>
   <SettingsItem label="最大内容宽度">
-    <el-input-number v-model="maxContentWidth"
-                     :min="1200">
-      <template #suffix>
-        <span>px</span>
-      </template>
-    </el-input-number>
+    <div>
+      <el-input-number v-model="maxContentWidth"
+                       :min="1200">
+        <template #suffix>
+          <span>px</span>
+        </template>
+      </el-input-number>
+      <br>
+      <el-text class="mx-1" size="small" type="info">
+        最小 1200px；填更小的值也会被抬到 1200
+      </el-text>
+    </div>
   </SettingsItem>
   <SettingsItem label="其他">
     <el-checkbox v-model="showScore" label="显示评分"/>

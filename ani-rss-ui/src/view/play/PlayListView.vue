@@ -5,7 +5,7 @@
       <el-scrollbar style="height: 500px;">
         <div class="grid-container">
           <div v-for="it in list">
-            <el-card shadow="never">
+            <el-card shadow="never" :class="{'is-current': isCurrentEpisode(it)}">
               <div class="grid-item">
                 <div>
                   <el-tooltip :content="it.title" placement="top">
@@ -17,6 +17,10 @@
                   <el-text size="small" type="info">
                     {{ it.formatSize }}&nbsp;|&nbsp;{{ it.lastModifyFormat }}
                   </el-text>
+                  <br v-if="isCurrentEpisode(it)"/>
+                  <el-tag v-if="isCurrentEpisode(it)" size="small" class="current-tag">
+                    上次看到
+                  </el-tag>
                 </div>
                 <el-button circle
                            icon="VideoPlay"
@@ -48,6 +52,7 @@ import {ref} from "vue";
 import PlayStartView from "./PlayStartView.vue";
 import {fromNow} from "@/js/format.js";
 import * as http from "@/js/http.js";
+import {isLastWatched, markWatched} from "@/js/play-progress.js";
 
 const dialogVisible = ref(false)
 const listLoading = ref(false)
@@ -57,7 +62,30 @@ let ani = ref({})
 let playStartRef = ref()
 
 let playStartShow = (it) => {
+  // 记录"看到这里"（按订阅 id），下次打开选集时高亮并可自动定位
+  markWatched(ani.value?.id, it)
+  ani.value = {...ani.value, lastWatchedKey: it.filename || it.title}
   playStartRef.value?.show(JSON.parse(JSON.stringify(it)))
+}
+
+/**
+ * 判断是否"当前集"。
+ * 优先用本机记录的"上次看到的那一集"（最贴近用户真实进度），
+ * 没有记录时退化为后端返回的"已下载到第几集"；都没有则不标记。
+ */
+let isCurrentEpisode = (it) => {
+  if (isLastWatched(ani.value?.id, it)) {
+    return true
+  }
+  if (ani.value?.lastWatchedKey) {
+    return false
+  }
+  const current = ani.value?.currentEpisodeNumber
+  const episode = it?.episode
+  if (current == null || episode == null) {
+    return false
+  }
+  return Number(episode) === Number(current)
 }
 
 const show = (it) => {
@@ -114,5 +142,13 @@ defineExpose({
 .total-text {
   margin: 6px;
   text-align: end;
+}
+
+.is-current {
+  border-color: var(--el-color-primary);
+}
+
+.current-tag {
+  margin-top: 2px;
 }
 </style>

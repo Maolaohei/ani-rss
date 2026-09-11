@@ -119,8 +119,13 @@ onMounted(() => {
   }
   art = new Artplayer({
     container: '.art-app',
+    // autoPlayback 的存储键是 option.id || option.url；url 里带会轮换的 token，
+    // 必须传稳定 id（用文件名），进度记忆才能跨会话命中。
+    id: props['playItem'].name || src,
     url: src,
     type: extName,
+    // 该包只在构建里内置了 zh-cn 一套 i18n；非中文浏览器下控件文案会回落成英文 key
+    lang: 'zh-cn',
     theme: '#646cff',
     playbackRate: true,
     aspectRatio: true,
@@ -130,7 +135,12 @@ onMounted(() => {
     fullscreen: true,
     fullscreenWeb: true,
     airplay: true,
-    preload: true,
+    autoPlayback: true,
+    // preload 不是顶层选项，真实位置是 moreVideoAttr.preload
+    moreVideoAttr: {
+      preload: 'auto',
+      playsInline: true
+    },
     plugins: [
       artplayerPluginMultipleSubtitles({
         subtitles: subtitles
