@@ -24,6 +24,20 @@
             </el-button>
           </template>
         </PopconfirmView>
+        <PopconfirmView @confirm="forceDownload"
+                        :title="`强制下载${selectViews.length}项? 将删除已有文件后重新下载`">
+          <template #reference>
+            <el-button icon="RefreshRight" bg text type="warning" :disabled="!selectViews.length"
+                       :loading="forceDownloading">
+              强制下载
+            </el-button>
+          </template>
+        </PopconfirmView>
+      </div>
+      <div class="items-hint">
+        <el-text size="small" type="warning">
+          「允许下载 / 禁止下载」只改动编辑表单，需回到「修改订阅」点「确定」才会保存生效。
+        </el-text>
       </div>
       <div class="items-table-container">
         <el-table :data="showItems" height="500"
@@ -38,9 +52,14 @@
               <el-tag v-else>是</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="已下载" min-width="100">
+          <el-table-column label="本地存在" min-width="140">
             <template #default="it">
-              <el-tag v-if="!showItems[it.$index]['hasDownloaded']" type="info">否</el-tag>
+              <!-- 三态：已下载 / 下载中（离线已提交）/ 未下载；避免与任务管理器状态矛盾 -->
+              <el-tooltip v-if="showItems[it.$index]['downloading']"
+                          :content="showItems[it.$index]['downloadingState'] || '下载中'" placement="top">
+                <el-tag type="warning">下载中</el-tag>
+              </el-tooltip>
+              <el-tag v-else-if="!showItems[it.$index]['hasDownloaded']" type="info">否</el-tag>
               <el-tag v-else>是</el-tag>
             </template>
           </el-table-column>
@@ -184,6 +203,28 @@ let delTorrent = () => {
       })
 }
 
+let forceDownloading = ref(false)
+
+let forceDownload = () => {
+  let infoHashes = selectViews.value.map(it => it['infoHash']).filter(Boolean)
+  if (!infoHashes.length) {
+    ElMessage.warning('选中条目缺少 InfoHash，无法强制下载')
+    return
+  }
+  forceDownloading.value = true
+  http.forceDownload(props.ani, infoHashes)
+      .then(res => {
+        ElMessage.success(res.message)
+        load()
+      })
+      .catch(err => {
+        ElMessage.error(err?.message || '强制下载失败')
+      })
+      .finally(() => {
+        forceDownloading.value = false
+      })
+}
+
 let notDownload = () => {
   props.ani['notDownload'].push(...selectViews.value.map(it => it['episode']))
   props.ani['notDownload'] = Array.from(new Set(props.ani['notDownload']))
@@ -220,6 +261,10 @@ let props = defineProps(['ani'])
   display: flex;
   justify-content: end;
   margin-top: 8px;
+}
+
+.items-hint {
+  margin: 4px 0;
 }
 
 .items-table-container {
