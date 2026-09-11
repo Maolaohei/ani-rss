@@ -107,7 +107,10 @@ public class ItemsUtil {
         if (coexist) {
             items = CollUtil.distinct(items, Item::getReName, false);
         } else {
-            items = distinctWithCollectionPriority(items);
+            // 备用RSS定位是占位补漏: 开启洗版时同集候选内主RSS条目优先,
+            // 避免备用条目按画质/体积永久遮蔽主RSS条目, 导致主RSS出种后无法替换
+            boolean preferMaster = Boolean.TRUE.equals(config.getDelete());
+            items = distinctWithCollectionPriority(items, preferMaster);
         }
         items.sort(Comparator.comparingDouble(Item::getEpisode));
         return items;
@@ -837,6 +840,19 @@ public class ItemsUtil {
      * 再按画质+体积选最优。单集仅作为合集未覆盖时的补充。
      */
     public static List<Item> distinctWithCollectionPriority(List<Item> items) {
+        return distinctWithCollectionPriority(items, false);
+    }
+
+    /**
+     * 合集优先去重（可指定主RSS优先）：
+     * 同一集同时有合集展开源和单集源时，优先保留合集源（带 episodeRange 的条目），
+     * 同类型候选内再按画质+体积选最优。
+     *
+     * @param preferMaster 同类型(合集/单集)候选内主RSS条目优先于备用RSS条目:
+     *                     备用RSS仅作占位补漏, 主RSS出种后应由主RSS版本替换
+     *                     (仅 备用RSS+洗版 且未开启共存 时传 true)
+     */
+    public static List<Item> distinctWithCollectionPriority(List<Item> items, boolean preferMaster) {
         if (CollUtil.isEmpty(items)) {
             return items;
         }
@@ -865,6 +881,11 @@ public class ItemsUtil {
 
             List<Item> candidates = !collections.isEmpty() ? collections : singles;
             candidates = sortByQualityAndSize(candidates);
+            if (preferMaster) {
+                // 在画质+体积有序基础上稳定排序: 主RSS条目前置,
+                // 同组(主/备)内部保持画质+体积序不变
+                candidates = sortByMasterFirst(candidates);
+            }
             result.add(candidates.get(0));
         }
 
@@ -876,6 +897,20 @@ public class ItemsUtil {
         }
 
         return result;
+    }
+
+    /**
+     * 主RSS条目稳定前置（入参应为已按画质+体积排序的候选）:
+     * 存在主RSS条目时 master 在前(组内保持原序), 纯备用候选不改变顺序。
+     */
+    private static List<Item> sortByMasterFirst(List<Item> items) {
+        boolean anyMaster = items.stream().anyMatch(it -> Boolean.TRUE.equals(it.getMaster()));
+        if (!anyMaster) {
+            return items;
+        }
+        return items.stream()
+                .sorted(Comparator.comparingInt((Item it) -> Boolean.TRUE.equals(it.getMaster()) ? 0 : 1))
+                .toList();
     }
 
     /**

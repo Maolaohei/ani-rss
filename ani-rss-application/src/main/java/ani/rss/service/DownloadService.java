@@ -208,17 +208,24 @@ public class DownloadService {
                         recordValid = itemDownloaded(ani, item, true, localEpisodeIndex);
                     }
                     if (recordValid) {
-                        log.debug("种子记录已存在 {}", reName);
-                        if (master && !is5) {
-                            currentDownloadCount++;
+                        // 主RSS记录被"备用RSS占位"证据命中: 清除占位后按未下载处理, 实现主RSS替换。
+                        // 否则备用RSS先下载过的集会被"种子记录已存在/本地文件已存在"永久锁死。
+                        if (removeStandbyPlaceholder(ani, item, torrentsInfos, localEpisodeIndex)) {
+                            // fall through 继续正常下载流程(主RSS自己的种子记录保留, 下载时幂等重写)
+                        } else {
+                            log.debug("种子记录已存在 {}", reName);
+                            if (master && !is5) {
+                                currentDownloadCount++;
+                            }
+                            if (v2 && downloadedEpisodes != null) {
+                                downloadedEpisodes.add(episode);
+                            }
+                            continue;
                         }
-                        if (v2 && downloadedEpisodes != null) {
-                            downloadedEpisodes.add(episode);
-                        }
-                        continue;
+                    } else {
+                        log.warn("清理过期种子记录(无对应任务/文件) {}", reName);
+                        FileUtil.del(torrent);
                     }
-                    log.warn("清理过期种子记录(无对应任务/文件) {}", reName);
-                    FileUtil.del(torrent);
                 }
             }
 
@@ -335,12 +342,16 @@ public class DownloadService {
                         // 未完成重命名
                         continue;
                     }
-                    if (!TorrentUtil.delete(standbyRSS)) {
+                    if (!TorrentUtil.delete(standbyRSS, false, true)) {
                         log.debug("备用RSS可能还未做种完成 {}", standbyRSS.getName());
                         // 删除失败或者不允许删除
                         continue;
                     }
                     torrentsInfos.remove(standbyRSS);
+                    // 「仅在主RSS更新后删除备用RSS」的语义是删除任务与文件:
+                    // 文件同步清除并移除本轮集数索引, 否则下方 itemDownloaded 仍会
+                    // 因本地文件存在拦截主RSS下载, 替换永远无法发生
+                    stripLocalEpisodeIndex(localEpisodeIndex, ani, item);
                 }
             }
 
@@ -369,11 +380,16 @@ public class DownloadService {
             // 未开启rename不进行检测; 洗版(高版本)不受本地已下载判断拦截
             boolean washing = v2 && item.getVersion() != null && item.getVersion() > 1;
             if (!washing && itemDownloaded(ani, item, true, localEpisodeIndex)) {
-                log.info("本地文件已存在 {}", reName);
-                if (master && !is5) {
-                    currentDownloadCount++;
+                // 主RSS更新时该集被"备用RSS占位": 删除备用任务与文件, 由主RSS替换(洗版)
+                if (removeStandbyPlaceholder(ani, item, torrentsInfos, localEpisodeIndex)) {
+                    log.info("备用RSS占位已清除, 由主RSS替换下载 {}", reName);
+                } else {
+                    log.info("本地文件已存在 {}", reName);
+                    if (master && !is5) {
+                        currentDownloadCount++;
+                    }
+                    continue;
                 }
-                continue;
             }
 
             // 同时下载数量限制
@@ -462,6 +478,114 @@ public class DownloadService {
             ani.setEnable(false);
             AniUtil.sync();
         }
+    }
+
+    /**
+     * 查找占用该集的「备用RSS占位」任务。
+     * 判定: 同一下载目录 + 带「备用RSS」标签 + 任务名等于 reName 或含相同 SxxExx。
+     * 仅在 洗版(delete) + 备用RSS + 未开启多字幕组共存 时才视为可替换占位;
+     * OpenList 等离线工具无任务列表恒返回 empty(其洗版在离线提交路径内处理)。
+     */
+    Optional<TorrentsInfo> findStandbyPlaceholderTorrent(Ani ani, Item item, List<TorrentsInfo> torrentsInfos) {
+        Config config = ConfigUtil.CONFIG;
+        if (!Boolean.TRUE.equals(config.getDelete())
+                || !Boolean.TRUE.equals(config.getStandbyRss())
+                || Boolean.TRUE.equals(config.getCoexist())) {
+            return Optional.empty();
+        }
+        if (!Boolean.TRUE.equals(item.getMaster())) {
+            return Optional.empty();
+        }
+        String reName = item.getReName();
+        if (StrUtil.isBlank(reName) || !ReUtil.contains(StringEnum.SEASON_REG, reName)) {
+            return Optional.empty();
+        }
+        String episode = ReUtil.get(StringEnum.SEASON_REG, reName, 0);
+        String downloadPath = getDownloadPath(ani);
+        return torrentsInfos.stream()
+                .filter(Objects::nonNull)
+                .filter(t -> StrUtil.isNotBlank(t.getDownloadDir()) && t.getDownloadDir().equals(downloadPath))
+                .filter(t -> t.getTags() != null
+                        && t.getTags().contains(TorrentsTags.BACK_RSS.getValue()))
+                .filter(t -> {
+                    String name = t.getName();
+                    if (StrUtil.isBlank(name)) {
+                        return false;
+                    }
+                    if (name.equalsIgnoreCase(reName)) {
+                        return true;
+                    }
+                    if (!ReUtil.contains(StringEnum.SEASON_REG, name)) {
+                        return false;
+                    }
+                    return ReUtil.get(StringEnum.SEASON_REG, name, 0).equalsIgnoreCase(episode);
+                })
+                .findFirst();
+    }
+
+    /**
+     * 主RSS更新时清除「备用RSS占位」: 删除备用任务与其文件, 让主RSS版本替换(洗版)。
+     * <p>
+     * 修复: 备用RSS先下载某集后, 主RSS出种会被 itemDownloaded 的"本地文件已存在/
+     * 已存在下载任务"判定(按集数/重命名匹配, 不区分来源)永久拦截,
+     * 而负责替换的 deleteStandbyRss 在该判定之后才执行, 替换永远无法发生。
+     *
+     * @return 是否成功清除; false 时调用方保持原"本地文件已存在"跳过行为
+     */
+    boolean removeStandbyPlaceholder(Ani ani, Item item,
+                                     List<TorrentsInfo> torrentsInfos,
+                                     Set<String> localEpisodeIndex) {
+        TorrentsInfo standbyTorrent = findStandbyPlaceholderTorrent(ani, item, torrentsInfos).orElse(null);
+        if (standbyTorrent == null) {
+            return false;
+        }
+        List<String> tags = standbyTorrent.getTags();
+        if (tags == null || !tags.contains(TorrentsTags.RENAME.getValue())) {
+            // 备用任务未完成重命名(可能仍在下载/尚未就绪), 等待下轮
+            log.debug("备用RSS占位未完成重命名, 等待下轮 {}", standbyTorrent.getName());
+            return false;
+        }
+        // 非强制删除: 保持"任务已完成才允许删"的安全语义; 删除文件以实现替换
+        if (!TorrentUtil.delete(standbyTorrent, false, true)) {
+            log.debug("备用RSS占位删除失败, 等待下轮 {}", standbyTorrent.getName());
+            return false;
+        }
+        torrentsInfos.remove(standbyTorrent);
+        stripLocalEpisodeIndex(localEpisodeIndex, ani, item);
+        log.info("主RSS更新, 已删除备用RSS占位任务与文件, 由主RSS替换 {}", item.getReName());
+        return true;
+    }
+
+    /**
+     * 从本地集数索引移除该 item 对应的键(占位文件删除后防止本轮 stale 索引继续误判)。
+     * 键的构造与 buildLocalEpisodeIndex/addFileToIndex 及 itemDownloaded 的查询保持一致。
+     */
+    private static void stripLocalEpisodeIndex(Set<String> localEpisodeIndex, Ani ani, Item item) {
+        if (localEpisodeIndex == null) {
+            return;
+        }
+        String reName = item.getReName();
+        boolean ovaLegacy = Boolean.TRUE.equals(ani.getOva()) && !RenameUtil.isNamingV2(ani);
+        boolean movieStyle = RenameUtil.isMovie(ani) || ovaLegacy;
+        if (movieStyle) {
+            if (StrUtil.isNotBlank(reName)) {
+                localEpisodeIndex.remove("M:" + reName.trim().toUpperCase());
+            }
+            return;
+        }
+        Double episode = item.getEpisode();
+        if (episode == null || StrUtil.isBlank(reName)) {
+            return;
+        }
+        int querySeason = ani.getSeason();
+        Matcher sm = Pattern.compile(StringEnum.SEASON_REG).matcher(reName.trim());
+        if (sm.find()) {
+            try {
+                querySeason = Integer.parseInt(sm.group(1));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        localEpisodeIndex.remove(querySeason + ":" + episode);
     }
 
     /**

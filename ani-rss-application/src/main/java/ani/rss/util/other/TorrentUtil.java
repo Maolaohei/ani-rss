@@ -391,9 +391,13 @@ public class TorrentUtil {
         if (!deleteFiles) {
             return true;
         }
-        // 清理空文件夹
-        SpringUtil.getBean(ClearService.class)
-                .clearParentFile(new File(torrentsInfo.getDownloadDir(), name));
+        // 清理空文件夹(辅助操作: 失败/上下文不可用不视为删除失败)
+        try {
+            SpringUtil.getBean(ClearService.class)
+                    .clearParentFile(new File(torrentsInfo.getDownloadDir(), name));
+        } catch (Exception e) {
+            log.debug("清理空文件夹失败(忽略): {}", ExceptionUtils.getMessage(e));
+        }
         return true;
     }
 
