@@ -15,8 +15,7 @@
               v-model="sortType"
               class="list-sort-select"
               size="small"
-              aria-label="订阅排序方式"
-              @change="applySort">
+              aria-label="订阅排序方式">
             <el-option
                 v-for="option in sortOptions"
                 :key="option.value"
@@ -46,6 +45,7 @@
             </h2>
             <div :class="gridClass">
               <div v-for="item in weekItem.items" :key="item.id"
+                   v-memo="[item, highlightId === item.id, viewComponent]"
                    :data-ani-id="item.id"
                    :class="{'list-item-highlight': highlightId === item.id}">
                 <component
@@ -64,6 +64,7 @@
         <template v-else>
           <div :class="gridClass">
             <div v-for="item in flatFilterList" :key="item.id"
+                 v-memo="[item, highlightId === item.id, viewComponent]"
                  :data-ani-id="item.id"
                  :class="{'list-item-highlight': highlightId === item.id}">
               <component
@@ -92,7 +93,6 @@ import PlayListView from "@/view/play/PlayListView.vue";
 import CoverView from "./CoverView.vue";
 import DelAniView from "./DelAniView.vue";
 import BgmRateView from "./BgmRateView.vue";
-import {fromNow} from "@/js/format.js";
 import {listAni} from "@/js/http.js";
 import AniCardView from "@/view/home/AniCardView.vue";
 import AniCoverView from "@/view/home/AniCoverView.vue";
@@ -115,25 +115,15 @@ const playListRef = ref()
 const bgmRateRef = ref()
 
 const weekList = ref([])
-const filterList = ref([])
-const flatFilterList = ref([])
 const releaseDateList = ref([])
 
 const loading = ref(true)
 const loadError = ref('')
-const allCount = ref(0)
 const viewComponent = computed(() => props.viewMode === 'cover' ? AniCoverView : AniCardView)
 const gridClass = computed(() => [
   'grid-container',
   props.viewMode === 'cover' ? 'cover-grid-container' : 'card-grid-container'
 ])
-
-const hasFilter = computed(() => {
-  if (allCount.value === 0) {
-    return false
-  }
-  return flatFilterList.value.length !== allCount.value
-})
 
 /** 首页排序：后端默认顺序 / 最近更新 / 评分 / 标题拼音（fork 移植） */
 const sortType = ref('default')
@@ -157,54 +147,67 @@ const sortFlatList = list => {
   }
 }
 
-const applySort = () => {
-  changeFilterList(props.title)
+/** 关键词由父组件传入（父层已做 250ms 防抖），这里只做归一化 */
+const keyword = computed(() => String(props.title || '').trim().toLowerCase())
+
+const matchesKeyword = item => {
+  const kw = keyword.value
+  if (!kw) {
+    return true
+  }
+  let {title, pinyin, pinyinInitials, subgroup} = item
+  return (title || '').toLowerCase().indexOf(kw) > -1 ||
+      (pinyin || '').toLowerCase().indexOf(kw) > -1 ||
+      (pinyinInitials || '').toLowerCase().indexOf(kw) > -1 ||
+      (subgroup || '').toLowerCase().indexOf(kw) > -1
 }
 
-const changeFilterList = (text = '') => {
-  let tempList = JSON.parse(JSON.stringify(weekList.value))
-  const keyword = String(text || '').trim().toLowerCase()
-
-  const filter = item => {
-    if (!keyword) {
-      return true
-    }
-    let {title, pinyin, pinyinInitials, subgroup} = item
-    return (title || '').toLowerCase().indexOf(keyword) > -1 ||
-        (pinyin || '').toLowerCase().indexOf(keyword) > -1 ||
-        (pinyinInitials || '').toLowerCase().indexOf(keyword) > -1 ||
-        (subgroup || '').toLowerCase().indexOf(keyword) > -1
-  }
-
+/**
+ * 派生列表：不再对整棵 weekList 做 JSON 深拷贝。
+ * 此前每个搜索字符都会 JSON.parse(JSON.stringify(...)) 使全部 item 引用失效，
+ * 导致 200+ 卡片全量重渲染。现在 item 引用保持稳定，
+ * 配合模板上的 v-memo，未变化的卡片会被整体跳过 diff。
+ */
+const filterList = computed(() => {
   const todayLabel = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'][new Date().getDay()]
 
-  filterList.value = tempList
-      .map(it => {
-        let items = (it.items || [])
-            .filter(props.filter)
-            .filter(filter)
-            .map(it => {
-              return {...it, lastDownloadFormat: fromNow(it['lastDownloadTime'])}
-            });
+  const groups = weekList.value
+      .map(week => {
+        let items = (week.items || []).filter(props.filter).filter(matchesKeyword)
+        if (sortType.value !== 'default') {
+          items = sortFlatList(items)
+        }
         return {
-          weekLabel: it.weekLabel,
-          isToday: it.weekLabel === todayLabel,
-          items: sortType.value === 'default' ? items : sortFlatList(items)
+          weekLabel: week.weekLabel,
+          isToday: week.weekLabel === todayLabel,
+          items
         }
       })
       .filter(it => it.items.length)
 
   // 今天置顶：后端已把今天排首位，这里仅在缺失时补一次，保证"今天更新了哪几部"一眼可见
-  const todayIndex = filterList.value.findIndex(it => it.isToday)
+  const todayIndex = groups.findIndex(it => it.isToday)
   if (todayIndex > 0) {
-    const [todayGroup] = filterList.value.splice(todayIndex, 1)
-    filterList.value.unshift(todayGroup)
+    const [todayGroup] = groups.splice(todayIndex, 1)
+    groups.unshift(todayGroup)
   }
 
-  allCount.value = tempList.reduce((total, week) => total + (week.items || []).length, 0)
-  let flat = filterList.value.flatMap(it => it.items)
-  flatFilterList.value = sortType.value === 'default' ? flat : sortFlatList(flat)
-}
+  return groups
+})
+
+const flatFilterList = computed(() => {
+  const flat = filterList.value.flatMap(it => it.items)
+  return sortType.value === 'default' ? flat : sortFlatList(flat)
+})
+
+const allCount = computed(() => weekList.value.reduce((total, week) => total + (week.items || []).length, 0))
+
+const hasFilter = computed(() => {
+  if (allCount.value === 0) {
+    return false
+  }
+  return flatFilterList.value.length !== allCount.value
+})
 
 const clearFilter = () => {
   emit('clear-filter')
@@ -223,8 +226,6 @@ const getList = () => {
           releaseDateList: releaseDateList.value,
           total: weekList.value.reduce((total, week) => total + week.items.length, 0)
         })
-
-        changeFilterList(props.title)
       })
       .catch(e => {
         loadError.value = e?.message || '订阅列表加载失败，请检查服务是否可用'
@@ -242,8 +243,9 @@ const focusAni = aniId => {
   if (!aniId) {
     return
   }
-  // 目标可能被关键词筛选藏住，先清掉文本筛选再滚动定位
-  changeFilterList('')
+  // 目标可能被筛选藏住：让父层清掉全部筛选（关键词/启用/日期）再定位。
+  // 关键词经父层防抖生效，首个 nextTick 可能落空，由 focusAniWithRetry 的重试兜底
+  emit('clear-filter')
   nextTick(() => {
     const el = document.querySelector(`[data-ani-id="${aniId}"]`)
     if (!el) {
@@ -302,7 +304,6 @@ onUnmounted(() => {
 
 defineExpose({
   releaseDateList,
-  changeFilterList,
   getList
 })
 
@@ -396,6 +397,22 @@ defineExpose({
 .cover-grid-container {
   grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
   grid-gap: 24px;
+}
+
+/*
+ * 屏外卡片跳过渲染/绘制：200+ 订阅全量挂载时滚动卡顿的主要来源。
+ * contain-intrinsic-size 提供估算高度（元素渲染过一次后浏览器会记住真实尺寸），
+ * 滚动条高度稳定，任务中心跳转的 scrollIntoView 锚点定位不受影响；
+ * 旧浏览器不支持该属性时自动降级为全量渲染。
+ */
+.cover-grid-container > * {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 260px;
+}
+
+.card-grid-container > * {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 172px;
 }
 
 @media (max-width: 800px) {

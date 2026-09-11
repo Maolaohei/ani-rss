@@ -6,7 +6,9 @@
       <img v-if="item.cover"
            :src="toApiFile(item.cover)"
            :alt="item.title"
-           class="cover-image">
+           class="cover-image"
+           loading="lazy"
+           decoding="async">
       <div v-else class="cover-image cover-empty">
         <el-icon>
           <Picture/>
@@ -19,11 +21,10 @@
         未启用
       </div>
       <div class="cover-overlay">
-        <el-tooltip :content="item.title" placement="top">
-          <el-text class="cover-title" line-clamp="2" @click.stop="openBgmUrl(item)">
-            {{ item.title }}
-          </el-text>
-        </el-tooltip>
+        <!-- 原生 title 代替 el-tooltip：省掉每卡一个 popper 实例，滚动经过光标时不再弹层抖动 -->
+        <el-text class="cover-title" line-clamp="2" :title="item.title" @click.stop="openBgmUrl(item)">
+          {{ item.title }}
+        </el-text>
         <div class="cover-meta">
           <div class="cover-meta-line">
             <span class="cover-meta-fixed">{{ episodeText }}</span>
@@ -36,8 +37,10 @@
         </div>
       </div>
       <div class="cover-actions" :class="{'is-open': actionsVisible}">
+        <!-- persistent=false：菜单仅在点开时挂载，200+ 卡片不再各自常驻一个隐藏弹层 -->
         <el-dropdown trigger="click"
                      placement="top-end"
+                     :persistent="false"
                      @visible-change="actionsVisible = $event">
           <el-button class="cover-action-button" bg circle text @click.stop>
             <el-icon>

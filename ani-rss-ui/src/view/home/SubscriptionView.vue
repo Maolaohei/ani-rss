@@ -12,9 +12,7 @@
               class="subscription-search"
               clearable
               placeholder="搜索"
-              prefix-icon="Search"
-              @clear="changeFilterList"
-              @input="changeFilterList"/>
+              prefix-icon="Search"/>
           <el-select
               v-model:model-value="releaseDate"
               class="subscription-select"
@@ -70,7 +68,7 @@
       <SubscriptionListView
           ref="listRef"
           :filter="filter"
-          :title="title"
+          :title="searchTitle"
           :view-mode="subscriptionViewMode"
           @loaded="listLoaded"
           @clear-filter="onClearFilter"/>
@@ -82,7 +80,7 @@
 import {computed, onActivated, onDeactivated, onMounted, ref} from "vue";
 import {useRouter} from "vue-router";
 import {ElMessage, ElMessageBox} from "element-plus";
-import {useIntervalFn, useLocalStorage} from "@vueuse/core";
+import {useIntervalFn, useLocalStorage, refDebounced} from "@vueuse/core";
 import SubscriptionListView from "@/view/home/SubscriptionListView.vue";
 import AddView from "@/view/home/AddView.vue";
 import CollectionView from "@/view/home/CollectionView.vue";
@@ -124,9 +122,11 @@ const enableSelect = [
 ]
 const filter = ref(() => true)
 
-const changeFilterList = () => {
-  listRef.value?.changeFilterList(title.value)
-}
+/**
+ * 搜索关键词 250ms 防抖后下发给列表：
+ * 子列表改为 prop 驱动的 computed 派生，输入每个字符不再触发全量卡片重渲染
+ */
+const searchTitle = refDebounced(title, 250)
 
 const selectChange = () => {
   filter.value = it => {
@@ -140,7 +140,6 @@ const selectChange = () => {
 
     return releaseDate.value === it.releaseDate.replace(/-\d{2}$/, '')
   }
-  changeFilterList()
 }
 
 const listLoaded = data => {

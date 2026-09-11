@@ -5,6 +5,8 @@
         <img :src="toApiFile(item['cover'])"
              :alt="item.title"
              class="list-card-image"
+             loading="lazy"
+             decoding="async"
              @error="coverFailed = true"
              @click="handleCoverClick"/>
         <span v-if="coverFailed" class="list-card-cover-fallback" aria-hidden="true">
@@ -16,7 +18,8 @@
       <div class="list-card-info">
         <div class="list-card-info-inner">
           <div class="flex">
-            <el-popover trigger="click" placement="top-start" :width="260">
+            <!-- persistent=false：内容仅在点开时挂载。默认 true 会让每张卡的弹层内容常驻 DOM -->
+            <el-popover trigger="click" placement="top-start" :width="260" :persistent="false">
               <template #reference>
                 <span class="list-card-dot"
                       :class="{'is-warn': attentionReasons.length}"
@@ -32,14 +35,14 @@
                 <el-text v-else size="small" type="info">暂无异常</el-text>
               </div>
             </el-popover>
-            <el-tooltip :content="item.title" placement="top">
-              <el-text :line-clamp="1"
-                       @click="openBgmUrl(item)"
-                       class="list-card-title"
-                       truncated>
-                {{ item.title }}
-              </el-text>
-            </el-tooltip>
+            <!-- 原生 title 代替 el-tooltip：el-text 截断时本就自动补 title，省掉每卡一个 popper 实例 -->
+            <el-text :line-clamp="1"
+                     :title="item.title"
+                     @click="openBgmUrl(item)"
+                     class="list-card-title"
+                     truncated>
+              {{ item.title }}
+            </el-text>
           </div>
           <div class="list-card-score-container" v-if="scoreText">
             <h4 class="list-card-score" @click="emit('rate', item)">
@@ -63,11 +66,10 @@
               未启用
             </el-tag>
             <el-tag type="info">
-              <el-tooltip :content="item['subgroup']">
-                <el-text line-clamp="1" size="small" class="list-card-subgroup">
-                  {{ item['subgroup'] ? item['subgroup'] : '未知字幕组' }}
-                </el-text>
-              </el-tooltip>
+              <el-text line-clamp="1" size="small" class="list-card-subgroup"
+                       :title="item['subgroup'] ? item['subgroup'] : '未知字幕组'">
+                {{ item['subgroup'] ? item['subgroup'] : '未知字幕组' }}
+              </el-text>
             </el-tag>
             <el-tag type="warning">
               {{ item['currentEpisodeNumber'] }} /
@@ -83,7 +85,8 @@
               备用RSS
             </el-tag>
             <el-tag v-if="item.healthScore != null" :type="healthTagType">
-              <el-tooltip :content="`运维健康分 ${item.healthScore}（非 BGM 评分）：${healthReasons.join('；')}`"
+              <el-tooltip :show-after="200"
+                          :content="`运维健康分 ${item.healthScore}（非 BGM 评分）：${healthReasons.join('；')}`"
                           placement="top">
                 <span>健康 {{ item.healthScore }}</span>
               </el-tooltip>
@@ -94,7 +97,7 @@
           </div>
           <el-text v-if="showLastDownloadTime && item.lastDownloadTime > 0" size="small"
                    type="info">
-            {{ item.lastDownloadFormat }}
+            {{ lastDownloadFormat }}
           </el-text>
         </div>
         <div class="list-card-actions">
@@ -130,6 +133,7 @@
 <script setup>
 import {computed, ref, watch} from "vue";
 import {coverClickAction, showLastDownloadTime, showPlaylist, showScore, toApiFile} from "@/js/global.js";
+import {fromNow} from "@/js/format.js";
 import {Delete, Edit as EditIcon, Files, Picture} from "@element-plus/icons-vue";
 
 let openBgmUrl = (it) => {
@@ -173,6 +177,9 @@ const scoreText = computed(() => {
   const score = Number(props.item?.score)
   return Number.isFinite(score) && score > 0 ? score.toFixed(1) : ''
 })
+
+// 更新时间由卡片自行派生（item 引用稳定后，列表层不再统一深拷贝计算此字段）
+const lastDownloadFormat = computed(() => fromNow(props.item?.lastDownloadTime))
 
 // 需要用户注意的原因，统一收进状态行的小圆点，不再额外占布局（fork 移植）
 const attentionReasons = computed(() => {
