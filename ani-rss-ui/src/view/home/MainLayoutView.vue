@@ -26,7 +26,7 @@
           <el-icon>
             <Download/>
           </el-icon>
-          <span>下载</span>
+          <span>任务中心</span>
         </el-menu-item>
         <el-menu-item index="/logs">
           <el-icon>

@@ -1,5 +1,5 @@
 <template>
-  <el-dialog v-model="dialogVisible" center title="任务管理器" width="min(820px, 100%)">
+  <div class="task-manager-panel">
     <div class="job-body">
       <!-- 状态不可用时常驻告警：此前会把“接口失败”显示成“空闲” -->
       <el-alert
@@ -190,76 +190,81 @@
           style="margin-top: 12px;"
       />
     </div>
-    <template #footer>
-      <div class="job-footer">
-        <div class="job-footer-group">
-          <el-button bg text @click="refreshNow" :loading="loading">刷新状态</el-button>
-          <el-button
-              type="success"
-              bg
-              text
-              :loading="rechecking"
-              @click="recheckDownloaded"
-          >
-            强制识别已下载
-          </el-button>
-        </div>
-        <el-divider v-if="status.residualSupported" direction="vertical"/>
-        <div v-if="status.residualSupported" class="job-footer-group">
-          <el-button
-              type="warning"
-              bg
-              text
-              :disabled="status.residualCleaning"
-              :loading="cleaning"
-              @click="cleanResidual"
-          >
-            清理离线残留
-          </el-button>
-          <el-button
-              type="warning"
-              bg
-              text
-              :disabled="status.tempDirResidualCleaning"
-              :loading="cleaningTemp"
-              @click="cleanTempDir"
-          >
-            清理临时目录
-          </el-button>
-          <el-button
-              bg
-              text
-              :loading="repairingLegacy"
-              @click="repairLegacy"
-          >
-            遗留问题修复
-          </el-button>
-        </div>
-        <div class="job-footer-spacer"></div>
-        <div class="job-footer-group">
-          <el-button
-              type="danger"
-              bg
-              text
-              :disabled="(!status.canCancel && !taskList.some(t => t.cancellable)) || status.cancelRequested"
-              :loading="cancelingAll"
-              @click="cancelAll"
-          >
-            全部取消
-          </el-button>
-        </div>
+    <div class="job-footer">
+      <div class="job-footer-group">
+        <el-button bg text @click="refreshNow" :loading="loading">刷新状态</el-button>
+        <el-button
+            type="success"
+            bg
+            text
+            :loading="rechecking"
+            @click="recheckDownloaded"
+        >
+          强制识别已下载
+        </el-button>
       </div>
-    </template>
-  </el-dialog>
+      <el-divider v-if="status.residualSupported" direction="vertical"/>
+      <div v-if="status.residualSupported" class="job-footer-group">
+        <el-button
+            type="warning"
+            bg
+            text
+            :disabled="status.residualCleaning"
+            :loading="cleaning"
+            @click="cleanResidual"
+        >
+          清理离线残留
+        </el-button>
+        <el-button
+            type="warning"
+            bg
+            text
+            :disabled="status.tempDirResidualCleaning"
+            :loading="cleaningTemp"
+            @click="cleanTempDir"
+        >
+          清理临时目录
+        </el-button>
+        <el-button
+            bg
+            text
+            :loading="repairingLegacy"
+            @click="repairLegacy"
+        >
+          遗留问题修复
+        </el-button>
+      </div>
+      <div class="job-footer-spacer"></div>
+      <div class="job-footer-group">
+        <el-button
+            type="danger"
+            bg
+            text
+            :disabled="(!status.canCancel && !taskList.some(t => t.cancellable)) || status.cancelRequested"
+            :loading="cancelingAll"
+            @click="cancelAll"
+        >
+          全部取消
+        </el-button>
+      </div>
+    </div>
+  </div>
 </template>
 
 <script setup>
-import {computed, ref} from "vue";
+import {computed, onMounted, onUnmounted, ref} from "vue";
+import {useRouter} from "vue-router";
 import {useIntervalFn} from "@vueuse/core";
 import {ElMessage, ElMessageBox} from "element-plus";
 import * as http from "@/js/http.js";
 
-const dialogVisible = ref(false)
+/**
+ * 任务管理器面板（原独立弹窗，现为任务中心「追番流水线」Tab 的内容）。
+ * 生命周期随挂载启停：挂载即轮询，卸载即停止，无需外部开关。
+ */
+const router = useRouter()
+
+let disposed = false
 let pollToken = 0
 let requestSeq = 0
 let appliedSeq = 0
@@ -357,17 +362,12 @@ const shortRaw = raw => {
   return text.length > 60 ? `${text.slice(0, 60)}…` : text
 }
 
-/** 定位订阅：回到首页并高亮对应卡片（首页已注册 $reLoadList） */
+/** 定位订阅：跨页跳回订阅列表并高亮对应卡片（列表页消费 route.query.focusAni） */
 const focusSubscription = row => {
   if (!row?.aniId) {
     return
   }
-  dialogVisible.value = false
-  if (typeof window.$focusAni === 'function') {
-    window.$focusAni(row.aniId)
-    return
-  }
-  ElMessage.info('请在首页搜索该订阅标题以定位')
+  router.push({path: '/subscriptions', query: {focusAni: row.aniId}})
 }
 
 const residualCountText = computed(() => {
@@ -599,7 +599,6 @@ const applyResponseStatus = (seq, data) => {
 }
 
 const show = () => {
-  dialogVisible.value = true
   statusError.value = ''
   pollStatus()
   // 先取一次真实状态再决定是否加载失败明细：
@@ -664,9 +663,9 @@ const fetchStatus = async () => {
 
 const pollStatus = async () => {
   const token = ++pollToken
-  while (dialogVisible.value && token === pollToken) {
+  while (!disposed && token === pollToken) {
     await fetchStatus()
-    if (!dialogVisible.value || token !== pollToken) break
+    if (disposed || token !== pollToken) break
     const busy = status.value.running
         || status.value.pending
         || status.value.openListBusy
@@ -915,10 +914,21 @@ const retryFailed = async (row) => {
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
-defineExpose({show})
+onMounted(show)
+
+onUnmounted(() => {
+  disposed = true
+  pollToken++
+})
 </script>
 
 <style scoped>
+.task-manager-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
 .job-body {
   min-height: 260px;
 }
@@ -1087,6 +1097,9 @@ defineExpose({show})
   flex-wrap: wrap;
   gap: 8px;
   width: 100%;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--el-border-color-lighter);
 }
 
 .job-footer-group {

@@ -85,7 +85,8 @@
 </template>
 
 <script setup>
-import {computed, nextTick, onMounted, onUnmounted, ref} from "vue";
+import {computed, nextTick, onActivated, onMounted, onUnmounted, ref, watch} from "vue";
+import {useRoute} from "vue-router";
 import EditAniView from "./EditAniView.vue";
 import PlayListView from "@/view/play/PlayListView.vue";
 import CoverView from "./CoverView.vue";
@@ -233,7 +234,7 @@ const getList = () => {
       })
 }
 
-/** 任务管理器跳转定位：清筛选→滚动→短暂高亮 */
+/** 任务中心跳转定位（?focusAni=）：清筛选→滚动→短暂高亮 */
 const highlightId = ref(null)
 let highlightTimer = null
 
@@ -257,10 +258,39 @@ const focusAni = aniId => {
   })
 }
 
+/** 跨页定位（任务中心 → 订阅列表）：首次进入时列表可能尚未加载完，做有限重试 */
+const focusAniWithRetry = (aniId, attempts = 0) => {
+  if (!aniId || attempts > 4) {
+    return
+  }
+  focusAni(aniId)
+  setTimeout(() => {
+    if (!document.querySelector(`[data-ani-id="${aniId}"]`)) {
+      focusAniWithRetry(aniId, attempts + 1)
+    }
+  }, 600)
+}
+
+const route = useRoute()
+
+const focusFromQuery = () => {
+  const id = route.query.focusAni
+  if (id && route.path === '/subscriptions') {
+    focusAniWithRetry(String(id))
+  }
+}
+
+watch(() => route.query.focusAni, focusFromQuery)
+
 onMounted(() => {
   window.$reLoadList = getList
   window.$focusAni = focusAni
   getList()
+  focusFromQuery()
+})
+
+onActivated(() => {
+  focusFromQuery()
 })
 
 onUnmounted(() => {

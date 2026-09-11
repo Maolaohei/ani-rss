@@ -1,8 +1,13 @@
 <template>
   <div class="torrents-page app-page-layout">
-    <PageHeaderView title="下载" :subtitle="`共 ${torrentsInfos.length} 个任务`"/>
+    <PageHeaderView title="任务中心" :subtitle="subtitle"/>
     <div class="torrents-body app-page-content app-page-padding">
-      <div class="torrents-container">
+      <el-tabs v-model="viewTab" class="center-tabs">
+        <el-tab-pane label="下载器任务" name="downloader"/>
+        <el-tab-pane label="追番流水线" name="pipeline"/>
+      </el-tabs>
+
+      <div v-if="viewTab === 'downloader'" class="torrents-container">
         <div class="torrents-toolbar">
           <el-tabs v-model="activeTab" class="torrents-tabs">
             <el-tab-pane name="downloading">
@@ -88,16 +93,57 @@
           </el-card>
         </el-scrollbar>
       </div>
+
+      <TaskManagerView v-else class="pipeline-panel"/>
     </div>
   </div>
 </template>
 
 <script setup>
-import {computed, onActivated, onDeactivated, onUnmounted, ref} from "vue";
+import {computed, onActivated, onDeactivated, onUnmounted, ref, watch} from "vue";
+import {useRoute} from "vue-router";
 import * as http from "@/js/http.js";
 import {ArrowDown, Check, Sort, SortDown, SortUp} from "@element-plus/icons-vue";
 import {formatSize} from "@/js/format.js";
 import PageHeaderView from "@/view/custom/PageHeaderView.vue";
+import TaskManagerView from "@/view/home/TaskManagerView.vue";
+
+/**
+ * 任务中心：单页双 Tab 统一观测入口。
+ * - 下载器任务：外部下载器（qB/T/Aria2）任务列表
+ * - 追番流水线：RSS 调度/离线等待/失败队列/残留运维（原任务管理器弹窗）
+ * 默认 Tab：OpenList 用户落「追番流水线」，其他落「下载器任务」；手动切换记忆（浏览器维度）。
+ */
+const route = useRoute()
+
+const TAB_STORE_KEY = 'task-center-tab'
+const queryTab = route.query.tab === 'pipeline' || route.query.tab === 'downloader' ? route.query.tab : null
+const rememberedTab = localStorage.getItem(TAB_STORE_KEY)
+const viewTab = ref(queryTab || rememberedTab || 'downloader')
+
+const subtitle = computed(() => viewTab.value === 'pipeline'
+    ? '追番流水线 · RSS 调度 / 离线等待 / 失败队列 / 残留运维'
+    : `下载器任务 共 ${torrentsInfos.length} 个`)
+
+// 无显式跳转、无历史记忆时，OpenList 用户默认看流水线
+http.config().then(res => {
+  if (!queryTab && !rememberedTab && res?.data?.downloadToolType === 'OpenList') {
+    viewTab.value = 'pipeline'
+  }
+}).catch(() => {
+})
+
+watch(viewTab, value => {
+  localStorage.setItem(TAB_STORE_KEY, value)
+  value === 'downloader' ? resumePolling() : pausePolling()
+})
+
+// 支持外部带 ?tab= 跳转（订阅页「任务」按钮）
+watch(() => route.query.tab, tab => {
+  if (tab === 'pipeline' || tab === 'downloader') {
+    viewTab.value = tab
+  }
+})
 
 const activeTab = ref('downloading')
 // 记录排序方式
@@ -205,12 +251,41 @@ const pausePolling = () => {
   stopped = true
 }
 
-onActivated(resumePolling)
+onActivated(() => {
+  // 页面被 keep-alive 激活：仅在下载器任务 Tab 恢复轮询（流水线 Tab 自管生命周期）
+  if (viewTab.value === 'downloader') {
+    resumePolling()
+  }
+})
 onDeactivated(pausePolling)
 onUnmounted(pausePolling)
 </script>
 
 <style scoped>
+.center-tabs {
+  flex-shrink: 0;
+  margin-bottom: 8px;
+}
+
+.center-tabs :deep(.el-tabs__header) {
+  margin: 0;
+}
+
+.center-tabs :deep(.el-tabs__nav-wrap:after) {
+  height: 1px;
+}
+
+.center-tabs :deep(.el-tabs__item) {
+  height: 40px;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.pipeline-panel {
+  flex: 1;
+  min-height: 0;
+}
+
 .torrents-container {
   flex: 1;
   min-height: 0;

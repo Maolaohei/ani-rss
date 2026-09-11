@@ -3,7 +3,6 @@
     <AddView ref="addRef" v-model:title="title"/>
     <CollectionView ref="collectionRef"/>
     <ManageView ref="manageRef"/>
-    <TaskManagerView ref="taskManagerRef"/>
     <PageHeaderView title="订阅" :subtitle="`共 ${subscriptionTotal} 个订阅`"/>
     <div class="subscription-body app-page-content app-page-padding">
       <div class="subscription-toolbar">
@@ -60,7 +59,7 @@
               </el-button>
             </template>
           </PopconfirmView>
-          <el-button aria-label="任务管理器" title="任务管理器" @click="taskManagerRef?.show" class="auto-button" icon="List">
+          <el-button aria-label="任务中心" title="任务中心" @click="goTaskCenter" class="auto-button" icon="List">
             任务
           </el-button>
           <el-button aria-label="管理" @click="manageRef?.show" class="auto-button" icon="Fold">
@@ -81,13 +80,13 @@
 
 <script setup>
 import {computed, onActivated, onDeactivated, onMounted, ref} from "vue";
+import {useRouter} from "vue-router";
 import {ElMessage, ElMessageBox} from "element-plus";
 import {useIntervalFn, useLocalStorage} from "@vueuse/core";
 import SubscriptionListView from "@/view/home/SubscriptionListView.vue";
 import AddView from "@/view/home/AddView.vue";
 import CollectionView from "@/view/home/CollectionView.vue";
 import ManageView from "@/view/home/ManageView.vue";
-import TaskManagerView from "@/view/home/TaskManagerView.vue";
 import PopconfirmView from "@/view/custom/PopconfirmView.vue";
 import PageHeaderView from "@/view/custom/PageHeaderView.vue";
 import {subscriptionViewMode} from "@/js/global.js";
@@ -97,7 +96,12 @@ const listRef = ref()
 const addRef = ref()
 const collectionRef = ref()
 const manageRef = ref()
-const taskManagerRef = ref()
+const router = useRouter()
+
+/** 任务中心：跳转并直接落到「追番流水线」Tab */
+const goTaskCenter = () => {
+  router.push({path: '/downloads', query: {tab: 'pipeline'}})
+}
 const title = ref('')
 const releaseDate = ref('')
 const releaseDateList = ref([])

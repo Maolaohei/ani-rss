@@ -446,14 +446,14 @@ const stopBatchPolling = () => {
 
 const waitBatchFinish = (label, ids) => {
   if (batchPollTimer) {
-    ElMessage.warning(`${label}仍在后台执行，请到任务管理器查看进度后再发起新的批量操作`)
+    ElMessage.warning(`${label}仍在后台执行，请到任务中心「追番流水线」查看进度后再发起新的批量操作`)
     return
   }
   const startedAt = Date.now()
   batchPollTimer = setInterval(() => {
     if (Date.now() - startedAt > 10 * 60 * 1000) {
       stopBatchPolling()
-      ElMessage.warning(`${label}仍在后台执行，请到任务管理器查看进度`)
+      ElMessage.warning(`${label}仍在后台执行，请到任务中心「追番流水线」查看进度`)
       return
     }
     http.rssJobStatus({silent: true})
