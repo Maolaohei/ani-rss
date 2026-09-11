@@ -1,10 +1,12 @@
 <template>
   <el-alert
+      v-if="visible"
       class="first-use-guide"
       type="info"
       :closable="true"
       show-icon
       title="首次使用建议按这三步检查，装完就能自动追番"
+      @close="dismiss"
   >
     <template #default>
       <ol class="guide-steps">
@@ -22,16 +24,30 @@
       </el-text>
     </template>
   </el-alert>
+  <div v-else-if="dismissed && hasTodo" class="guide-reopen-row">
+    <el-link class="guide-reopen" type="info" :underline="false" @click="reopen">
+      首次使用清单已收起（仍有待配置项）· 点此重新打开
+    </el-link>
+  </div>
 </template>
 
 <script setup>
 import {computed} from "vue";
+import {useLocalStorage} from "@vueuse/core";
 
 /**
  * 首次使用引导（P1-25）：把最小可跑闭环拆成"下载器 / 保存位置 / 通知"三步，
  * 状态只基于已保存/正在编辑的配置字段，不额外发请求。
+ *
+ * 展示规则：
+ * - 三步全部「已就绪」→ 不显示（引导使命完成）
+ * - 有待配置项 → 显示；点 X 写入 localStorage（浏览器维度），后续不再自动弹出
+ * - 已收起且仍有待配置项 → 显示一行小链接，可随时重新展开
  */
 let props = defineProps(['config'])
+
+// 浏览器维度记忆（清缓存/换浏览器会重新出现，对"首次使用"语义合理）
+const dismissed = useLocalStorage('first-use-guide-dismissed', false)
 
 const configuredDownloader = computed(() => {
   const config = props.config || {}
@@ -84,11 +100,30 @@ const steps = computed(() => [
     todoText: '到「通知」添加一个渠道（Telegram/Bark/Webhook 等）并点测试，收不到也能正常下载'
   }
 ])
+
+const hasTodo = computed(() => steps.value.some(step => !step.ok))
+const visible = computed(() => !dismissed.value && hasTodo.value)
+
+const dismiss = () => {
+  dismissed.value = true
+}
+
+const reopen = () => {
+  dismissed.value = false
+}
 </script>
 
 <style scoped>
 .first-use-guide {
   margin-bottom: 8px;
+}
+
+.guide-reopen-row {
+  margin-bottom: 8px;
+}
+
+.guide-reopen {
+  font-size: 12px;
 }
 
 .guide-steps {
