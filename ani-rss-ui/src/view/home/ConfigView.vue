@@ -2,6 +2,14 @@
   <div v-loading="loading" class="config-page app-page-layout">
     <PageHeaderView title="设置" :subtitle="activeDescription">
       <template #actions>
+        <el-input
+            v-model="settingsKeyword"
+            class="config-search-input"
+            clearable
+            :prefix-icon="Search"
+            placeholder="搜索设置，如 白名单 / OAuth / 代理"
+            @input="onSearchSettings"
+            @clear="onSearchSettings"/>
         <el-button
             class="config-save-button"
             bg text
@@ -16,6 +24,20 @@
         </el-button>
       </template>
     </PageHeaderView>
+    <div v-if="settingsKeyword.trim()" class="config-search-hits app-page-content app-page-padding">
+      <template v-if="matchedTabs.length">
+        <el-text size="small" type="info">命中 {{ matchedTabs.length }} 个页签：</el-text>
+        <el-link
+            v-for="tab in matchedTabs"
+            :key="tab.name"
+            class="config-search-link"
+            type="primary"
+            @click="gotoTab(tab.name)">
+          {{ tab.label }}
+        </el-link>
+      </template>
+      <el-text v-else size="small" type="info">没有命中的设置页签，换个说法试试</el-text>
+    </div>
     <div class="config-content app-page-content app-page-padding">
       <el-tabs v-model="activeName" class="segmented-tabs config-tabs">
         <el-tab-pane
@@ -48,7 +70,7 @@
 <script setup>
 import {computed, onMounted, ref} from "vue";
 import {ElMessage} from "element-plus";
-import {Check} from "@element-plus/icons-vue";
+import {Check, Search} from "@element-plus/icons-vue";
 import CryptoJS from "crypto-js";
 import ExcludeView from "@/view/config/ExcludeView.vue";
 import NotificationView from "@/view/config/NotificationView.vue";
@@ -60,6 +82,7 @@ import LoginConfigView from "@/view/config/LoginConfigView.vue";
 import AfdianView from "@/view/config/AfdianView.vue";
 import PageHeaderView from "@/view/custom/PageHeaderView.vue";
 import {configData} from "@/js/config.js";
+import {matchSettings} from "@/js/settings-search.js";
 import * as http from "@/js/http.js";
 
 const configButtonLoading = ref(false)
@@ -79,6 +102,26 @@ const tabs = [
   {name: 'about', label: '关于', description: '版本信息与项目链接'}
 ]
 const activeDescription = computed(() => tabs.find(tab => tab.name === activeName.value)?.description || '')
+
+/**
+ * 设置项搜索（fork 移植）：页签粒度的关键词索引，
+ * 唯一命中自动切换，多条命中给出可点的页签链接。
+ */
+const settingsKeyword = ref('')
+const matchedTabs = ref([])
+
+const onSearchSettings = () => {
+  matchedTabs.value = matchSettings(settingsKeyword.value)
+  if (matchedTabs.value.length === 1) {
+    activeName.value = matchedTabs.value[0].name
+  }
+}
+
+const gotoTab = name => {
+  activeName.value = name
+  settingsKeyword.value = ''
+  matchedTabs.value = []
+}
 
 const loadConfig = () => {
   loading.value = true
@@ -120,6 +163,22 @@ onMounted(() => {
 <style scoped>
 .config-page {
   padding-bottom: 8px;
+}
+
+.config-search-input {
+  width: 230px;
+}
+
+.config-search-hits {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-bottom: 0;
+}
+
+.config-search-link {
+  margin-right: 4px;
 }
 
 .config-tabs {

@@ -1,6 +1,6 @@
 <template>
   <div class="subscription-page app-page-layout">
-    <AddView ref="addRef"/>
+    <AddView ref="addRef" v-model:title="title"/>
     <CollectionView ref="collectionRef"/>
     <ManageView ref="manageRef"/>
     <TaskManagerView ref="taskManagerRef"/>
