@@ -115,11 +115,24 @@ public class TorrentUtil {
         String infoHash = item.getInfoHash();
         File torrents = getTorrentDir(ani);
         String torrent = item.getTorrent();
+
+        // port upstream 3.2.30: 缓存文件已存在时直接复用，
+        // 避免同 infoHash 在磁力/种子表示间切换导致缓存文件名漂移、重复下载
+        File txtFile = new File(torrents, infoHash + ".txt");
+        File torrentFile = new File(torrents, infoHash + ".torrent");
+
+        if (txtFile.exists()) {
+            return txtFile;
+        }
+        if (torrentFile.exists()) {
+            return torrentFile;
+        }
+
         if (ReUtil.contains(StringEnum.MAGNET_REG, torrent)
                 || ReUtil.contains(StringEnum.ED2K_REG, torrent)) {
-            return new File(torrents, infoHash + ".txt");
+            return txtFile;
         }
-        return new File(torrents, infoHash + ".torrent");
+        return torrentFile;
     }
 
     /**

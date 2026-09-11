@@ -249,6 +249,6 @@ public class NfoGenerator {
             throw e;
         }
 
-        log.info("已保存NFO {}", savePath);
+        log.info("已保存 NFO {}", savePath);
     }
 }
