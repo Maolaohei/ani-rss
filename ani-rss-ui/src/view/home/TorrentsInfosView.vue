@@ -1,6 +1,6 @@
 <template>
   <div class="torrents-page app-page-layout">
-    <PageHeaderView title="任务中心" :subtitle="subtitle"/>
+    <PageHeaderView title="任务" :subtitle="subtitle"/>
     <div class="torrents-body app-page-content app-page-padding">
       <el-tabs v-model="viewTab" class="center-tabs">
         <el-tab-pane label="下载器任务" name="downloader"/>
@@ -123,7 +123,7 @@ const viewTab = ref(queryTab || rememberedTab || 'downloader')
 
 const subtitle = computed(() => viewTab.value === 'pipeline'
     ? '追番流水线 · RSS 调度 / 离线等待 / 失败队列 / 残留运维'
-    : `下载器任务 共 ${torrentsInfos.length} 个`)
+    : `下载器任务 共 ${torrentsInfos.value.length} 个`)
 
 // 无显式跳转、无历史记忆时，OpenList 用户默认看流水线
 http.config().then(res => {
@@ -262,6 +262,14 @@ onUnmounted(pausePolling)
 </script>
 
 <style scoped>
+/* 内容区白底卡片化：与首页 metric/分区同一视觉语言 */
+.torrents-body {
+  background: var(--el-bg-color);
+  border-radius: 8px;
+  padding-top: 8px;
+  padding-bottom: 12px;
+}
+
 .center-tabs {
   flex-shrink: 0;
   margin-bottom: 8px;

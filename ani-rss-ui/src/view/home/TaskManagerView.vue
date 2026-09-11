@@ -994,7 +994,8 @@ onUnmounted(() => {
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
   padding: 12px;
-  background: var(--el-fill-color-blank);
+  /* 灰底：白底面板上仅靠边框区分层次不足 */
+  background: var(--el-fill-color-light);
 }
 
 .task-head {
@@ -1052,7 +1053,7 @@ onUnmounted(() => {
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
   padding: 10px 12px;
-  background: var(--el-fill-color-blank);
+  background: var(--el-fill-color-light);
   max-height: 240px;
   overflow: auto;
 }

@@ -329,6 +329,9 @@ defineExpose({
 
 .list-content {
   margin: 0;
+  background: var(--el-bg-color);
+  border-radius: 8px;
+  padding: 10px 12px 12px;
 }
 
 .list-toolbar {
