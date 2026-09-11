@@ -42,6 +42,8 @@
       <div class="items-table-container">
         <el-table :data="showItems" height="500"
                   size="small"
+                  row-key="infoHash"
+                  :tree-props="{children: 'children', hasChildren: 'hasChildren'}"
                   @selection-change="handleSelectionChange"
                   scrollbar-always-on
                   stripe>
@@ -69,6 +71,13 @@
               <el-tag v-else>是</el-tag>
             </template>
           </el-table-column>
+          <el-table-column label="来源" width="80">
+            <template #default="it">
+              <el-tag v-if="showItems[it.$index]['children']" type="warning" size="small">合集</el-tag>
+              <el-tag v-else-if="showItems[it.$index]['episodeRange']" size="small">子集</el-tag>
+              <el-tag v-else type="info" size="small">单集</el-tag>
+            </template>
+          </el-table-column>
           <el-table-column label="字幕组" min-width="100">
             <template #default="it">
               <el-text size="small" truncated>
@@ -79,7 +88,15 @@
           <el-table-column label="标题" min-width="400">
             <template #default="it">
               <el-text size="small">
-                {{ showItems[it.$index].title }}
+                <template v-if="showItems[it.$index]['children']">
+                  {{ showItems[it.$index].title }} (共 {{ showItems[it.$index]['children'].length }} 集)
+                </template>
+                <template v-else-if="showItems[it.$index]['episodeRange']">
+                  子集 {{ String(showItems[it.$index]['episode']).padStart(2, '0') }}
+                </template>
+                <template v-else>
+                  {{ showItems[it.$index].title }}
+                </template>
               </el-text>
             </template>
           </el-table-column>
@@ -136,6 +153,13 @@ let handleSelectionChange = (selectViewsValue) => {
 }
 
 const select = ref('全部')
+// 合集父行自身字段可能与子集不一致，筛选按 children 聚合判定
+const isDownloaded = it => {
+  if (it.children?.length) {
+    return it.children.every(child => child.hasDownloaded)
+  }
+  return !!it.hasDownloaded
+}
 const selectItems = ref([
   {
     label: '全部',
@@ -143,11 +167,11 @@ const selectItems = ref([
   },
   {
     label: '已下载',
-    fun: it => it['hasDownloaded']
+    fun: it => isDownloaded(it)
   },
   {
     label: '未下载',
-    fun: it => !it['hasDownloaded']
+    fun: it => !isDownloaded(it)
   }
 ])
 const dialogVisible = ref(false)

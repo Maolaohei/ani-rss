@@ -48,7 +48,6 @@
                 Infuse
               </el-text>
             </el-dropdown-item>
-          </el-dropdown-menu>
           <el-dropdown-item @click="openUrl(`ddplay:${encodeUrl(playItem.src)}|filePath=${playItem.name}`)">
             <el-text>
               <el-icon>
@@ -74,6 +73,7 @@
               SenPlayer
             </el-text>
           </el-dropdown-item>
+          </el-dropdown-menu>
         </template>
       </el-dropdown>
     </div>

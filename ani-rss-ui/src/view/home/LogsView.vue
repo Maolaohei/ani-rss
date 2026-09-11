@@ -40,6 +40,9 @@
             class="log-search"
             clearable
             placeholder="搜索日志"/>
+        <el-tooltip content="自动滚动到最新日志；手动向上翻阅时请关闭" placement="top">
+          <el-switch v-model="followTail" active-text="跟随" inline-prompt/>
+        </el-tooltip>
         <el-select
             v-model="selectLevels"
             class="level-select"
@@ -178,9 +181,15 @@ const filteredLogs = computed(() => {
 })
 
 const scrollToBottom = async () => {
+  if (!followTail.value) {
+    return
+  }
   await nextTick()
   scrollbarRef.value?.setScrollTop(innerRef.value?.scrollHeight || 0)
 }
+
+// 「跟随」开关：手动向上翻阅历史日志时自动停止跟随，避免拉取刷新把视图拽回底部
+const followTail = ref(true)
 
 const getLogs = () => {
   getLogsLoading.value = true
