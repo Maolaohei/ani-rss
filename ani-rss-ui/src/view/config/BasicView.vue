@@ -1,4 +1,5 @@
 <template>
+  <FirstUseGuideView :config="props.config"/>
   <el-collapse v-model:model-value="activeName" accordion>
     <el-collapse-item name="page" title="页面设置">
       <PageView :config="props.config"/>
@@ -41,6 +42,7 @@ import OtherView from "@/view/config/basic/OtherView.vue";
 import BangumiView from "@/view/config/basic/BangumiView.vue";
 import BackupView from "./basic/BackupView.vue";
 import ScrapeView from "./basic/ScrapeView.vue";
+import FirstUseGuideView from "@/view/config/basic/FirstUseGuideView.vue";
 
 let activeName = ref('page')
 
