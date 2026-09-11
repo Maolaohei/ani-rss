@@ -200,7 +200,7 @@ const subscriptionTotal = computed(() => subscriptionTotalValue.value || flatAni
 const enabledTotal = computed(() => flatAnis.value.filter(item => item.enable).length)
 const todayAnis = computed(() => {
   const today = weekList.value.find(week => week.weekLabel === todayLabel.value)
-  return today ? today.items || [] : []
+  return (today ? today.items || [] : []).filter(item => item.enable)
 })
 const todayText = computed(() => todayAnis.value.length ? `${todayAnis.value.length} 个订阅` : '没有订阅')
 const downloadingList = computed(() => torrentsInfos.value.filter(isDownloading))
