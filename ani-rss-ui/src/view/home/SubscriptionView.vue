@@ -85,7 +85,8 @@
           :filter="filter"
           :title="title"
           :view-mode="subscriptionViewMode"
-          @loaded="listLoaded"/>
+          @loaded="listLoaded"
+          @clear-filter="onClearFilter"/>
     </div>
   </div>
 </template>
@@ -154,6 +155,13 @@ const selectChange = () => {
 const listLoaded = data => {
   releaseDateList.value = data.releaseDateList || []
   subscriptionTotal.value = data.total || 0
+}
+
+const onClearFilter = () => {
+  title.value = ''
+  enable.value = '全部'
+  releaseDate.value = ''
+  selectChange()
 }
 
 const refreshAni = () => {

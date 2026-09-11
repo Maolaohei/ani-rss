@@ -7,13 +7,47 @@
   <div class="list-container" v-loading="loading">
     <el-scrollbar class="hide-scrollbar">
       <div class="list-content">
+        <div class="list-toolbar">
+          <el-text size="small" type="info">
+            {{ hasFilter ? `筛出 ${flatFilterList.length} / ${allCount} 项` : `共 ${allCount} 项` }}
+          </el-text>
+          <el-select
+              v-model="sortType"
+              class="list-sort-select"
+              size="small"
+              aria-label="订阅排序方式"
+              @change="applySort">
+            <el-option
+                v-for="option in sortOptions"
+                :key="option.value"
+                :label="option.label"
+                :value="option.value"/>
+          </el-select>
+        </div>
+        <el-alert v-if="loadError" class="list-error" type="error" show-icon :closable="false">
+          <template #title>
+            <div class="list-error-row">
+              <span>{{ loadError }}</span>
+              <el-button size="small" bg text @click="getList">重试</el-button>
+            </div>
+          </template>
+        </el-alert>
+        <template v-else>
+          <el-empty v-if="!allCount" description="还没有订阅，点右上角「添加订阅」开始追番"/>
+          <el-empty v-else-if="!flatFilterList.length" description="没有符合条件的订阅">
+            <el-button size="small" bg text @click="clearFilter">清空筛选</el-button>
+          </el-empty>
+        </template>
         <template v-if="showWeek">
           <div v-for="weekItem in filterList" :key="weekItem.weekLabel">
-            <h2 class="list-week-title">
+            <h2 class="list-week-title" :class="{'is-today': weekItem.isToday}">
               {{ weekItem.weekLabel }}
+              <el-tag v-if="weekItem.isToday" class="list-today-tag" size="small" type="primary">今天</el-tag>
             </h2>
             <div :class="gridClass">
-              <div v-for="item in weekItem.items" :key="item.id">
+              <div v-for="item in weekItem.items" :key="item.id"
+                   :data-ani-id="item.id"
+                   :class="{'list-item-highlight': highlightId === item.id}">
                 <component
                     :is="viewComponent"
                     :item="item"
@@ -29,7 +63,9 @@
         </template>
         <template v-else>
           <div :class="gridClass">
-            <div v-for="item in flatFilterList" :key="item.id">
+            <div v-for="item in flatFilterList" :key="item.id"
+                 :data-ani-id="item.id"
+                 :class="{'list-item-highlight': highlightId === item.id}">
               <component
                   :is="viewComponent"
                   :item="item"
@@ -49,7 +85,7 @@
 </template>
 
 <script setup>
-import {computed, onMounted, ref} from "vue";
+import {computed, nextTick, onMounted, onUnmounted, ref} from "vue";
 import EditAniView from "./EditAniView.vue";
 import PlayListView from "@/view/play/PlayListView.vue";
 import CoverView from "./CoverView.vue";
@@ -69,7 +105,7 @@ const props = defineProps({
     default: 'card'
   }
 })
-const emit = defineEmits(['loaded'])
+const emit = defineEmits(['loaded', 'clear-filter'])
 
 const editAniRef = ref()
 const delAniRef = ref()
@@ -83,30 +119,67 @@ const flatFilterList = ref([])
 const releaseDateList = ref([])
 
 const loading = ref(true)
+const loadError = ref('')
+const allCount = ref(0)
 const viewComponent = computed(() => props.viewMode === 'cover' ? AniCoverView : AniCardView)
 const gridClass = computed(() => [
   'grid-container',
   props.viewMode === 'cover' ? 'cover-grid-container' : 'card-grid-container'
 ])
 
+const hasFilter = computed(() => {
+  if (allCount.value === 0) {
+    return false
+  }
+  return flatFilterList.value.length !== allCount.value
+})
+
+/** 首页排序：后端默认顺序 / 最近更新 / 评分 / 标题拼音（fork 移植） */
+const sortType = ref('default')
+const sortOptions = [
+  {label: '默认排序', value: 'default'},
+  {label: '最近更新', value: 'lastDownloadTime'},
+  {label: '评分最高', value: 'score'},
+  {label: '标题拼音', value: 'pinyin'}
+]
+
+const sortFlatList = list => {
+  switch (sortType.value) {
+    case 'lastDownloadTime':
+      return [...list].sort((a, b) => (b.lastDownloadTime || 0) - (a.lastDownloadTime || 0))
+    case 'score':
+      return [...list].sort((a, b) => (b.score || 0) - (a.score || 0))
+    case 'pinyin':
+      return [...list].sort((a, b) => (a.pinyin || a.title || '').localeCompare(b.pinyin || b.title || '', 'zh'))
+    default:
+      return [...list].sort((a, b) => a.sort - b.sort)
+  }
+}
+
+const applySort = () => {
+  changeFilterList(props.title)
+}
+
 const changeFilterList = (text = '') => {
-  let tempList = weekList.value;
-  tempList = JSON.parse(JSON.stringify(tempList))
+  let tempList = JSON.parse(JSON.stringify(weekList.value))
+  const keyword = String(text || '').trim().toLowerCase()
 
   const filter = item => {
-    if (text.length < 1) {
+    if (!keyword) {
       return true
     }
-    let {title, pinyin, pinyinInitials} = item
-    return title.indexOf(text) > -1 ||
-        pinyin.indexOf(text) > -1 ||
-        pinyinInitials.indexOf(text) > -1;
+    let {title, pinyin, pinyinInitials, subgroup} = item
+    return (title || '').toLowerCase().indexOf(keyword) > -1 ||
+        (pinyin || '').toLowerCase().indexOf(keyword) > -1 ||
+        (pinyinInitials || '').toLowerCase().indexOf(keyword) > -1 ||
+        (subgroup || '').toLowerCase().indexOf(keyword) > -1
   }
+
+  const todayLabel = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'][new Date().getDay()]
 
   filterList.value = tempList
       .map(it => {
-        let items = it.items;
-        items = items
+        let items = (it.items || [])
             .filter(props.filter)
             .filter(filter)
             .map(it => {
@@ -114,19 +187,31 @@ const changeFilterList = (text = '') => {
             });
         return {
           weekLabel: it.weekLabel,
-          items
+          isToday: it.weekLabel === todayLabel,
+          items: sortType.value === 'default' ? items : sortFlatList(items)
         }
       })
       .filter(it => it.items.length)
 
-  // 当不按星期展示时，展平并排序
-  flatFilterList.value = Array.from(filterList.value)
-      .flatMap(it => it.items)
-      .sort((a, b) => a.sort - b.sort)
+  // 今天置顶：后端已把今天排首位，这里仅在缺失时补一次，保证"今天更新了哪几部"一眼可见
+  const todayIndex = filterList.value.findIndex(it => it.isToday)
+  if (todayIndex > 0) {
+    const [todayGroup] = filterList.value.splice(todayIndex, 1)
+    filterList.value.unshift(todayGroup)
+  }
+
+  allCount.value = tempList.reduce((total, week) => total + (week.items || []).length, 0)
+  let flat = filterList.value.flatMap(it => it.items)
+  flatFilterList.value = sortType.value === 'default' ? flat : sortFlatList(flat)
+}
+
+const clearFilter = () => {
+  emit('clear-filter')
 }
 
 const getList = () => {
   loading.value = true
+  loadError.value = ''
 
   listAni()
       .then(res => {
@@ -140,14 +225,49 @@ const getList = () => {
 
         changeFilterList(props.title)
       })
+      .catch(e => {
+        loadError.value = e?.message || '订阅列表加载失败，请检查服务是否可用'
+      })
       .finally(() => {
         loading.value = false
       })
 }
 
+/** 任务管理器跳转定位：清筛选→滚动→短暂高亮 */
+const highlightId = ref(null)
+let highlightTimer = null
+
+const focusAni = aniId => {
+  if (!aniId) {
+    return
+  }
+  // 目标可能被关键词筛选藏住，先清掉文本筛选再滚动定位
+  changeFilterList('')
+  nextTick(() => {
+    const el = document.querySelector(`[data-ani-id="${aniId}"]`)
+    if (!el) {
+      return
+    }
+    el.scrollIntoView({behavior: 'smooth', block: 'center'})
+    highlightId.value = aniId
+    clearTimeout(highlightTimer)
+    highlightTimer = setTimeout(() => {
+      highlightId.value = null
+    }, 2000)
+  })
+}
+
 onMounted(() => {
   window.$reLoadList = getList
+  window.$focusAni = focusAni
   getList()
+})
+
+onUnmounted(() => {
+  if (window.$focusAni === focusAni) {
+    delete window.$focusAni
+  }
+  clearTimeout(highlightTimer)
 })
 
 defineExpose({
@@ -181,8 +301,54 @@ defineExpose({
   margin: 0;
 }
 
+.list-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 4px 0 0 4px;
+}
+
+.list-sort-select {
+  width: 118px;
+}
+
 .list-week-title {
   margin: 16px 0 8px 4px;
+}
+
+.list-week-title.is-today {
+  color: var(--el-color-primary);
+}
+
+.list-today-tag {
+  margin-left: 6px;
+}
+
+.list-item-highlight {
+  animation: list-item-flash 2s ease-out;
+  border-radius: 10px;
+}
+
+@keyframes list-item-flash {
+  0%, 40% {
+    box-shadow: 0 0 0 2px var(--el-color-primary-light-5);
+  }
+  100% {
+    box-shadow: 0 0 0 2px transparent;
+  }
+}
+
+.list-error {
+  margin: 12px 4px;
+}
+
+.list-error-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .list-bottom-spacer {
