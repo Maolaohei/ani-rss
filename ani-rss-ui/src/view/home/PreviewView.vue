@@ -1,5 +1,5 @@
 <template class="items">
-  <el-dialog v-model="dialogVisible" center class="el-dialog-auto-width" title="预览">
+  <el-dialog v-model="dialogVisible" center class="el-dialog-auto-width" title="预览" @closed="resetPreview">
     <div class="items-content" v-loading="loading">
       <div class="items-select-container">
         <el-select v-model:model-value="select" class="items-select" @change="selectChange">
@@ -182,20 +182,54 @@ const data = ref({
 })
 const loading = ref(true)
 
-let copy = (v) => {
+// port upstream 3.2.30: navigator.clipboard 优先，失败回退 execCommand（非 HTTPS 环境兜底）
+const fallbackCopy = value => {
   const input = document.createElement('input');
-  input.value = v
+  input.value = value
   document.body.appendChild(input);
   input.select();
-  document.execCommand('copy');
+  const copied = document.execCommand('copy');
   document.body.removeChild(input);
-  ElMessage.success('已复制')
+  return copied
+}
+
+let copy = async (v) => {
+  let copied = false
+  try {
+    if (!navigator.clipboard?.writeText) {
+      throw new Error('Clipboard API is unavailable')
+    }
+    await navigator.clipboard.writeText(v)
+    copied = true
+  } catch {
+    copied = fallbackCopy(v)
+  }
+
+  if (copied) {
+    ElMessage.success('已复制')
+  } else {
+    ElMessage.error('复制失败')
+  }
+}
+
+let loadVersion = 0
+
+const resetPreview = () => {
+  loadVersion++
+  select.value = '全部'
+  data.value = {
+    'downloadPath': '',
+    'items': [],
+    'omitList': []
+  }
+  showItems.value = []
+  selectViews.value = []
+  loading.value = false
+  forceDownloading.value = false
 }
 
 let show = () => {
-  data.value.downloadPath = ''
-  data.value.items = []
-  select.value = '全部'
+  resetPreview()
   dialogVisible.value = true
   load()
 }
@@ -207,14 +241,21 @@ let selectChange = () => {
 let showItems = ref([])
 
 let load = () => {
+  // port upstream 3.2.30: 竞态守卫，旧请求返回不再覆盖新数据/重置 loading
+  const currentVersion = ++loadVersion
   loading.value = true
   http.previewAni(props.ani)
       .then(res => {
+        if (currentVersion !== loadVersion) {
+          return
+        }
         data.value = res.data
         selectChange()
       })
       .finally(() => {
-        loading.value = false
+        if (currentVersion === loadVersion) {
+          loading.value = false
+        }
       })
 }
 
