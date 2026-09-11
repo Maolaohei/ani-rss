@@ -205,7 +205,7 @@ public class ConfigController extends BaseController {
 
                         String title = Jsoup.parse(res.body())
                                 .title();
-                        result.setMessage(StrFormatter.format("测试成功 {}", title));
+                        proxyTest.setTitle(title);
                     });
         } catch (Exception e) {
             result.setMessage(e.getMessage())

@@ -6,7 +6,7 @@
              :alt="item.title"
              class="list-card-image"
              @error="coverFailed = true"
-             @click="openBgmUrl(item)"/>
+             @click="handleCoverClick"/>
         <span v-if="coverFailed" class="list-card-cover-fallback" aria-hidden="true">
           <el-icon>
             <Picture/>
@@ -129,7 +129,7 @@
 
 <script setup>
 import {computed, ref, watch} from "vue";
-import {showLastDownloadTime, showPlaylist, showScore, toApiFile} from "@/js/global.js";
+import {coverClickAction, showLastDownloadTime, showPlaylist, showScore, toApiFile} from "@/js/global.js";
 import {Delete, Edit as EditIcon, Files, Picture} from "@element-plus/icons-vue";
 
 let openBgmUrl = (it) => {
@@ -150,6 +150,14 @@ let decodeURLComponentSafe = (str) => {
 
 const emit = defineEmits(['edit', 'playlist', 'cover', 'del', 'rate'])
 let props = defineProps(["item"])
+
+// port upstream 3.2.29 (#725): 点击封面行为可在设置中自定义
+const handleCoverClick = () => {
+  const action = ['edit', 'playlist', 'cover'].includes(coverClickAction.value)
+      ? coverClickAction.value
+      : 'cover'
+  emit(action, props.item)
+}
 
 // 封面加载失败兜底：显示占位图标而不是裂图
 const coverFailed = ref(false)

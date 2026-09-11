@@ -14,8 +14,6 @@ import ch.qos.logback.classic.spi.StackTraceElementProxy;
 import ch.qos.logback.core.Appender;
 import ch.qos.logback.core.filter.AbstractMatcherFilter;
 import ch.qos.logback.core.spi.FilterReply;
-import cn.hutool.core.date.DatePattern;
-import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.io.IoUtil;
 import cn.hutool.core.io.resource.ResourceUtil;
 import cn.hutool.core.text.StrFormatter;
@@ -28,7 +26,6 @@ import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Collections;
-import java.util.Date;
 import java.util.List;
 import java.util.Objects;
 
@@ -80,16 +77,17 @@ public class LogUtil {
                     public FilterReply decide(ILoggingEvent event) {
                         Instant instant = event.getInstant();
                         long timestamp = instant.toEpochMilli();
-                        String date = DateUtil.format(new Date(timestamp), DatePattern.NORM_DATETIME_PATTERN);
                         String level = event.getLevel().toString();
                         String loggerName = event.getLoggerName();
                         String formattedMessage = event.getFormattedMessage();
                         String threadName = event.getThreadName();
-                        StringBuilder log = new StringBuilder(StrFormatter.format("{} {} [{}] {} - {}", date, level, threadName, loggerName, formattedMessage));
+                        // port upstream 3.2.30: message 只保留正文+异常，
+                        // 时间由 timestamp 字段承载，前端自行格式化
+                        StringBuilder message = new StringBuilder(formattedMessage);
                         IThrowableProxy throwableProxy = event.getThrowableProxy();
-                        addThrowableMsg(log, throwableProxy);
+                        addThrowableMsg(message, throwableProxy);
                         Log logEntity = new Log()
-                                .setMessage(log.toString())
+                                .setMessage(message.toString())
                                 .setLevel(level)
                                 .setTimestamp(timestamp)
                                 .setLoggerName(loggerName)

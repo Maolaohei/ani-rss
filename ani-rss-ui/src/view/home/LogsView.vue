@@ -4,28 +4,19 @@
       <template #actions>
         <div class="log-actions">
           <el-tooltip content="下载完整日志（含历史文件）" placement="bottom">
-            <el-button @click="downloadLogs" :loading="downloadLoading" bg text>
-              <el-icon>
-                <DownloadIcon/>
-              </el-icon>
-              <span class="action-label">下载</span>
+            <el-button @click="downloadLogs" :loading="downloadLoading" class="auto-button" icon="Download">
+              下载
             </el-button>
           </el-tooltip>
           <el-tooltip content="刷新日志" placement="bottom">
-            <el-button :loading="getLogsLoading" @click="getLogs" bg text>
-              <el-icon>
-                <Refresh/>
-              </el-icon>
-              <span class="action-label">刷新</span>
+            <el-button :loading="getLogsLoading" @click="getLogs" class="auto-button" icon="Refresh">
+              刷新
             </el-button>
           </el-tooltip>
           <PopconfirmView title="清空当前日志?" @confirm="clearLogs">
             <template #reference>
-              <el-button :loading="clearLoading" type="danger" bg text>
-                <el-icon>
-                  <Delete/>
-                </el-icon>
-                <span class="action-label">清空</span>
+              <el-button :loading="clearLoading" type="danger" class="auto-button" icon="Delete">
+                清空
               </el-button>
             </template>
           </PopconfirmView>
@@ -105,7 +96,7 @@
                   <span class="thread-name">{{ entry.threadName || '未知线程' }}</span>
                 </div>
               </el-tooltip>
-              <pre class="log-message">{{ entry.content }}</pre>
+              <pre class="log-message">{{ entry.message }}</pre>
             </div>
           </div>
         </el-scrollbar>
@@ -117,11 +108,12 @@
 <script setup>
 import {computed, nextTick, onActivated, ref} from "vue";
 import {ElMessage} from "element-plus";
-import {Delete, Download as DownloadIcon, Refresh, Search} from "@element-plus/icons-vue";
+import {Search} from "@element-plus/icons-vue";
 import {authorization} from "@/js/global.js";
 import PopconfirmView from "@/view/custom/PopconfirmView.vue";
 import PageHeaderView from "@/view/custom/PageHeaderView.vue";
 import * as http from "@/js/http.js";
+import {formatTime} from "@/js/format.js";
 
 const levels = ['DEBUG', 'INFO', 'WARN', 'ERROR']
 const loading = ref(true)
@@ -143,21 +135,13 @@ const levelCounts = computed(() => Object.fromEntries(
 ))
 
 const normalizedLogs = computed(() => logs.value.map(item => {
-  const message = item.message || ''
-  const timestamp = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(message)
-      ? message.slice(0, 19)
-      : ''
-  const delimiter = item.loggerName ? ` ${item.loggerName} - ` : ''
-  const contentStart = delimiter ? message.indexOf(delimiter) : -1
-  const content = contentStart >= 0
-      ? message.slice(contentStart + delimiter.length)
-      : message
+  // port upstream 3.2.30: 后端直接下发 timestamp（epoch 毫秒），message 即正文，不再前端正则拆前缀
+  const timestamp = item.timestamp ? formatTime(item.timestamp) : ''
 
   return {
     ...item,
     timestamp,
     time: timestamp.slice(11),
-    content,
     shortLoggerName: item.loggerName?.split('.').pop() || '未知来源'
   }
 }))
@@ -280,10 +264,6 @@ onActivated(getLogs)
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px;
-  border: 1px solid var(--el-border-color-light);
-  border-radius: 8px;
-  background-color: var(--el-bg-color);
   margin-bottom: 8px;
 }
 
@@ -348,7 +328,6 @@ onActivated(getLogs)
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border: 1px solid var(--el-border-color-light);
   border-radius: 8px;
   background-color: var(--el-bg-color);
 }
@@ -498,10 +477,6 @@ onActivated(getLogs)
 }
 
 @media (max-width: 700px) {
-  .action-label {
-    display: none;
-  }
-
   .logs-toolbar {
     display: grid;
     grid-template-columns: minmax(0, 1fr);

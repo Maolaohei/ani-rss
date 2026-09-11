@@ -106,7 +106,7 @@ export let configData = {
     // 后端字段：禁止自动更新（导入/导出时保持一致）
     "disableUpdate": true,
     "version": "",
-    "bgmImage": "large",
+    "bgmImageSize": "medium",
     "customCss": "",
     "customJs": "",
     "customEpisode": false,

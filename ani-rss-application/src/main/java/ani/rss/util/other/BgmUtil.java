@@ -916,7 +916,9 @@ public class BgmUtil {
      * @return
      */
     public static Ani toAni(BgmInfo bgmInfo, Ani ani) {
-        String bgmImage = config.getBgmImage();
+        // port upstream 3.2.26: 配置键更名 bgmImage -> bgmImageSize，默认 medium；
+        // 存量配置无该键时回落 medium，避免 ReflectUtil 拿到 null 字段名
+        String bgmImageSize = StrUtil.blankToDefault(config.getBgmImageSize(), "medium");
         // 使用tmdb标题
         Boolean tmdb = config.getTmdb();
 
@@ -926,7 +928,7 @@ public class BgmUtil {
 
         BgmInfo.Images images = bgmInfo.getImages();
 
-        String image = (String) ReflectUtil.getFieldValue(images, bgmImage);
+        String image = (String) ReflectUtil.getFieldValue(images, bgmImageSize);
 
         double score = Optional.ofNullable(bgmInfo.getRating())
                 .map(BgmInfo.Rating::getScore)
