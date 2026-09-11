@@ -1,7 +1,7 @@
 <template>
   <ImportAniView ref="importAniRef" @callback="getList"/>
   <DelAniView ref="delAniRef" @callback="reLoadList"/>
-  <el-dialog v-model="dialogVisible" center title="管理">
+  <el-dialog v-model="dialogVisible" center title="管理" @closed="stopBatchPolling">
     <div class="manage-content" v-loading="loading">
       <div class="manage-header">
         <div class="auto-flex mange-toolbar">
@@ -36,12 +36,22 @@
             </el-select>
           </div>
         </div>
-        <div>
+        <div class="manage-actions">
+          <el-button-group class="manage-selection-tools">
+            <el-button size="small" bg text @click="selectAll">全选</el-button>
+            <el-button size="small" bg text @click="invertSelection">反选</el-button>
+            <el-button size="small" bg text @click="clearSelection">清空</el-button>
+          </el-button-group>
           <el-dropdown trigger="click">
-            <el-button bg text icon="MoreFilled"/>
+            <el-button bg text>
+              <el-icon class="el-icon--left">
+                <Operation/>
+              </el-icon>
+              批量操作（{{ selectList.length }}）
+            </el-button>
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item @click="updateTotalEpisodeNumber(false)">
+                <el-dropdown-item :disabled="!selectList.length" @click="updateTotalEpisodeNumber(false)">
                   <el-text>
                     <el-icon>
                       <RefreshRight/>
@@ -49,15 +59,15 @@
                     更新总集数
                   </el-text>
                 </el-dropdown-item>
-                <el-dropdown-item @click="updateTotalEpisodeNumber(true)">
+                <el-dropdown-item :disabled="!selectList.length" @click="updateTotalEpisodeNumber(true)">
                   <el-text type="warning">
                     <el-icon>
                       <Refresh/>
                     </el-icon>
-                    更新总集数 [F]
+                    强制更新总集数（忽略缓存）
                   </el-text>
                 </el-dropdown-item>
-                <el-dropdown-item divided @click="batchScrape(false)">
+                <el-dropdown-item divided :disabled="!selectList.length" @click="batchScrape(false)">
                   <el-text>
                     <el-icon>
                       <RefreshRight/>
@@ -65,15 +75,15 @@
                     刮削
                   </el-text>
                 </el-dropdown-item>
-                <el-dropdown-item @click="batchScrape(true)">
+                <el-dropdown-item :disabled="!selectList.length" @click="batchScrape(true)">
                   <el-text type="warning">
                     <el-icon>
                       <Refresh/>
                     </el-icon>
-                    刮削 [F]
+                    强制刮削（覆盖已有数据）
                   </el-text>
                 </el-dropdown-item>
-                <el-dropdown-item divided @click="batchEnable(true)">
+                <el-dropdown-item divided :disabled="!selectList.length" @click="batchEnable(true)">
                   <el-text type="primary">
                     <el-icon>
                       <CircleCheck/>
@@ -81,7 +91,7 @@
                     启用
                   </el-text>
                 </el-dropdown-item>
-                <el-dropdown-item @click="batchEnable(false)">
+                <el-dropdown-item :disabled="!selectList.length" @click="batchEnable(false)">
                   <el-text type="warning">
                     <el-icon>
                       <CircleClose/>
@@ -94,23 +104,23 @@
                     <el-icon>
                       <Download/>
                     </el-icon>
-                    导入
+                    导入订阅
                   </el-text>
                 </el-dropdown-item>
-                <el-dropdown-item @click="exportData">
+                <el-dropdown-item :disabled="!selectList.length" @click="exportData">
                   <el-text>
                     <el-icon>
                       <Upload/>
                     </el-icon>
-                    导出
+                    导出选中
                   </el-text>
                 </el-dropdown-item>
-                <el-dropdown-item divided @click="delAniRef?.show(selectList)">
+                <el-dropdown-item divided :disabled="!selectList.length" @click="delSelected">
                   <el-text type="danger">
                     <el-icon>
                       <Remove/>
                     </el-icon>
-                    删除
+                    删除选中
                   </el-text>
                 </el-dropdown-item>
               </el-dropdown-menu>
@@ -119,13 +129,15 @@
         </div>
       </div>
       <el-table
+          ref="tableRef"
           size="small"
+          row-key="id"
           @selection-change="handleSelectionChange"
           v-model:data="searchList"
           height="400px"
           stripe
       >
-        <el-table-column type="selection" width="55" fixed/>
+        <el-table-column type="selection" width="55" fixed :reserve-selection="true"/>
         <el-table-column label="标题" width="200" fixed>
           <template #default="it">
             <el-text :line-clamp="2" size="small">
@@ -141,14 +153,12 @@
             </el-text>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="80">
+        <el-table-column label="启用" width="70">
           <template #default="it">
-            <el-tag v-if="searchList[it.$index].enable">
-              已启用
-            </el-tag>
-            <el-tag v-else type="info">
-              未启用
-            </el-tag>
+            <el-switch
+                :model-value="searchList[it.$index].enable"
+                :loading="searchList[it.$index].enableLoading"
+                @change="value => toggleEnable(value, searchList[it.$index])"/>
           </template>
         </el-table-column>
         <el-table-column label="进度" width="100">
@@ -157,6 +167,21 @@
               {{ searchList[it.$index]['currentEpisodeNumber'] }} /
               {{ searchList[it.$index]['totalEpisodeNumber'] ? searchList[it.$index]['totalEpisodeNumber'] : '*' }}
             </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="漏集" width="70">
+          <template #default="it">
+            <el-tag v-if="searchList[it.$index]['omitCount'] > 0" type="danger" size="small">
+              {{ searchList[it.$index]['omitCount'] }}
+            </el-tag>
+            <el-text v-else size="small" type="info">-</el-text>
+          </template>
+        </el-table-column>
+        <el-table-column label="最近更新" width="120">
+          <template #default="it">
+            <el-text size="small" type="info">
+              {{ searchList[it.$index]['lastDownloadFormat'] || '暂无' }}
+            </el-text>
           </template>
         </el-table-column>
         <el-table-column label="类型" width="100">
@@ -184,12 +209,22 @@
   </el-dialog>
 </template>
 <script setup>
-import {ref} from "vue";
+import {onUnmounted, ref} from "vue";
 import {ElMessage, ElText} from "element-plus";
 import DelAniView from "./DelAniView.vue";
 import ImportAniView from "@/view/home/ImportAniView.vue";
-import {CircleCheck, CircleClose, Download, Refresh, RefreshRight, Remove, Upload} from "@element-plus/icons-vue";
+import {
+  CircleCheck,
+  CircleClose,
+  Download,
+  Operation,
+  Refresh,
+  RefreshRight,
+  Remove,
+  Upload
+} from "@element-plus/icons-vue";
 import * as http from "@/js/http.js";
+import formatTime from "@/js/format-time.js";
 
 let releaseDateList = ref([])
 
@@ -218,14 +253,16 @@ let searchList = ref([])
 let text = ref('')
 
 let changeFilterList = () => {
+  const keyword = text.value.trim().toLowerCase()
   const filter = item => {
-    if (text.value.length < 1) {
+    if (!keyword) {
       return true
     }
-    let {title, pinyin, pinyinInitials} = item
-    return title.indexOf(text.value) > -1 ||
-        pinyin.indexOf(text.value) > -1 ||
-        pinyinInitials.indexOf(text.value) > -1;
+    let {title, pinyin, pinyinInitials, subgroup} = item
+    return (title || '').toLowerCase().indexOf(keyword) > -1 ||
+        (pinyin || '').toLowerCase().indexOf(keyword) > -1 ||
+        (pinyinInitials || '').toLowerCase().indexOf(keyword) > -1 ||
+        (subgroup || '').toLowerCase().indexOf(keyword) > -1;
   }
 
   searchList.value = list.value
@@ -238,7 +275,17 @@ let changeFilterList = () => {
         return releaseDate.value === it['releaseDate'].replace(/-\d{2}$/, '');
       })
       .filter(selectFilters.value.filter(item => selectFilter.value === item.label)[0].fun)
+
+  // 筛选条件变化后清空勾选，避免"看到没选、实际还在选"的误操作
+  const filterKey = `${text.value}|${releaseDate.value}|${selectFilter.value}`
+  if (lastFilterKey && lastFilterKey !== filterKey && selectList.value.length) {
+    clearSelection()
+    ElMessage.info('筛选条件变化，已清空勾选')
+  }
+  lastFilterKey = filterKey
 }
+
+let lastFilterKey = ''
 
 let dialogVisible = ref(false)
 let loading = ref(false)
@@ -269,6 +316,7 @@ const getList = () => {
         let data = res.data
         releaseDateList.value = data.releaseDateList
         list.value = data.weekList.flatMap(week => week.items)
+            .map(it => ({...it, lastDownloadFormat: formatTime(it['lastDownloadTime'])}))
         changeFilterList()
       })
       .finally(() => {
@@ -276,15 +324,35 @@ const getList = () => {
       });
 }
 
+let tableRef = ref()
 let selectList = ref([])
 
 let handleSelectionChange = (v) => {
   selectList.value = v
 }
 
-let exportData = () => {
+const selectAll = () => {
+  searchList.value.forEach(row => tableRef.value?.toggleRowSelection(row, true))
+}
+
+const invertSelection = () => {
+  searchList.value.forEach(row => tableRef.value?.toggleRowSelection(row))
+}
+
+const clearSelection = () => {
+  tableRef.value?.clearSelection()
+}
+
+let requireSelection = () => {
   if (!selectList.value.length) {
-    ElMessage.error('未选择订阅')
+    ElMessage.warning('请先勾选要操作的订阅')
+    return false
+  }
+  return true
+}
+
+let exportData = () => {
+  if (!requireSelection()) {
     return
   }
   const textContent = JSON.stringify(selectList.value);
@@ -294,19 +362,36 @@ let exportData = () => {
   const a = document.createElement("a");
   a.style.display = "none";
   a.href = url;
-  a.download = "ani.v2.json";
+  a.download = `ani.v2.${new Date().toISOString().slice(0, 10)}.json`;
   document.body.appendChild(a);
   a.click();
   URL.revokeObjectURL(url);
   document.body.removeChild(a);
 }
 
+/** 行内启用开关：单行即时生效，不弹确认 */
+let toggleEnable = (value, row) => {
+  row.enableLoading = true
+  http.batchEnable(value, [row.id])
+      .then(res => {
+        row.enable = value
+        ElMessage.success(res.message)
+      })
+      .finally(() => {
+        row.enableLoading = false
+      })
+}
+
 let batchEnable = (value) => {
+  if (!requireSelection()) {
+    return
+  }
   loading.value = true
   let ids = selectList.value.map(it => it['id']);
   http.batchEnable(value, ids)
       .then(res => {
-        ElMessage.success(res.message)
+        ElMessage.success(`${res.message}（${ids.length} 项）`)
+        clearSelection()
       })
       .finally(() => {
         reLoadList()
@@ -316,21 +401,78 @@ let batchEnable = (value) => {
 let releaseDate = ref('')
 
 let updateTotalEpisodeNumber = (force) => {
+  if (!requireSelection()) {
+    return
+  }
   let ids = selectList.value.map(it => it['id']);
   http.updateTotalEpisodeNumber(force, ids)
       .then(res => {
-        ElMessage.success(res.message)
-        reLoadList()
+        ElMessage.info(`${res.message}（${ids.length} 项），完成后会自动提示`)
+        waitBatchFinish('更新总集数', ids)
       })
 }
 
 let batchScrape = (force) => {
+  if (!requireSelection()) {
+    return
+  }
   let ids = selectList.value.map(it => it['id']);
   http.batchScrape(force, ids)
       .then(res => {
-        ElMessage.success(res.message)
+        ElMessage.info(`${res.message}（${ids.length} 项），完成后会自动提示`)
+        waitBatchFinish('刮削', ids)
       })
 }
+
+let delSelected = () => {
+  if (!requireSelection()) {
+    return
+  }
+  delAniRef.value?.show(selectList.value)
+}
+
+/**
+ * 批量操作收敛提示（fork 移植）：提交后轮询 rssJobStatus，
+ * 忙碌中静默等待，全部收敛后统一提示；10 分钟超时引导去任务管理器。
+ */
+let batchPollTimer = null
+
+const stopBatchPolling = () => {
+  if (batchPollTimer) {
+    clearInterval(batchPollTimer)
+    batchPollTimer = null
+  }
+}
+
+const waitBatchFinish = (label, ids) => {
+  if (batchPollTimer) {
+    ElMessage.warning(`${label}仍在后台执行，请到任务管理器查看进度后再发起新的批量操作`)
+    return
+  }
+  const startedAt = Date.now()
+  batchPollTimer = setInterval(() => {
+    if (Date.now() - startedAt > 10 * 60 * 1000) {
+      stopBatchPolling()
+      ElMessage.warning(`${label}仍在后台执行，请到任务管理器查看进度`)
+      return
+    }
+    http.rssJobStatus({silent: true})
+        .then(res => {
+          const status = res?.data || {}
+          const busy = status.running || status.pending || status.openListBusy
+          if (busy) {
+            return
+          }
+          stopBatchPolling()
+          ElMessage.success(`${label}已完成（${ids.length} 项）`)
+          reLoadList()
+        })
+        .catch(() => {
+        })
+  }, 3000)
+}
+
+onUnmounted(stopBatchPolling)
 
 defineExpose({show})
 </script>
@@ -344,6 +486,12 @@ defineExpose({show})
   display: flex;
   justify-content: space-between;
   width: 100%;
+}
+
+.manage-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .select-width {
@@ -362,6 +510,11 @@ defineExpose({show})
 @media (max-width: 1000px) {
   .mange-toolbar > div {
     margin-top: 8px;
+  }
+
+  .manage-header {
+    flex-direction: column;
+    gap: 8px;
   }
 }
 
