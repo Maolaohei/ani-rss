@@ -13,7 +13,8 @@
   <div class="notification-container">
     <div>
       <el-space wrap class="flex flex-wrap gap-4" size="small">
-        <el-card v-for="it in props.config['notificationConfigList']" shadow="never" class="notification-card">
+        <el-card v-for="it in props.config['notificationConfigList']" shadow="never" class="notification-card"
+                 :class="{'is-disabled': !it.enable}">
           <div class="flex notification-card-content">
             <div class="notification-card-main">
               <el-tooltip :content="getLabel(it['notificationType'])" placement="top">
@@ -25,7 +26,10 @@
                 {{ it['comment'] ? it['comment'] : '无备注' }}
               </el-text>
             </div>
-            <div>
+            <div class="notification-card-actions">
+              <el-tooltip content="切换后需点击页面右上角「保存」才会生效" placement="top">
+                <el-switch v-model="it['enable']" size="small"/>
+              </el-tooltip>
               <el-dropdown trigger="click">
                 <el-button circle icon="MoreFilled" size="large" text type="primary"/>
                 <template #dropdown>
@@ -142,6 +146,18 @@ let props = defineProps(['config'])
 
 .notification-card-text {
   max-width: 120px;
+}
+
+.notification-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* 停用渠道视觉降权：标题/备注变灰，一眼区分活渠道 */
+.notification-card.is-disabled :deep(.el-card__body) {
+  opacity: .6;
 }
 
 .notification-add-button {
