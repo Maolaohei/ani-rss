@@ -10,6 +10,7 @@ import ani.rss.enums.StringEnum;
 import ani.rss.exception.ResultException;
 import ani.rss.service.DownloadService;
 import ani.rss.util.basic.HttpReq;
+import ani.rss.util.other.AniUtil;
 import ani.rss.util.other.ConfigUtil;
 import ani.rss.util.other.ItemsUtil;
 import ani.rss.util.other.RenameUtil;
@@ -77,7 +78,10 @@ public class CollectionController extends BaseController {
 
         // OpenList/Alist: 走离线下载全链路(提交/等待/重命名/归位/清理/通知), 与订阅体验一致
         if ("OpenList".equalsIgnoreCase(downloadTool) || "Alist".equalsIgnoreCase(downloadTool)) {
-            return startCollectionByOpenList(ani, plan, tempFile, torrentFile.getName());
+            Result<Void> result = startCollectionByOpenList(ani, plan, tempFile, torrentFile.getName());
+            // 合集关联的番剧也写入订阅列表(仅入列、不轮询、去重), 使其在「订阅」里可见可管理
+            AniUtil.addCollectionAni(ani);
+            return result;
         }
 
         if (!"qBittorrent".equalsIgnoreCase(downloadTool)) {
@@ -161,6 +165,8 @@ public class CollectionController extends BaseController {
         }
 
         qBittorrent.start(torrentsInfo, config);
+        // 合集关联的番剧也写入订阅列表(仅入列、不轮询、去重), 使其在「订阅」里可见可管理
+        AniUtil.addCollectionAni(ani);
         return Result.success("已经开始下载合集");
     }
 

@@ -178,6 +178,8 @@
 <script setup>
 import {ref} from "vue";
 import {ElMessage, ElMessageBox} from "element-plus";
+
+const emit = defineEmits(['added'])
 import BgmView from "./BgmView.vue";
 import ExcludeView from "@/view/config/ExcludeView.vue";
 import CollectionPreviewView from "./CollectionPreviewView.vue";
@@ -191,6 +193,8 @@ let start = () => {
   startLoading.value = true
   http.startCollection(data.value)
       .then((res) => {
+        // 关联的番剧已写入订阅列表，通知父组件刷新订阅列表
+        emit('added')
         ElMessageBox.confirm(
             res.message,
             'success',

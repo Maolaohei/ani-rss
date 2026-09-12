@@ -43,6 +43,11 @@ public class AniUtil {
     public static final String FILE_NAME = "ani.v2.json";
 
     /**
+     * 订阅增删操作的锁，防止 TOCTOU 竞态（添加订阅 / 删除订阅 / 添加合集订阅 共用）
+     */
+    public static final Object SUBSCRIPTION_LOCK = new Object();
+
+    /**
      * 获取订阅列表（线程安全读取）
      */
     public static List<Ani> getAniList() {
@@ -604,6 +609,55 @@ public class AniUtil {
                 .setCustomTags(new ArrayList<>())
                 .setCustomTagsEnable(false)
                 .setNamingVersion(2);
+    }
+
+    /**
+     * 将「添加合集」关联的番剧(Ani)加入订阅列表。
+     * <p>
+     * 合集依赖手动上传的种子，没有 RSS 地址，因此只入列、不启用轮询(enable=false)；
+     * 若已存在同标题+季的订阅则跳过(去重)，避免重复条目。
+     */
+    public static void addCollectionAni(Ani ani) {
+        if (ani == null || StrUtil.isBlank(ani.getTitle())) {
+            return;
+        }
+        synchronized (SUBSCRIPTION_LOCK) {
+            boolean exists = ANI_LIST.stream()
+                    .anyMatch(it -> ObjectUtil.equals(it.getTitle(), ani.getTitle())
+                            && ObjectUtil.equals(it.getSeason(), ani.getSeason()));
+            if (exists) {
+                log.info("合集关联的订阅已存在, 跳过重复添加: {} 第{}季", ani.getTitle(), ani.getSeason());
+                return;
+            }
+            if (StrUtil.isBlank(ani.getId())) {
+                ani.setId(UUID.randomUUID().toString());
+            }
+            // 合集无 RSS 地址, 不轮询新集
+            ani.setEnable(false);
+            // 重置添加弹窗里的占位进度/评分, 避免沿用默认值
+            ani.setCurrentEpisodeNumber(0)
+                    .setTotalEpisodeNumber(0)
+                    .setScore(0.0)
+                    .setLastDownloadTime(0L);
+            // 兜底必要集合字段, 与 createAni 保持一致, 避免列表/持久化异常
+            if (ani.getExclude() == null) {
+                ani.setExclude(new ArrayList<>());
+            }
+            if (ani.getStandbyRssList() == null) {
+                ani.setStandbyRssList(new ArrayList<>());
+            }
+            if (ani.getMatch() == null) {
+                ani.setMatch(new ArrayList<>());
+            }
+            if (ani.getNotDownload() == null) {
+                ani.setNotDownload(new ArrayList<>());
+            }
+            // 封面补齐(空 image 走默认封面, 不发起网络请求)
+            ani.setCover(saveCover(ani.getImage()));
+            ANI_LIST.add(ani);
+            sync();
+        }
+        log.info("合集已加入订阅列表: {} 第{}季", ani.getTitle(), ani.getSeason());
     }
 
 

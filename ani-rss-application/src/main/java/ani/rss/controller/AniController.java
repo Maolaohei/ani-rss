@@ -44,8 +44,8 @@ import java.util.function.ToLongFunction;
 @Slf4j
 @RestController
 public class AniController extends BaseController {
-    // 订阅增删操作的锁，防止 TOCTOU 竞态
-    private static final Object SUBSCRIPTION_LOCK = new Object();
+    // 订阅增删操作的锁(与添加合集订阅共用 AniUtil.SUBSCRIPTION_LOCK)，防止 TOCTOU 竞态
+    private static final Object SUBSCRIPTION_LOCK = AniUtil.SUBSCRIPTION_LOCK;
 
     @Resource
     private AniService aniService;

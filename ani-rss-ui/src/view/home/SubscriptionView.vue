@@ -1,7 +1,7 @@
 <template>
   <div class="subscription-page app-page-layout">
     <AddView ref="addRef" v-model:title="title"/>
-    <CollectionView ref="collectionRef"/>
+    <CollectionView ref="collectionRef" @added="onCollectionAdded"/>
     <ManageView ref="manageRef"/>
     <PageHeaderView title="订阅" :subtitle="`共 ${subscriptionTotal} 个订阅`"/>
     <div class="subscription-body app-page-content app-page-padding">
@@ -172,6 +172,13 @@ const refreshAni = () => {
       .finally(() => {
         refreshLoading.value = false
       })
+}
+
+/**
+ * 添加合集成功后：关联的番剧已写入订阅列表，刷新列表让其立即出现
+ */
+const onCollectionAdded = () => {
+  listRef.value?.getList()
 }
 
 /**
