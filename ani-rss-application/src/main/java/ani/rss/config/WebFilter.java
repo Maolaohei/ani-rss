@@ -2,8 +2,12 @@ package ani.rss.config;
 
 import ani.rss.entity.Config;
 import ani.rss.entity.Global;
+import ani.rss.entity.web.ResultCode;
+import ani.rss.util.other.AuthUtil;
 import ani.rss.util.other.ConfigUtil;
 import cn.hutool.core.io.FileUtil;
+import cn.hutool.core.lang.PatternPool;
+import cn.hutool.core.net.Ipv4Util;
 import cn.hutool.core.util.StrUtil;
 import jakarta.servlet.*;
 import jakarta.servlet.http.HttpServletRequest;
@@ -14,6 +18,7 @@ import java.io.IOException;
 import java.util.List;
 
 import static ani.rss.controller.BaseController.setCacheControl;
+import static ani.rss.controller.BaseController.writeHtml;
 
 @Component
 public class WebFilter implements Filter {
@@ -33,6 +38,13 @@ public class WebFilter implements Filter {
         Global.REQUEST.set(request);
         Global.RESPONSE.set(response);
         try {
+            // 禁止公网访问（port upstream d8b654d8）: 判定必须在 forward / 静态资源分支之前,
+            // 否则非 api 路径会在鉴权前就被转发出去; 同时保证 Global.REQUEST 已装填, AuthUtil.getIp 才能取到 ip
+            if (isPublicAccessForbidden()) {
+                writeHtml(ResultCode.HTTP_FORBIDDEN, "禁止公网访问");
+                return;
+            }
+
             // 非 api (路由不区分大小写)
             if (!uri.toLowerCase().startsWith("/api")) {
                 String extName = FileUtil.extName(uri);
@@ -56,6 +68,36 @@ public class WebFilter implements Filter {
             Global.REQUEST.remove();
             Global.RESPONSE.remove();
         }
+    }
+
+    /**
+     * 是否拒绝本次请求（port upstream d8b654d8）
+     * <p>
+     * 仅在开启「禁止公网访问」时生效; 非 IPv4（如 IPv6 / 无法解析）一律 fail-closed,
+     * 避免通过非常规地址绕过内网限制
+     */
+    private boolean isPublicAccessForbidden() {
+        if (!Boolean.TRUE.equals(ConfigUtil.CONFIG.getInnerIP())) {
+            return false;
+        }
+        return !isInnerIp(AuthUtil.getIp());
+    }
+
+    /**
+     * 是否为内网 IPv4 地址
+     * <p>
+     * 解析失败或非 IPv4 返回 false, 交由调用方按 fail-closed 处理
+     */
+    static boolean isInnerIp(String ip) {
+        if (StrUtil.isBlank(ip)) {
+            return false;
+        }
+
+        if (PatternPool.IPV4.matcher(ip).matches()) {
+            return Ipv4Util.isInnerIP(ip);
+        }
+
+        return false;
     }
 
     private void cors(HttpServletRequest request, HttpServletResponse response) {
