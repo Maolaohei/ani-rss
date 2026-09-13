@@ -6,7 +6,9 @@ import ani.rss.commons.URLUtils;
 import ani.rss.entity.Config;
 import ani.rss.entity.Login;
 import ani.rss.entity.NotificationConfig;
+import ani.rss.entity.QualityProfile;
 import ani.rss.enums.BgmTokenTypeEnum;
+import ani.rss.enums.NotificationStatusEnum;
 import ani.rss.enums.SortTypeEnum;
 import ani.rss.service.ClearService;
 import ani.rss.service.DownloadService;
@@ -249,7 +251,8 @@ public class ConfigUtil {
                 .setAllowCors(false)
                 .setCorsOrigins("")
                 .setNetworkPrefer("")
-                .setUuid(UUID.randomUUID().toString());
+                .setUuid(UUID.randomUUID().toString())
+                .setQualityProfile(defaultQualityProfile());
     }
 
     /**
@@ -611,6 +614,27 @@ public class ConfigUtil {
     }
 
     /**
+     * 质量择优规则默认配置：关闭、保留既有合集优先行为。
+     * <p>
+     * 该方法同时用于首次启动与存量配置迁移，避免配置文件没有新增字段时出现 null。
+     */
+    public static QualityProfile defaultQualityProfile() {
+        return new QualityProfile()
+                .setEnable(false)
+                .setResolutionOrder(new ArrayList<>())
+                .setPreferCodecs(new ArrayList<>())
+                .setExcludeCodecs(new ArrayList<>())
+                .setMinResolution("")
+                .setMaxResolution("")
+                .setMinSizeMb(0)
+                .setMaxSizeMb(0)
+                .setMinSeeders(0)
+                .setPreferSubgroups(new ArrayList<>())
+                .setExcludeSubgroups(new ArrayList<>())
+                .setPreferCollection(true);
+    }
+
+    /**
      * 处理设置内的url与文件路径标准
      *
      * @param config
@@ -618,6 +642,23 @@ public class ConfigUtil {
     public static void format(Config config) {
         formatPath(config);
         formatUrl(config);
+
+        if (config.getQualityProfile() == null) {
+            config.setQualityProfile(defaultQualityProfile());
+        } else {
+            QualityProfile profile = config.getQualityProfile();
+            if (profile.getResolutionOrder() == null) profile.setResolutionOrder(new ArrayList<>());
+            if (profile.getPreferCodecs() == null) profile.setPreferCodecs(new ArrayList<>());
+            if (profile.getExcludeCodecs() == null) profile.setExcludeCodecs(new ArrayList<>());
+            if (profile.getMinResolution() == null) profile.setMinResolution("");
+            if (profile.getMaxResolution() == null) profile.setMaxResolution("");
+            if (profile.getMinSizeMb() == null) profile.setMinSizeMb(0);
+            if (profile.getMaxSizeMb() == null) profile.setMaxSizeMb(0);
+            if (profile.getMinSeeders() == null) profile.setMinSeeders(0);
+            if (profile.getPreferSubgroups() == null) profile.setPreferSubgroups(new ArrayList<>());
+            if (profile.getExcludeSubgroups() == null) profile.setExcludeSubgroups(new ArrayList<>());
+            if (profile.getPreferCollection() == null) profile.setPreferCollection(true);
+        }
 
         String messageTemplate = config.getNotificationTemplate();
         config.setNotificationTemplate(messageTemplate.trim());
@@ -634,6 +675,14 @@ public class ConfigUtil {
 
         for (NotificationConfig notificationConfig : notificationConfigList) {
             BeanUtil.copyProperties(newNotificationConfig, notificationConfig, copyOptions);
+            // 存量配置迁移：SYSTEM（系统通知）是后加的枚举，老配置的 statusList 里没有它，
+            // 不补的话磁盘预警/追番周报会静默不发送。仅做追加，不删除用户已有选择。
+            List<NotificationStatusEnum> statusList = notificationConfig.getStatusList();
+            if (statusList != null && !statusList.contains(NotificationStatusEnum.SYSTEM)) {
+                List<NotificationStatusEnum> merged = new ArrayList<>(statusList);
+                merged.add(NotificationStatusEnum.SYSTEM);
+                notificationConfig.setStatusList(merged);
+            }
         }
     }
 

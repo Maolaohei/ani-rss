@@ -99,6 +99,14 @@
                     禁用
                   </el-text>
                 </el-dropdown-item>
+                <el-dropdown-item divided :disabled="!selectList.length" @click="batchGroup">
+                  <el-text>
+                    <el-icon>
+                      <FolderAdd/>
+                    </el-icon>
+                    设为分组
+                  </el-text>
+                </el-dropdown-item>
                 <el-dropdown-item divided @click="importAniRef?.show">
                   <el-text>
                     <el-icon>
@@ -210,13 +218,14 @@
 </template>
 <script setup>
 import {onUnmounted, ref} from "vue";
-import {ElMessage, ElText} from "element-plus";
+import {ElMessage, ElMessageBox, ElText} from "element-plus";
 import DelAniView from "./DelAniView.vue";
 import ImportAniView from "@/view/home/ImportAniView.vue";
 import {
   CircleCheck,
   CircleClose,
   Download,
+  FolderAdd,
   Operation,
   Refresh,
   RefreshRight,
@@ -391,6 +400,38 @@ let batchEnable = (value) => {
   http.batchEnable(value, ids)
       .then(res => {
         ElMessage.success(`${res.message}（${ids.length} 项）`)
+        clearSelection()
+      })
+      .finally(() => {
+        reLoadList()
+      })
+}
+
+/**
+ * 批量设为分组：输入框留空表示移出分组
+ */
+let batchGroup = async () => {
+  if (!requireSelection()) {
+    return
+  }
+  let value
+  try {
+    const res = await ElMessageBox.prompt(
+        '输入分组名（留空表示移出分组）', '设为分组', {
+          confirmButtonText: '确定',
+          cancelButtonText: '取消',
+          inputPlaceholder: '如：本季追更 / 补番中 / 已完结待迁移',
+          inputValue: selectList.value.length === 1 ? (selectList.value[0].group || '') : ''
+        })
+    value = (res.value || '').trim()
+  } catch (e) {
+    return
+  }
+  loading.value = true
+  let ids = selectList.value.map(it => it['id']);
+  http.batchGroup(value, ids)
+      .then(res => {
+        ElMessage.success(res.message)
         clearSelection()
       })
       .finally(() => {

@@ -788,4 +788,85 @@ public class Config implements Serializable {
      */
     @Schema(description = "网络协议优先级")
     private String networkPrefer;
+
+    /**
+     * 磁盘空间监控：开启后周期探测下载根/完结迁移目标/配置目录的可用空间，
+     * 超过阈值时通过通知渠道预警，避免"写满才发现"导致全线下载失败。
+     */
+    @Schema(description = "磁盘空间监控")
+    private Boolean diskMonitor;
+
+    /**
+     * 磁盘使用率预警阈值（百分比，默认 85）
+     */
+    @Schema(description = "磁盘预警阈值(%)")
+    private Integer diskWarnPercent;
+
+    /**
+     * 磁盘探测间隔（分钟，默认 60）
+     */
+    @Schema(description = "磁盘探测间隔(分钟)")
+    private Integer diskCheckIntervalMinutes;
+
+    /**
+     * 追番周报：周期汇总本周新增/失败/漏集，并可自动触发一次补种
+     */
+    @Schema(description = "追番周报")
+    private Boolean weeklyReport;
+
+    /**
+     * 周报间隔（小时，默认 168 即每周一次）
+     */
+    @Schema(description = "周报间隔(小时)")
+    private Integer weeklyReportIntervalHours;
+
+    /**
+     * 周报是否自动补种
+     */
+    @Schema(description = "周报自动补种")
+    private Boolean weeklyReportAutoRetry;
+
+    /**
+     * 订阅级 RSS 扫描并发度（默认 1，保持既有全局单 RSS 调度语义）
+     */
+    @Schema(description = "RSS 扫描并发度")
+    private Integer rssConcurrency;
+
+    /**
+     * 结构化事件 Webhook 地址（留空不发送）。发送 JSON 事件体而非渲染文本。
+     */
+    @Schema(description = "事件 Webhook 地址")
+    private String eventWebhookUrl;
+
+    /**
+     * 事件 Webhook 订阅的事件类型（逗号分隔，留空表示全部）
+     */
+    @Schema(description = "事件 Webhook 事件类型")
+    private String eventWebhookTypes;
+
+    /**
+     * 事件 Webhook 鉴权头（形如 Authorization: Bearer xxx，可空）
+     */
+    @Schema(description = "事件 Webhook 鉴权头")
+    private String eventWebhookHeader;
+
+    /**
+     * 字幕自动获取（默认关闭，仅手动触发）
+     */
+    @Schema(description = "字幕自动获取")
+    private Boolean subtitleAutoFetch;
+
+    /**
+     * 只读访问令牌：配置后可用它做"家人共享"——只能查看订阅/任务/日志与播放，
+     * 任何写操作（增删订阅、改配置、下任务）都会被拒绝。
+     * 留空表示未启用，行为与之前完全一致。
+     */
+    @Schema(description = "只读访问令牌")
+    private String viewerApiKey;
+
+    /**
+     * 质量择优规则（全局默认）。未启用时同集候选沿用既有硬编码的画质+体积排序。
+     */
+    @Schema(description = "质量择优规则")
+    private QualityProfile qualityProfile;
 }

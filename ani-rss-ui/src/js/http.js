@@ -306,6 +306,14 @@ export let batchScrape = (force, ids) => api.post(`api/batchScrape?force=${force
 export let batchEnable = (value, ids) => api.post(`api/batchEnable?value=${value}`, ids)
 
 /**
+ * 批量设置订阅分组（group 传空串表示移出分组）
+ * @param group 分组名
+ * @param ids ids
+ * @returns {Promise<unknown>}
+ */
+export let batchGroup = (group, ids) => api.post(`api/batchGroup?group=${encodeURIComponent(group || '')}`, ids)
+
+/**
  * 导入订阅
  * @param anis 订阅列表
  * @returns {Promise<unknown>}
@@ -507,3 +515,117 @@ export let importConfig = (file) => {
 }
 
 export let ping = () => api.get("api/ping")
+/* ==================== 系统自检（Doctor） ==================== */
+
+/**
+ * 系统自检：聚合下载器/通知/代理/磁盘/任务线程等检查项
+ * @returns {Promise<unknown>}
+ */
+export let doctor = () => api.post('api/doctor')
+
+/* ==================== 下载历史 ==================== */
+
+/**
+ * 下载历史列表
+ * @param query { aniId?, result?, days?, limit? }
+ * @returns {Promise<unknown>}
+ */
+export let downloadHistory = (query) => api.post('api/downloadHistory', query || {})
+
+/**
+ * 下载历史统计（总览 + 按天趋势）
+ * @param query { days? }
+ * @returns {Promise<unknown>}
+ */
+export let downloadHistoryStats = (query) => api.post('api/downloadHistoryStats', query || {})
+
+/**
+ * 移除下载历史条目
+ * @param id 条目 id
+ * @returns {Promise<unknown>}
+ */
+export let downloadHistoryRemove = (id) => api.post('api/downloadHistoryRemove', {id})
+
+/**
+ * 清空下载历史
+ * @returns {Promise<unknown>}
+ */
+export let downloadHistoryClear = () => api.post('api/downloadHistoryClear')
+
+/* ==================== 手动搜索补种 ==================== */
+
+/**
+ * 手动搜索补种（聚合主 RSS + 备用 RSS + 自定义 RSS）
+ * @param query { aniId?, rssUrl?, rssLabel?, keyword?, onlyMissing?, limit? }
+ * @returns {Promise<unknown>}
+ */
+export let manualSearch = (query) => api.post('api/manualSearch', query || {})
+
+/**
+ * 手动补种下单
+ * @param aniId 订阅 id
+ * @param item 条目
+ * @returns {Promise<unknown>}
+ */
+export let manualDownload = (aniId, item) => api.post('api/manualDownload', {aniId, item})
+
+/* ==================== 媒体库 ==================== */
+
+/**
+ * 媒体库列表
+ * @param query { keyword?, onlyExisting? }
+ * @returns {Promise<unknown>}
+ */
+export let library = (query) => api.post('api/library', query || {})
+
+/**
+ * 媒体库详情（某订阅的本地剧集）
+ * @param aniId 订阅 id
+ * @returns {Promise<unknown>}
+ */
+export let libraryDetail = (aniId) => api.post('api/libraryDetail', {aniId})
+
+/**
+ * 强制刷新媒体库缓存
+ * @returns {Promise<unknown>}
+ */
+export let libraryRefresh = () => api.post('api/libraryRefresh')
+
+/* ==================== 订阅分享 ==================== */
+
+/**
+ * 生成订阅分享码
+ * @param ids 订阅 id 列表；all=true 时表示全部
+ * @returns {Promise<unknown>}
+ */
+export let shareAni = (ids, all) => api.post('api/shareAni', {ids, all})
+
+/**
+ * 按分享码导入订阅
+ * @param code 分享码
+ * @param conflict SKIP | REPLACE
+ * @returns {Promise<unknown>}
+ */
+export let importAniByCode = (code, conflict) => api.post('api/importAniByCode', {code, conflict})
+
+/* ==================== 字幕 ==================== */
+
+/**
+ * 扫描缺失字幕
+ * @param aniId 订阅 id
+ * @returns {Promise<unknown>}
+ */
+export let subtitleScan = (aniId) => api.post('api/subtitleScan', {aniId})
+
+/**
+ * 就地附加字幕
+ * @param payload { filename, content, ext, languageTag }
+ * @returns {Promise<unknown>}
+ */
+export let subtitleAttach = (payload) => api.post('api/subtitleAttach', payload)
+
+/**
+ * 字幕开关状态
+ * @returns {Promise<unknown>}
+ */
+export let subtitleStatus = () => api.post('api/subtitleStatus')

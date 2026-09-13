@@ -57,5 +57,23 @@ export let aniData = {
     "customTagsEnable": false,
     "customPriorityKeywordsEnable": false,
     "customPriorityKeywords": [],
-    "namingVersion": 2
+    "namingVersion": 2,
+    "priority": 1,
+    "group": "",
+    "tags": [],
+    "customQualityProfileEnable": false,
+    "customQualityProfile": {
+        "enable": true,
+        "resolutionOrder": [],
+        "preferCodecs": [],
+        "excludeCodecs": [],
+        "minResolution": "",
+        "maxResolution": "",
+        "minSizeMb": 0,
+        "maxSizeMb": 0,
+        "minSeeders": 0,
+        "preferSubgroups": [],
+        "excludeSubgroups": [],
+        "preferCollection": true
+    }
 }

@@ -18,9 +18,83 @@
 
 ---
 
-## 3.4.2 增量（2026-09）
+## 功能规划落地批次（2026-09）— 17 项
 
-### 合集：支持 OpenList 离线下载（与订阅体验一致）
+依据仓库内《功能规划建议报告.md》落地：P0 快赢 8 项 + P1 调度优先级与并发 + P2 增强 5 项 + P3 战略 3 项。
+**验证：后端 `mvn test` 全量 479 通过（新增 72）；前端 `vite build` 通过。**
+
+### P0 快赢
+
+| 编号 | 功能 | 说明 |
+| --- | --- | --- |
+| F-01 | **系统自检（Doctor）** | `POST /api/doctor` 聚合 9 项检查（配置目录可写 / 下载路径 / 下载器登录 / 磁盘 / TMDB / BGM / Mikan 可达 / 通知渠道 / 任务线程），每项给出结论 + 证据 + 下一步建议。**不新增探测逻辑**，全部复用既有能力（`BaseDownload.login`、`HttpReq`、`DiskMonitorUtil`、`NotificationUtil.getLastSend`） |
+| F-02 | **下载历史 / 活动时间线** | 新增 `DownloadHistory`（仿 `FailedDownloadQueue` 的 temp+rename 原子写、容量 1000、解析失败改名保留现场）。埋点 3 处：qB/TR/Aria2 走 `DownloadService.notification`，失败走 `recordDownloadFailure`，OpenList 走自身完成链路（3 个完成点）。新增 `/downloadHistory`、`/downloadHistoryStats`（总览 + 按天趋势）、`/downloadHistoryRemove`、`/downloadHistoryClear` |
+| F-03 | **通知渠道扩展 6 个** | ntfy / Gotify / PushDeer / 飞书 / 钉钉（支持加签）/ 企业微信（markdown 4096 字节安全截断）。`NotificationUtil.NOTIFICATION_MAP` 从 `Map.of`（10 对上限）改为 `LinkedHashMap`，后续加渠道不再受限 |
+| F-04 | **MCP 写操作扩展** | 新增 8 个 `@McpTool`：`set_subscription_enabled`、`refresh_subscription`、`get_task_status`、`list_failed_items`、`retry_failed_item`、`cancel_rss_job`、`cancel_rss_item`、`diagnose_subscription`。破坏性操作如实标注 `destructiveHint` |
+| F-05 | **磁盘空间监控** | 新增 `DiskMonitorUtil`（路径解析规则与 `FileController` 一致）+ `DiskTask`（默认 60 分钟一轮，阈值默认 85%）。**档位去重**（阈值/+5/+10 三档，6 小时冷却，回落清态）；网络盘 / 未挂载判为「不可测」而非 0% 使用率 |
+| F-06 | **追番日历视图** | `CalendarView.vue` 周视图 + 月视图，复用 `listAni` 的 `weekLabel` 与 `healthLevel`，零新增后端 |
+| F-07 | **手动搜索补种** | `ManualSearchController` 聚合「主 RSS + 全部备用 RSS + 用户粘贴的 RSS」；底层全部复用（`ItemsUtil.getItems` 解析、`itemDownloaded` 判重、`forceDownloadItem` 下单）。`/manualSearch` + `/manualDownload` |
+| F-08 | **首页看板增强** | 新增「近 7 天下载趋势」（CSS 柱状图，不引入图表库，守住首屏体积）、健康分分布、漏集 TOP |
+
+### P1 调度优先级与并发（F-10）
+
+- `Ani.priority`（0=高 / 1=普通 / 2=低，越界收敛到 [0,2]）；`RssTask.sortByPriority` **稳定排序**，同级保持原顺序
+- `Config.rssConcurrency`（默认仍为 3，上限 8）；非法值回落，**绝不出现 0 线程池**
+- 未改动任何锁与抢先语义（3.2.31 刚加固的全局锁与手动刷新逻辑保持不变）
+
+### P2 增强
+
+| 编号 | 功能 | 说明 |
+| --- | --- | --- |
+| F-15 | **本地媒体库浏览** | `/library`（60 秒缓存，复用 `PlayController.getPlayItem` 保证与播放侧同一套字幕/视频判定）、`/libraryDetail`、`/libraryRefresh` |
+| F-16 | **结构化事件 Webhook** | `EventWebhookUtil` + `EventTypeEnum`（9 种事件）。发 **JSON 事件体**而非渲染文本；单线程 + 有界队列 256 反压，队列满丢弃计数、**绝不上抛中断下载**（沿用 3.2.15 的保护）；支持事件类型过滤（留空=全部，`ALL`=全部） |
+| F-17 | **追番周报** | `WeeklyReportTask` 复用 `DownloadHistory.summary` + `FailedDownloadQueue` + `SubscriptionHealth.cachedOmitCount`；可选「有漏集时自动补种」，走统一刷新入口（可在任务页观察/取消） |
+| F-18 | **字幕匹配与补全** | `SubtitleService`：缺字幕扫描（复用播放侧判定）+ 就地附加字幕（原子写、覆盖前 `.bak` 备份、20MiB 上限、UTF-8 安全）。**在线抓取默认关闭**，`subtitleAutoFetch` 作为开关位由部署方接入具体源 |
+| F-19 | **订阅分享 / 一键导入** | `/shareAni` + `/importAniByCode`。采用**白名单复制**（而非黑名单剔除）：只写明确安全的字段，将来 `Ani` 新增字段默认不外泄；分享码为 gzip+base64url；导入统计新增/替换/跳过 |
+
+### P3 战略
+
+| 编号 | 功能 | 说明 |
+| --- | --- | --- |
+| F-20 | **AI 诊断** | `diagnose_subscription` 聚合健康分 + 漏集缓存 + 下载历史 + 失败队列，输出**可读结论 + 可执行建议**（如"已 14 天没有新下载，可能是番剧停更、RSS 源失效或字幕组更换"） |
+| F-21 | **调度状态持久化** | `RssJobStateStore` 落盘「上一轮结果 + 订阅级失败明细（上限 50）」，启动时经 `RssTask.restorePersistedState()` 恢复。**刻意不持久化运行中/排队中的活动态**——重启后那些任务客观上已不存在，恢复出"运行中"只会制造幽灵状态 |
+| F-22 | **只读访问令牌** | `Config.viewerApiKey` + `ViewerPolicy` 白名单。用只读令牌访问只能「看和播」，写操作一律 403。**未配置时行为与之前完全一致**；白名单语义保证将来新增端点默认对只读者关闭 |
+
+### 配套改动
+
+- **`NotificationStatusEnum` 新增 `SYSTEM`**（系统通知）；`ConfigUtil.format` 对存量配置做**追加式迁移**（只补 `SYSTEM`，不删用户已有选择），否则磁盘预警/周报会静默不发送
+- **`NotificationUtil.sendSystem`**：系统级通知不依赖任何订阅，使用合成 `Ani`（标题/季度/发布日期给安全默认值，避免通知模板 NPE）
+- **动作类渠道过滤**：`EMBY_REFRESH` / `FILE_MOVE` / `OPEN_LIST_UPLOAD` / `SHELL` 在 `SYSTEM` 状态下跳过——否则一次磁盘预警会触发 Emby 全库刷新或执行用户的下载后脚本
+- **导航扩展**：新增「媒体库」「历史」「工具（自检/日历/补种，支持 `?tab=` 深链）」；移动端导航改为横向滚动（8 项均分会把文字挤没）
+- **设置页新增**：RSS 并发度、磁盘空间监控、追番周报、事件 Webhook、字幕自动获取、只读令牌
+- **订阅编辑新增**：优先级三档
+
+### 新增测试（72 个，全绿）
+
+`DownloadHistoryTest`(8) · `DiskMonitorUtilTest`(9) · `DiskTaskTest`(3) · `RssTaskPriorityTest`(8) ·
+`ShareControllerTest`(6) · `ViewerPolicyTest`(5) · `EventWebhookUtilTest`(8) ·
+`ExtraNotificationChannelsTest`(10) · `SubtitleServiceTest`(10) · `RssJobStateStoreTest`(5)
+
+---
+
+## 3.4.3 增量（2026-09）
+
+### F-11 质量择优规则（2026-09）
+
+- 新增全局 `Config.qualityProfile` 与订阅级 `Ani.customQualityProfile`（默认关闭，存量行为不变）
+- 支持：分辨率偏好顺序与上下限、编码偏好/排除（HEVC/AV1/AVC）、体积上下限、字幕组偏好/排除、做种数下限、合集优先开关
+- 规则优先级明确：**多字幕组共存 > 洗版主源优先 > 质量规则**；质量规则只在既有候选池内部择优，不会把主源换成备用源
+- 规则过严导致同集候选全部被过滤时自动回退为不过滤，避免一集永远不下；RSS 未提供做种数时不按 0 过滤
+- 非 v2 命名路径也接入同集择优；v2 合集继续保持合集优先后再应用质量规则
+- 前端「基本设置 → 质量择优」与订阅编辑「自定义 → 质量择优」均提供表单；新增 13 个规则测试 + 2 个旧订阅兼容测试全部通过
+
+### 已验证的环境/兼容性边界（2026-09）
+
+- **`File.getUsableSpace()` / OpenList/AList 挂载点**：在当前 Windows 环境实际测得：本地 `D:\UGit\ani-rss` 返回 `total=317404307456`、`usable=121405263872`；配置中常见的 `/115` 在 Windows 下解析为 `D:\115`，当前未挂载时 `exists=false`、`total=0`、`usable=0`；UNC `\\localhost\115` 同样未挂载返回 0。结论：不能把 `usable=0` 当成"磁盘已满"，`DiskMonitorUtil` 已将 `total<=0` 标记为**不可测**并跳过告警。真实 OpenList 远端空间不由 Java `File` 反映，应以 OpenList API 配额接口另做探测；本次未伪造远端结论。
+- **Artplayer `autoPlayback` 文件重命名**：已读取当前锁定版本 `artplayer@5.4.0` 源码确认：时间进度写在 `storage.times[art.option.id || art.option.url]`；当前项目已显式传 `id: playItem.name || src`，因此 URL token 变化不会影响同名文件的续播；但**文件重命名会改变 `id`，旧进度不会自动迁移**（会表现为新文件从 0 开始）。本次未实现 F-12 服务端同步，避免把半成品留在代码库；若后续做 F-12，应以订阅 id + episode/稳定内容标识做服务端主键，并在重命名时迁移旧 key。
+- **旧 `ani.v2.json` 反序列化**：已用真实 `AniUtil.load()` 路径测试旧 JSON（不含 `priority/group/tags/qualityProfile`），Gson 反序列化成功，`createAni()` + `BeanUtil.copyProperties(... ignoreNull, override=false)` 补齐：`priority=1`、`group=""`、`tags=[]`、自定义质量规则关闭且字段完整。新增 `AniLegacyFieldCompatibilityTest` 2 例全通过。
+
+
 
 - 「添加合集」按下载器分流：**qBittorrent 原路径不变**；**OpenList/Alist 走离线下载全链路**（提交即受理 → 分级轮询等待 → 10008 去重/卡住重提/超时终检 → 任务管理器进度）；其他下载器给出明确提示
 - 离线完成后按「预览计划」归位：按 文件名+大小 匹配离线产物 → 重命名为预览目标名（含字幕语言段）→ 移动到下载目录顶层 → 顶层校验 → 完成通知（含归位文件数）

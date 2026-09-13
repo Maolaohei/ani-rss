@@ -11,6 +11,7 @@ import ani.rss.entity.dto.IdDTO;
 import ani.rss.entity.dto.ImportAniDataDTO;
 import ani.rss.entity.dto.RssToAniDTO;
 import ani.rss.entity.web.Result;
+import ani.rss.enums.EventTypeEnum;
 import ani.rss.enums.SortTypeEnum;
 import ani.rss.service.AniService;
 import ani.rss.service.ClearService;
@@ -112,6 +113,12 @@ public class AniController extends BaseController {
             });
         }
         log.info("添加订阅 {} {} {}", ani.getTitle(), ani.getUrl(), ani.getId());
+
+        Map<String, Object> eventData = new LinkedHashMap<>();
+        eventData.put("url", ani.getUrl());
+        eventData.put("season", ani.getSeason());
+        eventData.put("subgroup", ani.getSubgroup());
+        EventWebhookUtil.emit(EventTypeEnum.SUBSCRIPTION_ADDED, ani, eventData);
 
         return Result.success("添加订阅成功");
     }
@@ -228,6 +235,7 @@ public class AniController extends BaseController {
                 FileUtil.del(torrentDir);
                 clearService.clearParentFile(torrentDir);
                 log.info("删除订阅 {} {} {}", ani.getTitle(), ani.getUrl(), ani.getId());
+                EventWebhookUtil.emit(EventTypeEnum.SUBSCRIPTION_DELETED, ani, Map.of("deleteFiles", deleteFiles));
             }
             if (!deleteFiles) {
                 // 不删除本地文件
@@ -304,6 +312,16 @@ public class AniController extends BaseController {
                 .toList();
         listAni.setReleaseDateList(releaseDateList)
                 .setTotal(aniList.size());
+
+        // 分组清单：供前端筛选下拉直接使用（未分组的订阅不产生条目）
+        List<String> groupList = aniList.stream()
+                .map(Ani::getGroup)
+                .filter(StrUtil::isNotBlank)
+                .map(String::trim)
+                .distinct()
+                .sorted()
+                .toList();
+        listAni.setGroupList(groupList);
 
         if (sortType == SortTypeEnum.SCORE) {
             aniList = CollUtil.sort(aniList, Comparator.comparingDouble(Ani::getScore).reversed());
@@ -402,9 +420,35 @@ public class AniController extends BaseController {
                 continue;
             }
             ani.setEnable(value);
+            EventWebhookUtil.emit(EventTypeEnum.SUBSCRIPTION_ENABLED_CHANGED, ani, Map.of("enable", value));
         }
         AniUtil.sync();
         return Result.success("修改完成");
+    }
+
+    @Auth
+    @Operation(summary = "批量设置订阅分组")
+    @PostMapping("/batchGroup")
+    public Result<Void> batchGroup(@RequestParam("group") String group, @RequestBody List<String> ids) {
+        Assert.notEmpty(ids, "未选择订阅");
+        // 传空串表示移出分组
+        String normalized = StrUtil.trimToNull(group);
+
+        int count = 0;
+        for (Ani ani : AniUtil.getAniList()) {
+            if (!ids.contains(ani.getId())) {
+                continue;
+            }
+            ani.setGroup(normalized);
+            count++;
+        }
+        if (count == 0) {
+            return Result.error("未找到可修改的订阅");
+        }
+        AniUtil.sync();
+        return Result.success(normalized == null
+                ? StrUtil.format("已将 {} 个订阅移出分组", count)
+                : StrUtil.format("已将 {} 个订阅设为分组「{}」", count, normalized));
     }
 
     @Auth

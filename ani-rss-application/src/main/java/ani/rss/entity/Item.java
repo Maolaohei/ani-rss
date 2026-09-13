@@ -59,6 +59,12 @@ public class Item implements Serializable {
     private Long length;
 
     /**
+     * 做种数（RSS 源提供时透出；未提供为 null）
+     */
+    @Schema(description = "做种数")
+    private Integer seeders;
+
+    /**
      * 本地已存在
      */
     @Schema(description = "本地已存在")

@@ -6,6 +6,7 @@ import ani.rss.commons.FileUtils;
 import ani.rss.entity.Ani;
 import ani.rss.entity.Config;
 import ani.rss.entity.Item;
+import ani.rss.entity.QualityProfile;
 import ani.rss.entity.StandbyRss;
 import ani.rss.enums.NotificationStatusEnum;
 import ani.rss.enums.StringEnum;
@@ -58,6 +59,8 @@ public class ItemsUtil {
         Config config = ConfigUtil.CONFIG;
         String url = ani.getUrl();
         String subgroup = StrUtil.blankToDefault(ani.getSubgroup(), "未知字幕组");
+        // 质量择优规则（未启用时为禁用规则，行为不变）
+        QualityProfile qualityProfile = QualityRule.effective(ani, config);
         List<Item> items = new ArrayList<>(ItemsUtil.getItems(ani, url, subgroup)
                 .stream()
                 .peek(item -> item.setMaster(true))
@@ -66,7 +69,7 @@ public class ItemsUtil {
         if (!config.getStandbyRss()) {
             // v2: 合集优先去重
             if (RenameUtil.isNamingV2(ani)) {
-                items = distinctWithCollectionPriority(items);
+                items = distinctWithCollectionPriority(items, false, qualityProfile);
             }
             items.sort(Comparator.comparingDouble(Item::getEpisode));
             return items;
@@ -110,7 +113,7 @@ public class ItemsUtil {
             // 备用RSS定位是占位补漏: 开启洗版时同集候选内主RSS条目优先,
             // 避免备用条目按画质/体积永久遮蔽主RSS条目, 导致主RSS出种后无法替换
             boolean preferMaster = Boolean.TRUE.equals(config.getDelete());
-            items = distinctWithCollectionPriority(items, preferMaster);
+            items = distinctWithCollectionPriority(items, preferMaster, qualityProfile);
         }
         items.sort(Comparator.comparingDouble(Item::getEpisode));
         return items;
@@ -164,6 +167,9 @@ public class ItemsUtil {
     static List<Item> parseItems(Ani ani, String xml, String rssUrl, String subgroupName) {
         List<Item> items = buildItems(ani, xml, rssUrl, subgroupName);
 
+        // 质量择优规则：订阅级自定义优先，否则全局；未启用时为空规则，行为与既有逻辑一致
+        QualityProfile qualityProfile = QualityRule.effective(ani, ConfigUtil.CONFIG);
+
         items = items.stream()
                 .filter(item -> {
                     try {
@@ -183,8 +189,12 @@ public class ItemsUtil {
 
         // v2: 合集优先去重
         if (RenameUtil.isNamingV2(ani)) {
-            items = distinctWithCollectionPriority(items);
+            items = distinctWithCollectionPriority(items, false, qualityProfile);
             return items;
+        }
+
+        if (qualityProfile != null && qualityProfile.enabled()) {
+            return distinctByEpisodeWithQuality(items, qualityProfile);
         }
 
         return CollUtil.distinct(items, item -> item.getEpisode().toString(), true);
@@ -230,6 +240,7 @@ public class ItemsUtil {
             String infoHash = "";
 
             String formatSize = "0MiB";
+            Integer seeders = null;
 
             DateTime pubDate = null;
 
@@ -280,6 +291,20 @@ public class ItemsUtil {
                 }
                 if (itemChildNodeName.equals("nyaa:size")) {
                     formatSize = itemChild.getTextContent();
+                }
+
+                // 常见 RSS 做种数字段：seeders / seeds / nyaa:seeders / torrent:seeders。
+                // 仅在源提供且能解析为非负整数时记录；未提供保持 null，质量规则不会误过滤。
+                String childNameLower = itemChildNodeName.toLowerCase(Locale.ROOT);
+                if (childNameLower.equals("seeders") || childNameLower.equals("seeds")
+                        || childNameLower.endsWith(":seeders") || childNameLower.endsWith(":seeds")) {
+                    try {
+                        int parsedSeeders = Integer.parseInt(itemChild.getTextContent().trim());
+                        if (parsedSeeders >= 0) {
+                            seeders = parsedSeeders;
+                        }
+                    } catch (Exception ignored) {
+                    }
                 }
 
                 if (itemChildNodeName.equals("pubDate")) {
@@ -373,6 +398,7 @@ public class ItemsUtil {
                     .setTorrent(torrent)
                     .setInfoHash(infoHash)
                     .setFormatSize(formatSize)
+                    .setSeeders(seeders)
                     .setPubDate(pubDate);
 
             Function<String, String> map = s -> {
@@ -803,6 +829,7 @@ public class ItemsUtil {
                 .setInfoHash(item.getInfoHash())
                 .setFormatSize(item.getFormatSize())
                 .setLength(item.getLength())
+                .setSeeders(item.getSeeders())
                 .setHasDownloaded(item.getHasDownloaded())
                 .setMaster(item.getMaster())
                 .setSubgroup(item.getSubgroup())
@@ -825,6 +852,17 @@ public class ItemsUtil {
     }
 
     /**
+     * 择优排序：启用质量规则时走可配置规则（分辨率顺序/编码偏好/字幕组偏好 + 硬过滤），
+     * 未启用时保持既有硬编码行为完全不变。
+     */
+    static List<Item> sortByQualityAndSize(List<Item> items, QualityProfile profile) {
+        if (profile == null || !profile.enabled()) {
+            return sortByQualityAndSize(items);
+        }
+        return QualityRule.rank(items, profile);
+    }
+
+    /**
      * 画质优先级评分，越高越好
      */
     private static int getQualityPriority(String title) {
@@ -843,6 +881,10 @@ public class ItemsUtil {
         return distinctWithCollectionPriority(items, false);
     }
 
+    public static List<Item> distinctWithCollectionPriority(List<Item> items, boolean preferMaster) {
+        return distinctWithCollectionPriority(items, preferMaster, null);
+    }
+
     /**
      * 合集优先去重（可指定主RSS优先）：
      * 同一集同时有合集展开源和单集源时，优先保留合集源（带 episodeRange 的条目），
@@ -851,8 +893,14 @@ public class ItemsUtil {
      * @param preferMaster 同类型(合集/单集)候选内主RSS条目优先于备用RSS条目:
      *                     备用RSS仅作占位补漏, 主RSS出种后应由主RSS版本替换
      *                     (仅 备用RSS+洗版 且未开启共存 时传 true)
+     * @param profile      质量择优规则（可空 = 沿用既有硬编码画质+体积排序）。
+     *                     <p>
+     *                     规则只在<b>既有逻辑已选定的候选池内部</b>排序，
+     *                     不会把"合集优先/主源优先"的结论反过来推翻——
+     *                     即优先级顺序始终是：多字幕组共存 &gt; 洗版 &gt; 质量规则。
      */
-    public static List<Item> distinctWithCollectionPriority(List<Item> items, boolean preferMaster) {
+    public static List<Item> distinctWithCollectionPriority(List<Item> items, boolean preferMaster,
+                                                            QualityProfile profile) {
         if (CollUtil.isEmpty(items)) {
             return items;
         }
@@ -865,6 +913,7 @@ public class ItemsUtil {
         List<Item> result = new ArrayList<>();
 
         // 2. 每集内部分为合集源和单集源，优先合集
+        boolean preferCollection = profile == null || profile.preferCollectionOrDefault();
         for (Map.Entry<Double, List<Item>> entry : grouped.entrySet()) {
             List<Item> episodeItems = entry.getValue();
 
@@ -879,14 +928,20 @@ public class ItemsUtil {
                 }
             }
 
-            List<Item> candidates = !collections.isEmpty() ? collections : singles;
-            candidates = sortByQualityAndSize(candidates);
+            List<Item> candidates = preferCollection && !collections.isEmpty() ? collections : singles;
+            if (candidates.isEmpty()) {
+                // 关闭"优先合集"时若该集只有合集源，仍应保留，否则整集丢失
+                candidates = collections.isEmpty() ? singles : collections;
+            }
+            candidates = sortByQualityAndSize(candidates, profile);
             if (preferMaster) {
                 // 在画质+体积有序基础上稳定排序: 主RSS条目前置,
                 // 同组(主/备)内部保持画质+体积序不变
                 candidates = sortByMasterFirst(candidates);
             }
-            result.add(candidates.get(0));
+            if (!candidates.isEmpty()) {
+                result.add(candidates.get(0));
+            }
         }
 
         // 3. 补充无集数的特殊条目（OVA/剧场版等）
@@ -900,7 +955,34 @@ public class ItemsUtil {
     }
 
     /**
-     * 主RSS条目稳定前置（入参应为已按画质+体积排序的候选）:
+     * 非 v2 命名的质量规则去重：按集数分组，规则开启时在同集候选里择优。
+     * <p>
+     * 规则关闭时不调用此方法，继续使用旧的 {@code CollUtil.distinct(..., true)}
+     * 先到先得语义，避免存量订阅行为变化。
+     */
+    static List<Item> distinctByEpisodeWithQuality(List<Item> items, QualityProfile profile) {
+        if (CollUtil.isEmpty(items)) {
+            return items;
+        }
+        Map<Double, List<Item>> grouped = items.stream()
+                .filter(item -> item != null && item.getEpisode() != null)
+                .collect(Collectors.groupingBy(Item::getEpisode, LinkedHashMap::new, Collectors.toList()));
+        List<Item> result = new ArrayList<>();
+        for (List<Item> candidates : grouped.values()) {
+            List<Item> ranked = QualityRule.rank(candidates, profile);
+            if (!ranked.isEmpty()) {
+                result.add(ranked.get(0));
+            }
+        }
+        // 非集数条目（OVA/电影）保持原顺序，质量规则只介入同集候选
+        items.stream()
+                .filter(item -> item != null && item.getEpisode() == null)
+                .forEach(result::add);
+        return result;
+    }
+
+    /**
+     * 主RSS条目稳定前置（入参应为已按画质+体积排序的候选):
      * 存在主RSS条目时 master 在前(组内保持原序), 纯备用候选不改变顺序。
      */
     private static List<Item> sortByMasterFirst(List<Item> items) {
@@ -944,6 +1026,7 @@ public class ItemsUtil {
                 parent.setInfoHash(item.getInfoHash());
                 parent.setFormatSize(item.getFormatSize());
                 parent.setLength(item.getLength());
+                parent.setSeeders(item.getSeeders());
                 parent.setHasDownloaded(item.getHasDownloaded());
                 parent.setMaster(item.getMaster());
                 parent.setSubgroup(item.getSubgroup());

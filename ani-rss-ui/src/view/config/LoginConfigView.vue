@@ -69,6 +69,23 @@
       </div>
     </div>
   </SettingsItem>
+  <SettingsItem label="只读令牌">
+    <div class="full-width">
+      <div class="flex">
+        <el-input v-model:model-value="props.config.viewerApiKey" placeholder="留空表示不启用" show-password/>
+        <div class="login-api-key-buttons flex">
+          <el-button bg text @click="createViewerKey">生成</el-button>
+          <el-button bg text @click="copy(props.config.viewerApiKey)">复制</el-button>
+        </div>
+      </div>
+      <div class="margin-top-4">
+        <el-text class="mx-1" size="small">
+          用这个令牌访问只能「看和播」——查看订阅 / 任务 / 日志 / 媒体库、播放视频；
+          增删订阅、改配置、下任务等写操作一律被拒绝。适合把界面分享给家人。
+        </el-text>
+      </div>
+    </div>
+  </SettingsItem>
 </template>
 
 <script setup>
@@ -88,6 +105,10 @@ let generateRandomString = (length) => {
 
 let createApiKey = () => {
   props.config.apiKey = generateRandomString(64);
+}
+
+let createViewerKey = () => {
+  props.config.viewerApiKey = generateRandomString(48);
 }
 
 let copy = (v) => {

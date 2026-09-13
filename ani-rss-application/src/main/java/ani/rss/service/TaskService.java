@@ -2,8 +2,10 @@ package ani.rss.service;
 
 import ani.rss.task.BaseTask;
 import ani.rss.task.BgmTask;
+import ani.rss.task.DiskTask;
 import ani.rss.task.RenameTask;
 import ani.rss.task.RssTask;
+import ani.rss.task.WeeklyReportTask;
 import cn.hutool.core.text.NamingCase;
 import cn.hutool.extra.spring.SpringUtil;
 import lombok.extern.slf4j.Slf4j;
@@ -66,7 +68,8 @@ public class TaskService {
         }
         LOOP.set(true);
 
-        List<Class<? extends BaseTask>> classList = List.of(RenameTask.class, RssTask.class, BgmTask.class);
+        List<Class<? extends BaseTask>> classList = List.of(
+                RenameTask.class, RssTask.class, BgmTask.class, DiskTask.class, WeeklyReportTask.class);
 
         for (Class<? extends BaseTask> aClass : classList) {
             BaseTask task = SpringUtil.getBean(aClass);

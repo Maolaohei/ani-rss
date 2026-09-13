@@ -16,21 +16,33 @@ public class ApiKey implements Function<HttpServletRequest, Boolean> {
     public Boolean apply(HttpServletRequest request) {
         Config config = ConfigUtil.CONFIG;
         String apiKey = config.getApiKey();
-        if (StrUtil.isBlank(apiKey)) {
+        String viewerApiKey = config.getViewerApiKey();
+
+        String presented = presentedKey(request);
+        if (StrUtil.isBlank(presented)) {
             return false;
         }
+        // 管理令牌
+        if (StrUtil.isNotBlank(apiKey) && StrUtil.equals(apiKey, presented)) {
+            return true;
+        }
+        // 只读令牌：仅授予"看和播"，写操作由 ViewerPolicy 在切面里拦
+        return StrUtil.isNotBlank(viewerApiKey) && StrUtil.equals(viewerApiKey, presented);
+    }
 
+    /**
+     * 取出请求中携带的密钥（支持 header 与 query 两种形式）
+     */
+    public static String presentedKey(HttpServletRequest request) {
         for (String key : List.of("api-key", "x-api-key", "s")) {
             String s = request.getHeader(key);
             if (StrUtil.isBlank(s)) {
                 s = request.getParameter(key);
             }
-            if (StrUtil.isBlank(s)) {
-                continue;
+            if (StrUtil.isNotBlank(s)) {
+                return s;
             }
-            return StrUtil.equals(apiKey, s);
         }
-
-        return false;
+        return null;
     }
 }

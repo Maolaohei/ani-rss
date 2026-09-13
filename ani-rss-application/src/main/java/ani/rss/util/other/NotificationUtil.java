@@ -13,7 +13,11 @@ import cn.hutool.core.util.ReflectUtil;
 import cn.hutool.core.util.StrUtil;
 import lombok.extern.slf4j.Slf4j;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -28,20 +32,48 @@ public class NotificationUtil {
             .setWorkQueue(new LinkedBlockingQueue<>(256))
             .build();
 
+    /**
+     * 通知类型 → 实现类。
+     * <p>
+     * 用可变 Map 而非 {@code Map.of}：通道数量已超过 Map.of 的 10 对上限，
+     * 后续再加渠道也不应再受此限制。
+     */
     public final static Map<NotificationTypeEnum, Class<? extends BaseNotification>>
-            NOTIFICATION_MAP =
-            Map.of(
-                    NotificationTypeEnum.EMBY_REFRESH, EmbyRefreshNotification.class,
-                    NotificationTypeEnum.MAIL, MailNotification.class,
-                    NotificationTypeEnum.SERVER_CHAN, ServerChanNotification.class,
-                    NotificationTypeEnum.SYSTEM, SystemNotification.class,
-                    NotificationTypeEnum.TELEGRAM, TelegramNotification.class,
-                    NotificationTypeEnum.WEB_HOOK, WebHookNotification.class,
-                    NotificationTypeEnum.SHELL, ShellNotification.class,
-                    NotificationTypeEnum.FILE_MOVE, FileMoveNotification.class,
-                    NotificationTypeEnum.OPEN_LIST_UPLOAD, OpenListUploadNotification.class,
-                    NotificationTypeEnum.BARK, BarkNotification.class
-            );
+            NOTIFICATION_MAP = buildNotificationMap();
+
+    private static Map<NotificationTypeEnum, Class<? extends BaseNotification>> buildNotificationMap() {
+        Map<NotificationTypeEnum, Class<? extends BaseNotification>> map = new LinkedHashMap<>();
+        map.put(NotificationTypeEnum.EMBY_REFRESH, EmbyRefreshNotification.class);
+        map.put(NotificationTypeEnum.MAIL, MailNotification.class);
+        map.put(NotificationTypeEnum.SERVER_CHAN, ServerChanNotification.class);
+        map.put(NotificationTypeEnum.SYSTEM, SystemNotification.class);
+        map.put(NotificationTypeEnum.TELEGRAM, TelegramNotification.class);
+        map.put(NotificationTypeEnum.WEB_HOOK, WebHookNotification.class);
+        map.put(NotificationTypeEnum.SHELL, ShellNotification.class);
+        map.put(NotificationTypeEnum.FILE_MOVE, FileMoveNotification.class);
+        map.put(NotificationTypeEnum.OPEN_LIST_UPLOAD, OpenListUploadNotification.class);
+        map.put(NotificationTypeEnum.BARK, BarkNotification.class);
+        map.put(NotificationTypeEnum.NTFY, NtfyNotification.class);
+        map.put(NotificationTypeEnum.GOTIFY, GotifyNotification.class);
+        map.put(NotificationTypeEnum.PUSH_DEER, PushDeerNotification.class);
+        map.put(NotificationTypeEnum.FEISHU, FeishuNotification.class);
+        map.put(NotificationTypeEnum.DING_TALK, DingTalkNotification.class);
+        map.put(NotificationTypeEnum.WE_COM, WeComNotification.class);
+        return Collections.unmodifiableMap(map);
+    }
+
+    /**
+     * "动作类"渠道：它们的语义是"下载完成后的后续动作"，不是"发一条消息"。
+     * <p>
+     * 系统级通知（磁盘预警 / 追番周报）不应投递给这些渠道——
+     * 否则一次磁盘预警会触发 Emby 全库刷新、执行用户的下种后脚本、
+     * 或把并不存在的订阅文件"移动"一遍。
+     */
+    private static final java.util.Set<NotificationTypeEnum> ACTION_ONLY_TYPES = java.util.Set.of(
+            NotificationTypeEnum.EMBY_REFRESH,
+            NotificationTypeEnum.FILE_MOVE,
+            NotificationTypeEnum.OPEN_LIST_UPLOAD,
+            NotificationTypeEnum.SHELL);
 
     /**
      * 发送通知
@@ -87,6 +119,12 @@ public class NotificationUtil {
 
             if (Objects.isNull(notificationType)) {
                 // 通知类型可能已经被删除
+                continue;
+            }
+
+            // 系统级通知不投递给"动作类"渠道（见 ACTION_ONLY_TYPES 说明）
+            if (NotificationStatusEnum.SYSTEM == notificationStatusEnum
+                    && ACTION_ONLY_TYPES.contains(notificationType)) {
                 continue;
             }
 
@@ -166,5 +204,36 @@ public class NotificationUtil {
 
     public static LastSend getLastSend() {
         return LAST_SEND.get();
+    }
+
+    /**
+     * 系统级通知：磁盘预警、周报等不属于任何订阅的告警。
+     * <p>
+     * {@link #send} 会先判断 {@code ani.getMessage()} 并直接返回，因此系统级通知
+     * 需要一个"始终允许通知"的合成订阅对象；同时通知模板会读取标题/季度/发布日期
+     * 等字段，必须给出安全默认值，否则模板替换会 NPE。
+     */
+    public static Ani systemAni() {
+        return new Ani()
+                .setId(SYSTEM_ANI_ID)
+                .setTitle("ani-rss")
+                .setUrl("")
+                .setSeason(1)
+                .setReleaseDate(new Date())
+                .setEnable(true)
+                .setMessage(true)
+                .setStandbyRssList(new ArrayList<>());
+    }
+
+    public static final String SYSTEM_ANI_ID = "__system__";
+
+    /**
+     * 发送系统级通知（不依赖任何订阅）
+     */
+    public static void sendSystem(Config config, String text, NotificationStatusEnum notificationStatusEnum) {
+        if (config == null) {
+            return;
+        }
+        send(config, systemAni(), text, notificationStatusEnum);
     }
 }

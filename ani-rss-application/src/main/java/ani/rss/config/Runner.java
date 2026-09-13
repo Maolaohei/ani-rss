@@ -35,6 +35,8 @@ public class Runner implements ApplicationRunner {
             ConfigUtil.backup();
 
             AniUtil.load();
+            // 恢复上一轮 RSS 调度快照（"上一轮已处理"与订阅级失败明细），不恢复活动态
+            ani.rss.task.RssTask.restorePersistedState();
             // 清理 OpenList 离线标记残留(正式记录已存在的 pending)
             TorrentUtil.cleanupOrphanPending();
             taskService.start();

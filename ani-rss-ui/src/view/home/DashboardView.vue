@@ -131,6 +131,61 @@
 
           <section class="dashboard-section">
             <div class="section-title">
+              <h3>近 7 天下载</h3>
+              <div class="today-heading-actions">
+                <el-tag type="success">成功 {{ historySummary.success }}</el-tag>
+                <el-tag v-if="historySummary.failed" type="danger">失败 {{ historySummary.failed }}</el-tag>
+                <el-tag type="info">成功率 {{ successRateText }}</el-tag>
+              </div>
+            </div>
+            <el-empty v-if="!historyDays.length" description="暂无下载记录"/>
+            <div v-else class="trend">
+              <div v-for="day in historyDays" :key="day.date" class="trend-col"
+                   :title="`${day.date} 完成 ${day.success} / 失败 ${day.failed}`">
+                <div class="trend-bars">
+                  <div class="bar success" :style="{height: barHeight(day.success) + 'px'}"></div>
+                  <div class="bar failed" :style="{height: barHeight(day.failed) + 'px'}"></div>
+                </div>
+                <span class="trend-label">{{ shortDate(day.date) }}</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="dashboard-section">
+            <div class="section-title">
+              <h3>健康概览</h3>
+              <el-tag type="info">{{ enabledTotal }} 部在追</el-tag>
+            </div>
+            <div class="health-grid">
+              <div v-for="h in healthBuckets" :key="h.level" class="health-item">
+                <span class="health-dot" :class="`is-${h.level}`"></span>
+                <span class="health-label">{{ h.label }}</span>
+                <span class="health-count">{{ h.count }}</span>
+              </div>
+            </div>
+            <el-divider/>
+            <div class="section-title">
+              <h3>漏集 TOP</h3>
+              <el-tag :type="omitTop.length ? 'warning' : 'info'">{{ omitTop.length }}</el-tag>
+            </div>
+            <el-empty v-if="!omitTop.length" description="暂无漏集" :image-size="60"/>
+            <el-table v-else :data="omitTop" class="dashboard-table" size="small">
+              <el-table-column label="订阅" min-width="200" prop="title" show-overflow-tooltip/>
+              <el-table-column label="漏集" width="80">
+                <template #default="{row}">
+                  <el-tag type="warning" size="small">{{ row.omitCount }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="进度" width="100">
+                <template #default="{row}">
+                  {{ row.currentEpisodeNumber }} / {{ row.totalEpisodeNumber || '*' }}
+                </template>
+              </el-table-column>
+            </el-table>
+          </section>
+
+          <section class="dashboard-section">
+            <div class="section-title">
               <h3>疑似停更列表</h3>
               <el-tag type="warning">{{ procrastinatingList.length }}</el-tag>
             </div>
@@ -191,6 +246,8 @@ const bgmRateRef = ref()
 const config = ref({
   procrastinatingDay: 14
 })
+const historyDays = ref([])
+const historySummary = ref({success: 0, failed: 0, skip: 0, successRate: 1, size: 0})
 
 let timer
 
@@ -231,6 +288,46 @@ const getCompareTime = item => {
   const releaseTime = new Date(item.releaseDate).getTime()
   return Number.isNaN(releaseTime) ? 0 : releaseTime
 }
+
+const successRateText = computed(() => `${Math.round((historySummary.value.successRate || 0) * 100)}%`)
+
+const maxHistoryBar = computed(() => {
+  const max = Math.max(1, ...historyDays.value.map(d => Math.max(d.success, d.failed)))
+  return max
+})
+
+const barHeight = value => Math.max(value > 0 ? 4 : 0, Math.round((value / maxHistoryBar.value) * 56))
+
+const shortDate = date => (date || '').slice(5)
+
+/**
+ * 健康分布：按 healthLevel 归桶。健康分由后端在 listAni 时算好，
+ * 这里只做聚合，不再额外请求。
+ */
+const healthBuckets = computed(() => {
+  const buckets = [
+    {level: 'good', label: '良好', count: 0},
+    {level: 'warn', label: '注意', count: 0},
+    {level: 'bad', label: '异常', count: 0},
+    {level: 'paused', label: '已停用', count: 0},
+    {level: 'completed', label: '已完结', count: 0}
+  ]
+  const map = new Map(buckets.map(b => [b.level, b]))
+  for (const ani of enabledAnis.value) {
+    const bucket = map.get(ani.healthLevel) || map.get('warn')
+    bucket.count += 1
+  }
+  return buckets
+})
+
+/**
+ * 漏集 TOP：用 RSS 周期缓存的 omitCount，不额外拉源
+ */
+const omitTop = computed(() => enabledAnis.value
+    .filter(item => Number(item.omitCount || 0) > 0)
+    .map(item => ({...item, omitCount: Number(item.omitCount)}))
+    .sort((a, b) => b.omitCount - a.omitCount)
+    .slice(0, 8))
 
 const isDownloading = item => downloadingStates.includes(item.state)
 const isSeeding = item => seedingStates.includes(item.state)
@@ -282,13 +379,24 @@ const loadTorrents = async () => {
   torrentsInfos.value = res.data || []
 }
 
+const loadHistory = async () => {
+  try {
+    const res = await http.downloadHistoryStats({days: 7})
+    historySummary.value = res.data?.summary || historySummary.value
+    historyDays.value = res.data?.days || []
+  } catch (e) {
+    historyDays.value = []
+  }
+}
+
 const loadAll = async () => {
   refreshLoading.value = true
   try {
     await Promise.all([
       loadAni(),
       loadConfig(),
-      loadTorrents()
+      loadTorrents(),
+      loadHistory()
     ])
   } finally {
     refreshLoading.value = false
@@ -457,6 +565,98 @@ onUnmounted(stopPolling)
 
 .dashboard-table {
   width: 100%;
+}
+
+.trend {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.trend-col {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 30px;
+}
+
+.trend-bars {
+  height: 60px;
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.bar {
+  width: 9px;
+  border-radius: 2px 2px 0 0;
+}
+
+.bar.success {
+  background: var(--el-color-success);
+}
+
+.bar.failed {
+  background: var(--el-color-danger);
+}
+
+.trend-label {
+  font-size: 11px;
+  color: var(--el-text-color-placeholder);
+}
+
+.health-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 8px;
+}
+
+.health-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--el-fill-color-light);
+  font-size: 13px;
+}
+
+.health-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.health-dot.is-good {
+  background: var(--el-color-success);
+}
+
+.health-dot.is-warn {
+  background: var(--el-color-warning);
+}
+
+.health-dot.is-bad {
+  background: var(--el-color-danger);
+}
+
+.health-dot.is-paused,
+.health-dot.is-completed {
+  background: var(--el-text-color-placeholder);
+}
+
+.health-label {
+  flex: 1;
+  color: var(--el-text-color-regular);
+}
+
+.health-count {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 @media (max-width: 900px) {

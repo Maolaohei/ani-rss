@@ -7,6 +7,7 @@ import ani.rss.commons.PinyinUtils;
 import ani.rss.download.OfflineDownloader;
 import ani.rss.download.OpenList;
 import ani.rss.entity.*;
+import ani.rss.enums.EventTypeEnum;
 import ani.rss.enums.NotificationStatusEnum;
 import ani.rss.enums.StringEnum;
 import ani.rss.enums.TorrentsTags;
@@ -858,6 +859,25 @@ public class DownloadService {
                     item == null ? null : item.getReName(),
                     hash,
                     rawMessage);
+            // 失败同样进历史，保证"时间线"完整（失败侧同时保留在失败队列供精确重下）
+            String humanized = TaskFailureHumanizer.humanize(rawMessage).title();
+            DownloadHistory.record(ani == null ? null : ani.getId(),
+                    ani == null ? null : ani.getTitle(),
+                    item == null ? null : item.getReName(),
+                    hash,
+                    item == null ? null : item.getEpisode(),
+                    null,
+                    ConfigUtil.CONFIG.getDownloadToolType(),
+                    ani == null ? null : ani.getSubgroup(),
+                    DownloadHistory.Result.FAILED,
+                    humanized);
+            // 结构化事件（对外 Webhook）
+            Map<String, Object> eventData = new LinkedHashMap<>();
+            eventData.put("reName", item == null ? null : item.getReName());
+            eventData.put("infoHash", hash);
+            eventData.put("reason", humanized);
+            eventData.put("rawMessage", rawMessage);
+            EventWebhookUtil.emit(EventTypeEnum.DOWNLOAD_FAILED, ani, eventData);
         } catch (Exception e) {
             log.debug("记录失败队列失败: {}", e.getMessage());
         }
@@ -1116,10 +1136,34 @@ public class DownloadService {
             }
         }
         String text = StrFormatter.format("{} 下载完成", name);
-        if (tags.contains(TorrentsTags.BACK_RSS.getValue())) {
+        boolean standby = tags.contains(TorrentsTags.BACK_RSS.getValue());
+        if (standby) {
             text = StrFormatter.format("(备用RSS) {}", text);
         }
         NotificationUtil.send(ConfigUtil.CONFIG, ani, text, NotificationStatusEnum.DOWNLOAD_END);
+
+        // 下载历史（成功侧）：失败侧已由 FailedDownloadQueue 记录，这里补齐成功记录
+        try {
+            DownloadHistory.record(ani.getId(), ani.getTitle(), name, torrentsInfo.getHash(),
+                    episodeOf(name),
+                    torrentsInfo.getSize(),
+                    ConfigUtil.CONFIG.getDownloadToolType(),
+                    subgroup,
+                    standby ? DownloadHistory.Result.WASH : DownloadHistory.Result.SUCCESS,
+                    "下载完成");
+            // 结构化事件（对外 Webhook）
+            Map<String, Object> eventData = new LinkedHashMap<>();
+            eventData.put("reName", name);
+            eventData.put("infoHash", torrentsInfo.getHash());
+            eventData.put("episode", episodeOf(name));
+            eventData.put("size", torrentsInfo.getSize());
+            eventData.put("source", ConfigUtil.CONFIG.getDownloadToolType());
+            eventData.put("subgroup", subgroup);
+            eventData.put("standby", standby);
+            EventWebhookUtil.emit(EventTypeEnum.DOWNLOAD_END, ani, eventData);
+        } catch (Exception e) {
+            log.debug("记录下载历史失败: {}", e.getMessage());
+        }
 
         String title = ani.getTitle();
 
@@ -1128,6 +1172,25 @@ public class DownloadService {
         } catch (Exception e) {
             log.error("番剧完结迁移失败 {}", title);
             log.error(e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 从种子名中提取集数（提取不到返回 null，不抛异常）。
+     * 与播放页取集数同一套正则，保证历史记录里的集数与界面上看到的一致。
+     */
+    private static Double episodeOf(String name) {
+        if (StrUtil.isBlank(name)) {
+            return null;
+        }
+        try {
+            if (!ReUtil.contains(StringEnum.SEASON_REG, name)) {
+                return null;
+            }
+            String episode = ReUtil.get(StringEnum.SEASON_REG, name, 2);
+            return StrUtil.isBlank(episode) ? null : Double.parseDouble(episode);
+        } catch (Exception e) {
+            return null;
         }
     }
 

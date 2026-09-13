@@ -33,6 +33,18 @@
                        :label="selectItem.label"
                        :value="selectItem.label"/>
           </el-select>
+          <el-select
+              v-model:model-value="group"
+              class="subscription-select"
+              clearable
+              placeholder="分组"
+              @change="selectChange">
+            <el-option label="未分组" :value="UNGROUPED"/>
+            <el-option v-for="it in groupList"
+                       :key="it"
+                       :label="it"
+                       :value="it"/>
+          </el-select>
         </div>
         <div class="subscription-actions">
           <el-dropdown trigger="click">
@@ -106,6 +118,10 @@ const releaseDateList = ref([])
 const subscriptionTotal = ref(0)
 const refreshLoading = ref(false)
 const enable = useLocalStorage('select-enable', '已启用')
+/** 分组筛选："未分组" 用一个不会与真实分组名冲突的哨兵值 */
+const UNGROUPED = '__ungrouped__'
+const group = useLocalStorage('select-group', '')
+const groupList = ref([])
 const enableSelect = [
   {
     label: '全部',
@@ -134,6 +150,16 @@ const selectChange = () => {
     if (selectedEnable && !selectedEnable.fun(it)) {
       return false
     }
+    if (group.value) {
+      const aniGroup = (it.group || '').trim()
+      if (group.value === UNGROUPED) {
+        if (aniGroup) {
+          return false
+        }
+      } else if (aniGroup !== group.value) {
+        return false
+      }
+    }
     if (!releaseDate.value) {
       return true
     }
@@ -145,12 +171,14 @@ const selectChange = () => {
 const listLoaded = data => {
   releaseDateList.value = data.releaseDateList || []
   subscriptionTotal.value = data.total || 0
+  groupList.value = data.groupList || []
 }
 
 const onClearFilter = () => {
   title.value = ''
   enable.value = '全部'
   releaseDate.value = ''
+  group.value = ''
   selectChange()
 }
 

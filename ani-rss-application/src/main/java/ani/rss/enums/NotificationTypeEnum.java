@@ -13,5 +13,11 @@ public enum NotificationTypeEnum {
     SHELL,
     FILE_MOVE,
     OPEN_LIST_UPLOAD,
-    BARK
+    BARK,
+    NTFY,
+    GOTIFY,
+    PUSH_DEER,
+    FEISHU,
+    DING_TALK,
+    WE_COM
 }

@@ -16,6 +16,9 @@
     <el-collapse-item name="rss" title="RSS设置">
       <RssView :config="props.config"/>
     </el-collapse-item>
+    <el-collapse-item name="quality" title="质量择优">
+      <QualityProfileView :profile="qualityProfile"/>
+    </el-collapse-item>
     <el-collapse-item name="trackers" title="Trackers">
       <TrackersView :config="props.config"/>
     </el-collapse-item>
@@ -43,8 +46,34 @@ import BangumiView from "@/view/config/basic/BangumiView.vue";
 import BackupView from "./basic/BackupView.vue";
 import ScrapeView from "./basic/ScrapeView.vue";
 import FirstUseGuideView from "@/view/config/basic/FirstUseGuideView.vue";
+import QualityProfileView from "@/view/config/basic/QualityProfileView.vue";
+import {computed} from "vue";
+
+const props = defineProps(['config'])
+
+/**
+ * 后端可能返回 null（存量配置没有该字段），就地补一个空对象承载编辑，
+ * 保存时随 config 一起提交
+ */
+const qualityProfile = computed(() => {
+  if (!props.config.qualityProfile) {
+    props.config.qualityProfile = {
+      enable: false,
+      resolutionOrder: [],
+      preferCodecs: [],
+      excludeCodecs: [],
+      minResolution: '',
+      maxResolution: '',
+      minSizeMb: 0,
+      maxSizeMb: 0,
+      minSeeders: 0,
+      preferSubgroups: [],
+      excludeSubgroups: [],
+      preferCollection: true
+    }
+  }
+  return props.config.qualityProfile
+})
 
 let activeName = ref('page')
-
-let props = defineProps(['config'])
 </script>

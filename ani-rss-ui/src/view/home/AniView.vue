@@ -140,6 +140,23 @@
             <el-form-item label="启用">
               <el-switch v-model:model-value="props.ani.enable"/>
             </el-form-item>
+            <el-form-item label="优先级">
+              <el-radio-group v-model:model-value="props.ani.priority">
+                <el-radio-button :value="0">高</el-radio-button>
+                <el-radio-button :value="1">普通</el-radio-button>
+                <el-radio-button :value="2">低</el-radio-button>
+              </el-radio-group>
+              <el-text size="small" type="info" style="margin-left: 8px;">
+                一轮扫描按优先级排序，本季在追的排前面
+              </el-text>
+            </el-form-item>
+            <el-form-item label="分组">
+              <el-input v-model:model-value="props.ani.group" clearable
+                        placeholder="留空表示未分组，如：本季追更 / 补番中 / 已完结待迁移"/>
+              <el-text size="small" type="info" style="margin-left: 8px;">
+                订阅页可按分组筛选，管理页可批量设置
+              </el-text>
+            </el-form-item>
           </el-form>
         </el-scrollbar>
       </el-tab-pane>
@@ -249,6 +266,19 @@
                 </DisableView>
               </div>
             </el-form-item>
+            <el-form-item label="质量择优">
+              <div class="full-width">
+                <el-switch v-model="props.ani.customQualityProfileEnable"/>
+                <div class="margin-top-4">
+                  <el-text size="small" type="info">
+                    开启后覆盖全局「基本设置 → 质量择优」规则；关闭则跟随全局。
+                  </el-text>
+                </div>
+                <DisableView :url="props.ani.customQualityProfileEnable">
+                  <QualityProfileView :profile="customQualityProfile" :show-enable="false"/>
+                </DisableView>
+              </div>
+            </el-form-item>
             <el-form-item label="其它">
               <el-checkbox v-model="props.ani.omit" label="遗漏检测"/>
               <el-checkbox v-model="props.ani.upload" label="自动上传"/>
@@ -346,6 +376,7 @@ import {getBgmTitle} from "@/js/http.js";
 import AniBTView from "@/view/home/AniBTView.vue";
 import AnimeGardenView from "@/view/home/AnimeGardenView.vue";
 import DisableView from "@/view/custom/DisableView.vue";
+import QualityProfileView from "@/view/config/basic/QualityProfileView.vue";
 
 const activeName = ref('base')
 
@@ -506,6 +537,26 @@ let aniBTShow = () => {
 }
 
 let props = defineProps(['ani'])
+
+const customQualityProfile = computed(() => {
+  if (!props.ani.customQualityProfile) {
+    props.ani.customQualityProfile = {
+      enable: true,
+      resolutionOrder: [],
+      preferCodecs: [],
+      excludeCodecs: [],
+      minResolution: '',
+      maxResolution: '',
+      minSizeMb: 0,
+      maxSizeMb: 0,
+      minSeeders: 0,
+      preferSubgroups: [],
+      excludeSubgroups: [],
+      preferCollection: true
+    }
+  }
+  return props.ani.customQualityProfile
+})
 
 // 媒体类型: 普通番剧(0) / 剧场版电影(1) / OVA特典(2)
 let aniType = computed({

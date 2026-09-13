@@ -27,7 +27,11 @@ public enum NotificationStatusEnum {
     /**
      * 摸鱼检测
      */
-    PROCRASTINATING("🐟", "摸鱼检测");
+    PROCRASTINATING("🐟", "摸鱼检测"),
+    /**
+     * 系统通知：磁盘预警、追番周报等不属于任何订阅的汇总信息
+     */
+    SYSTEM("🔔", "系统通知");
 
     private final String emoji;
     private final String action;

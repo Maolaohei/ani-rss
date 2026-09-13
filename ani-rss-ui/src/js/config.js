@@ -151,5 +151,19 @@ export let configData = {
     "followDay": 14,
     "bangumiIniEnabled": false,
     "replace": false,
-    "sortType": "SCORE"
+    "sortType": "SCORE",
+    "qualityProfile": {
+        "enable": false,
+        "resolutionOrder": [],
+        "preferCodecs": [],
+        "excludeCodecs": [],
+        "minResolution": "",
+        "maxResolution": "",
+        "minSizeMb": 0,
+        "maxSizeMb": 0,
+        "minSeeders": 0,
+        "preferSubgroups": [],
+        "excludeSubgroups": [],
+        "preferCollection": true
+    }
 }

@@ -8,6 +8,7 @@ import ani.rss.enums.NotificationStatusEnum;
 import ani.rss.enums.StringEnum;
 import ani.rss.task.RssTask;
 import ani.rss.util.other.ConfigUtil;
+import ani.rss.util.other.DownloadHistory;
 import ani.rss.util.other.FailedDownloadQueue;
 import ani.rss.util.other.NotificationUtil;
 import ani.rss.util.other.RenameUtil;
@@ -974,6 +975,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                                 NotificationUtil.send(config, ani,
                                         StrFormatter.format("{} 下载完成", item.getReName()),
                                         NotificationStatusEnum.DOWNLOAD_END);
+                                recordHistory(ani, item, "离线下载完成(10008 兜底)");
                                 return true;
                             }
                             if (!dupScan.videoList().isEmpty()) {
@@ -1098,6 +1100,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                     NotificationUtil.send(config, ani,
                             StrFormatter.format("{} 下载完成", item.getReName()),
                             NotificationStatusEnum.DOWNLOAD_END);
+                    recordHistory(ani, item, "离线下载完成");
                     return true;
                 }
                 if (!scan.videoList().isEmpty()) {
@@ -1271,7 +1274,28 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 ? StrFormatter.format("{} 合集下载完成, 共归位 {} 个文件", item.getReName(), renameMap.size())
                 : StrFormatter.format("{} 下载完成", item.getReName());
         NotificationUtil.send(config, ani, message, NotificationStatusEnum.DOWNLOAD_END);
+        recordHistory(ani, item, ctx.collectionPlan != null ? "离线合集完成" : "离线下载完成");
         return true;
+    }
+
+    /**
+     * 记录离线下载历史（成功侧）。
+     * <p>
+     * qB / Transmission / Aria2 的历史由 {@code DownloadService.notification} 统一记录，
+     * 但 OpenList 走的是自己的完成判定链路，不经过该方法，需在此单独埋点。
+     */
+    private void recordHistory(Ani ani, Item item, String note) {
+        try {
+            if (ani == null || item == null) {
+                return;
+            }
+            DownloadHistory.record(ani.getId(), ani.getTitle(), item.getReName(), item.getInfoHash(),
+                    item.getEpisode(), item.getLength(),
+                    ConfigUtil.CONFIG.getDownloadToolType(), ani.getSubgroup(),
+                    DownloadHistory.Result.SUCCESS, note);
+        } catch (Exception e) {
+            log.debug("记录离线下载历史失败: {}", e.getMessage());
+        }
     }
 
     /**

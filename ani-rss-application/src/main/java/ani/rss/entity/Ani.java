@@ -382,4 +382,40 @@ public class Ani implements Serializable {
      */
     @Schema(description = "命名版本 1=旧逻辑 2=新逻辑")
     private Integer namingVersion;
+
+    /**
+     * 订阅优先级：0=高, 1=普通(默认), 2=低。
+     * <p>
+     * RSS 一轮扫描按优先级升序处理——本季在追的先扫，收藏/补番的排后面，
+     * 订阅量大时不必等全部扫完才能看到在追番剧的更新。
+     */
+    @Schema(description = "订阅优先级 0=高 1=普通 2=低")
+    private Integer priority;
+
+    /**
+     * 订阅分组（自由文本，如"本季追更""补番中""已完结待迁移"）。
+     * <p>
+     * 订阅量大时只有"周几"一个天然维度，找不到人。分组提供第二维度，
+     * 供列表筛选与批量操作使用；留空视为"未分组"。
+     */
+    @Schema(description = "订阅分组")
+    private String group;
+
+    /**
+     * 订阅标签（多值，用于更细粒度的标记与筛选）
+     */
+    @Schema(description = "订阅标签")
+    private List<String> tags;
+
+    /**
+     * 自定义质量择优规则开关（开启后覆盖全局规则）
+     */
+    @Schema(description = "自定义质量规则开关")
+    private Boolean customQualityProfileEnable;
+
+    /**
+     * 单个订阅自定义质量择优规则
+     */
+    @Schema(description = "自定义质量规则")
+    private QualityProfile customQualityProfile;
 }

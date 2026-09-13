@@ -608,7 +608,12 @@ public class AniUtil {
                 .setCustomCompletedPathTemplate("")
                 .setCustomTags(new ArrayList<>())
                 .setCustomTagsEnable(false)
-                .setNamingVersion(2);
+                .setNamingVersion(2)
+                .setPriority(1)
+                .setGroup("")
+                .setTags(new ArrayList<>())
+                .setCustomQualityProfileEnable(false)
+                .setCustomQualityProfile(ConfigUtil.defaultQualityProfile().setEnable(true));
     }
 
     /**

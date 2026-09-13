@@ -28,6 +28,24 @@
           </el-icon>
           <span>任务</span>
         </el-menu-item>
+        <el-menu-item index="/library">
+          <el-icon>
+            <VideoCamera/>
+          </el-icon>
+          <span>媒体库</span>
+        </el-menu-item>
+        <el-menu-item index="/history">
+          <el-icon>
+            <Clock/>
+          </el-icon>
+          <span>历史</span>
+        </el-menu-item>
+        <el-menu-item index="/tools">
+          <el-icon>
+            <Tools/>
+          </el-icon>
+          <span>工具</span>
+        </el-menu-item>
         <el-menu-item index="/logs">
           <el-icon>
             <Tickets/>
@@ -55,7 +73,7 @@
 <script setup>
 import {onMounted} from "vue";
 import {RouterView, useRoute} from "vue-router";
-import {Collection, Download, House, Setting, Tickets} from "@element-plus/icons-vue";
+import {Clock, Collection, Download, House, Setting, Tickets, Tools, VideoCamera} from "@element-plus/icons-vue";
 import {initLayout} from "@/js/global.js";
 
 const route = useRoute()
@@ -145,14 +163,24 @@ onMounted(() => {
     flex: none;
     height: 58px;
     display: flex;
-    justify-content: space-around;
-    gap: 4px;
-    padding: 4px;
+    justify-content: flex-start;
+    gap: 2px;
+    padding: 4px 8px;
     box-sizing: border-box;
+    /* 导航项已增至 8 个，窄屏改为横向滚动而不是强行均分（均分会把文字挤没） */
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  .app-menu::-webkit-scrollbar {
+    display: none;
   }
 
   .app-menu :deep(.el-menu-item) {
-    flex: 1;
+    flex: 0 0 auto;
+    min-width: 56px;
     height: 50px;
     line-height: 1;
     display: flex;

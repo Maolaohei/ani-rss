@@ -21,6 +21,7 @@
           <el-checkbox label="错误" value="ERROR"/>
           <el-checkbox label="订阅完结" value="COMPLETED"/>
           <el-checkbox label="摸鱼检测" value="PROCRASTINATING"/>
+          <el-checkbox label="系统通知" value="SYSTEM"/>
         </el-checkbox-group>
       </SettingsItem>
       <EmbyRefreshNotificationView v-model:notification-config="notificationConfig" v-model:config="props.config"/>
@@ -33,6 +34,7 @@
       <ShellNotificationView v-model:notification-config="notificationConfig" v-model:config="props.config"/>
       <FileMoveNotificationView v-model:notification-config="notificationConfig" v-model:config="props.config"/>
       <OpenListUploadNotificationView v-model:config="props.config" v-model:notification-config="notificationConfig"/>
+      <ExtraChannelsNotificationView v-model:config="props.config" v-model:notification-config="notificationConfig"/>
       <SettingsItem label="顺序">
         <div>
           <el-input-number
@@ -78,6 +80,7 @@ import FileMoveNotificationView from "./notification/FileMoveNotificationView.vu
 import OpenListUploadNotificationView from "./notification/OpenListUploadNotificationView.vue";
 import {testNotification} from "@/js/http.js";
 import BarkNotificationView from "./notification/BarkNotificationView.vue";
+import ExtraChannelsNotificationView from "./notification/ExtraChannelsNotificationView.vue";
 
 
 let notificationConfig = ref({

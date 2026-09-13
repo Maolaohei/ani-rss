@@ -38,6 +38,30 @@ export let notificationTypeList = [
     {
         name: 'OPEN_LIST_UPLOAD',
         label: 'OpenList上传'
+    },
+    {
+        name: 'NTFY',
+        label: 'ntfy'
+    },
+    {
+        name: 'GOTIFY',
+        label: 'Gotify'
+    },
+    {
+        name: 'PUSH_DEER',
+        label: 'PushDeer'
+    },
+    {
+        name: 'FEISHU',
+        label: '飞书'
+    },
+    {
+        name: 'DING_TALK',
+        label: '钉钉'
+    },
+    {
+        name: 'WE_COM',
+        label: '企业微信'
     }
 ]
 

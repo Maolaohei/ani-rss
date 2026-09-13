@@ -283,6 +283,70 @@ public class NotificationConfig implements Serializable {
     @Schema(description = "Bark Volume")
     private Integer barkVolume;
 
+    // ---- ntfy ----
+    /**
+     * ntfy 服务地址，如 https://ntfy.sh
+     */
+    private String ntfyServerUrl;
+    /**
+     * ntfy 主题（topic）
+     */
+    private String ntfyTopic;
+    /**
+     * ntfy 访问令牌（可选，受保护主题需要）
+     */
+    private String ntfyToken;
+    /**
+     * ntfy 优先级 1-5
+     */
+    private Integer ntfyPriority;
+
+    // ---- Gotify ----
+    /**
+     * Gotify 服务地址，如 https://gotify.example.com
+     */
+    private String gotifyServerUrl;
+    /**
+     * Gotify 应用令牌
+     */
+    private String gotifyToken;
+    /**
+     * Gotify 优先级
+     */
+    private Integer gotifyPriority;
+
+    // ---- PushDeer ----
+    /**
+     * PushDeer Key
+     */
+    private String pushDeerKey;
+    /**
+     * PushDeer 接口地址（自建可改），默认 https://api2.pushdeer.com
+     */
+    private String pushDeerApiUrl;
+
+    // ---- 飞书 ----
+    /**
+     * 飞书自定义机器人 Webhook 地址
+     */
+    private String feishuWebhook;
+
+    // ---- 钉钉 ----
+    /**
+     * 钉钉自定义机器人 Webhook 地址
+     */
+    private String dingTalkWebhook;
+    /**
+     * 钉钉加签密钥（可选，安全设置选择"加签"时必填）
+     */
+    private String dingTalkSecret;
+
+    // ---- 企业微信 ----
+    /**
+     * 企业微信机器人 Webhook 地址
+     */
+    private String weComWebhook;
+
     /**
      * 通知 状态
      */
@@ -310,7 +374,6 @@ public class NotificationConfig implements Serializable {
                         NotificationStatusEnum.OMIT,
                         NotificationStatusEnum.ERROR
                 ));
-
         // 邮箱
         notificationConfig
                 .setMailSMTPHost("smtp.qq.com")
@@ -380,6 +443,31 @@ public class NotificationConfig implements Serializable {
                 .setBarkUseMarkdown(false)
                 .setBarkLevel("active")
                 .setBarkVolume(5);
+
+        // ntfy
+        notificationConfig
+                .setNtfyServerUrl("https://ntfy.sh")
+                .setNtfyTopic("")
+                .setNtfyToken("")
+                .setNtfyPriority(3);
+
+        // gotify
+        notificationConfig
+                .setGotifyServerUrl("")
+                .setGotifyToken("")
+                .setGotifyPriority(5);
+
+        // pushdeer
+        notificationConfig
+                .setPushDeerKey("")
+                .setPushDeerApiUrl("https://api2.pushdeer.com");
+
+        // 飞书 / 钉钉 / 企业微信
+        notificationConfig
+                .setFeishuWebhook("")
+                .setDingTalkWebhook("")
+                .setDingTalkSecret("")
+                .setWeComWebhook("");
 
         return notificationConfig;
     }

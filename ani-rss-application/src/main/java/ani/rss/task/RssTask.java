@@ -6,10 +6,13 @@ import ani.rss.entity.Ani;
 import ani.rss.entity.Config;
 import ani.rss.entity.vo.RssJobItem;
 import ani.rss.entity.vo.RssJobStatus;
+import ani.rss.enums.EventTypeEnum;
 import ani.rss.service.DownloadService;
 import ani.rss.util.other.AniUtil;
 import ani.rss.util.other.ConfigUtil;
+import ani.rss.util.other.EventWebhookUtil;
 import ani.rss.util.other.FailedDownloadQueue;
+import ani.rss.util.other.RssJobStateStore;
 import ani.rss.util.other.TaskFailureHumanizer;
 import ani.rss.util.other.TorrentUtil;
 import cn.hutool.core.thread.ThreadUtil;
@@ -21,7 +24,9 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -98,6 +103,36 @@ public class RssTask implements BaseTask {
             RssJobState.lastScope.set(scope);
             RssJobState.lastSource.set(source == null ? null : source.name().toLowerCase());
             RssJobState.lastResultMessage.set(message);
+            persistState();
+            try {
+                EventWebhookUtil.emit(EventTypeEnum.RSS_ROUND_FINISHED, null, Map.of(
+                        "title", StrUtil.blankToDefault(title, ""),
+                        "scope", StrUtil.blankToDefault(scope, ""),
+                        "source", source == null ? "" : source.name().toLowerCase(),
+                        "durationMs", duration,
+                        "message", StrUtil.blankToDefault(message, "")));
+            } catch (Exception e) {
+                log.debug("派发 RSS 轮次事件失败: {}", e.getMessage());
+            }
+        }
+
+        /**
+         * 把"上一轮结果 + 订阅级失败明细"落盘，供重启后恢复展示。
+         * 只落已完成轮次的结果，不落运行中/排队中的活动态（重启后那些任务客观上已不存在）。
+         */
+        static void persistState() {
+            try {
+                RssJobStateStore.save(new RssJobStateStore.Snapshot()
+                        .setLastFinishedAt(RssJobState.lastFinishedAt.get())
+                        .setLastDurationMs(RssJobState.lastDurationMs.get())
+                        .setLastResultMessage(RssJobState.lastResultMessage.get())
+                        .setLastTitle(RssJobState.lastTitle.get())
+                        .setLastSource(RssJobState.lastSource.get())
+                        .setLastScope(RssJobState.lastScope.get())
+                        .setFailedSubscriptions(new ArrayList<>(RssJobState.failedSubscriptions)));
+            } catch (Exception e) {
+                log.debug("持久化 RSS 调度状态失败: {}", e.getMessage());
+            }
         }
 
         /**
@@ -153,9 +188,57 @@ public class RssTask implements BaseTask {
     /** 在离线超时之上留一点收尾缓冲（分钟） */
     private static final long DOWNLOAD_LOCK_BUFFER_MINUTES = 10L;
     /**
-     * 订阅间并行度：同一订阅由 DownloadService 按 id 串行，这里限制整体并发
+     * 订阅间并行度：同一订阅由 DownloadService 按 id 串行，这里限制整体并发。
+     * <p>
+     * 默认值保持不变（3），可通过 {@code Config.rssConcurrency} 覆盖。
+     * 上限 8：再高会让下载器与源站同时承压，得不偿失。
      */
     private static final int ANI_PARALLELISM = 3;
+
+    /**
+     * 可配置并行度上限
+     */
+    static final int MAX_ANI_PARALLELISM = 8;
+
+    /**
+     * 优先级默认值（普通）
+     */
+    static final int DEFAULT_PRIORITY = 1;
+
+    /**
+     * 按订阅优先级稳定排序：0=高 → 1=普通 → 2=低。
+     * <p>
+     * 线程池按提交顺序取任务，因此排序后高优先级订阅会先被扫描。
+     * 同级保持原有顺序（stable），避免打乱用户习惯的排列。
+     * 非法/缺失的优先级一律按"普通"处理。
+     */
+    static List<Ani> sortByPriority(List<Ani> anis) {
+        List<Ani> copy = new ArrayList<>(anis);
+        copy.sort(Comparator.comparingInt(RssTask::priorityOf));
+        return copy;
+    }
+
+    static int priorityOf(Ani ani) {
+        if (ani == null) {
+            return DEFAULT_PRIORITY;
+        }
+        Integer p = ani.getPriority();
+        if (p == null) {
+            return DEFAULT_PRIORITY;
+        }
+        return Math.max(0, Math.min(2, p));
+    }
+
+    /**
+     * 解析生效的并行度（配置缺失/非法时回落默认值）
+     */
+    static int resolveParallelism(Config config, int subscriptionCount) {
+        int configured = config == null || config.getRssConcurrency() == null
+                ? ANI_PARALLELISM
+                : config.getRssConcurrency();
+        int parallelism = Math.max(1, Math.min(configured, MAX_ANI_PARALLELISM));
+        return Math.min(parallelism, Math.max(1, subscriptionCount));
+    }
 
     /** 任务来源：周期扫描 / 手动刷新 */
     public enum JobSource {
@@ -286,12 +369,15 @@ public class RssTask implements BaseTask {
             RssJobState.failedSubscriptions.clear();
             updateProgressMessage(generation);
 
-            int poolSize = Math.min(ANI_PARALLELISM, enabled.size());
+            // 按订阅优先级排序后再提交：线程池按提交顺序取任务，
+            // 因此"本季在追"的高优先级订阅会先被扫描，订阅量大时不必等全量扫完。
+            List<Ani> ordered = sortByPriority(enabled);
+            int poolSize = resolveParallelism(ConfigUtil.CONFIG, ordered.size());
             pool = Executors.newFixedThreadPool(poolSize);
             RssJobState.activePool.set(pool);
-            List<Future<?>> futures = new ArrayList<>(enabled.size());
+            List<Future<?>> futures = new ArrayList<>(ordered.size());
 
-            for (Ani ani : enabled) {
+            for (Ani ani : ordered) {
                 if (!isActive(loop)) {
                     RssJobState.jobMessage.set("已取消");
                     break;
@@ -716,6 +802,53 @@ public class RssTask implements BaseTask {
                 throw new IllegalStateException("存在未完成任务，请等待...");
             }
             RssJobState.resetRoundState(source, message);
+        }
+    }
+
+    /**
+     * 启动时恢复上一轮调度快照（任务管理器"上一轮已处理"与订阅级失败明细）。
+     * <p>
+     * 只恢复已完成轮次的结果性信息，不恢复运行中/排队中的活动态——
+     * 重启后那些任务客观上已不存在，恢复出"运行中"只会制造幽灵状态。
+     * 需要恢复的运行态由启动回扫 / OpenList 残留扫描负责。
+     *
+     * @return 是否恢复成功
+     */
+    public static boolean restorePersistedState() {
+        try {
+            RssJobStateStore.Snapshot snapshot = RssJobStateStore.load();
+            if (snapshot == null) {
+                return false;
+            }
+            if (snapshot.getLastFinishedAt() != null) {
+                RssJobState.lastFinishedAt.set(snapshot.getLastFinishedAt());
+            }
+            if (snapshot.getLastDurationMs() != null) {
+                RssJobState.lastDurationMs.set(snapshot.getLastDurationMs());
+            }
+            if (StrUtil.isNotBlank(snapshot.getLastResultMessage())) {
+                RssJobState.lastResultMessage.set(snapshot.getLastResultMessage());
+            }
+            if (StrUtil.isNotBlank(snapshot.getLastTitle())) {
+                RssJobState.lastTitle.set(snapshot.getLastTitle());
+            }
+            if (StrUtil.isNotBlank(snapshot.getLastSource())) {
+                RssJobState.lastSource.set(snapshot.getLastSource());
+            }
+            if (StrUtil.isNotBlank(snapshot.getLastScope())) {
+                RssJobState.lastScope.set(snapshot.getLastScope());
+            }
+            List<RssJobStatus.FailedSubscription> failed = snapshot.getFailedSubscriptions();
+            if (failed != null && !failed.isEmpty()) {
+                RssJobState.failedSubscriptions.clear();
+                RssJobState.failedSubscriptions.addAll(failed);
+            }
+            log.info("已恢复上次 RSS 调度快照: 最近完成 {} 条失败明细",
+                    failed == null ? 0 : failed.size());
+            return true;
+        } catch (Exception e) {
+            log.warn("恢复 RSS 调度快照失败: {}", e.getMessage());
+            return false;
         }
     }
 
