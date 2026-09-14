@@ -2,6 +2,7 @@ package ani.rss.entity;
 
 import ani.rss.enums.BgmTokenTypeEnum;
 import ani.rss.enums.SortTypeEnum;
+import com.google.gson.annotations.SerializedName;
 import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.Data;
 import lombok.experimental.Accessors;
@@ -863,10 +864,17 @@ public class Config implements Serializable {
     private String eventWebhookHeader;
 
     /**
-     * 字幕自动获取（默认关闭，仅手动触发）
+     * 字幕手动获取（默认关闭）。
+     * <p>
+     * 字幕统一由「字幕匹配」工具管理：用户在该页面自行选择「手动上传本地字幕」或
+     * 「获取射手网(ASSRT)字幕」，并在写入前二次确认。下载完成后<b>不再</b>自动抓取，
+     * 避免自动匹配到错误字幕。本开关用于启用 ASSRT 获取能力。
+     * <p>
+     * 兼容旧配置：历史字段名为 {@code subtitleAutoFetch}。
      */
-    @Schema(description = "字幕自动获取")
-    private Boolean subtitleAutoFetch;
+    @SerializedName(value = "subtitleManualFetch", alternate = {"subtitleAutoFetch"})
+    @Schema(description = "字幕手动获取")
+    private Boolean subtitleManualFetch;
 
     /**
      * 只读访问令牌：配置后可用它做"家人共享"——只能查看订阅/任务/日志与播放，

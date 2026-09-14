@@ -4,9 +4,6 @@
       <el-tab-pane label="系统自检" name="doctor">
         <DoctorView v-if="mounted.doctor"/>
       </el-tab-pane>
-      <el-tab-pane label="追番日历" name="calendar">
-        <CalendarView v-if="mounted.calendar"/>
-      </el-tab-pane>
       <el-tab-pane label="手动补种" name="search">
         <ManualSearchView v-if="mounted.search"/>
       </el-tab-pane>
@@ -18,16 +15,15 @@
 import {onMounted, reactive, ref, watch} from 'vue'
 import {useRoute} from 'vue-router'
 import DoctorView from '@/view/home/DoctorView.vue'
-import CalendarView from '@/view/home/CalendarView.vue'
 import ManualSearchView from '@/view/home/ManualSearchView.vue'
 
 const route = useRoute()
-const VALID = ['doctor', 'calendar', 'search']
+const VALID = ['doctor', 'search']
 
 const tab = ref(VALID.includes(route.query.tab) ? route.query.tab : 'doctor')
 
 // 懒挂载：切到哪个 Tab 才渲染哪个，避免一次性触发自检 + 全量订阅拉取
-const mounted = reactive({doctor: false, calendar: false, search: false})
+const mounted = reactive({doctor: false, search: false})
 
 const ensureMounted = name => {
   if (VALID.includes(name)) {

@@ -88,9 +88,21 @@ class SubtitleServiceTest {
         File second = service.attachSubtitle(video, "NEW", "ass", null);
 
         assertEquals("NEW", Files.readString(second.toPath(), StandardCharsets.UTF_8));
-        File backup = new File(tempDir.toFile(), "Show S01E01.ass.bak");
-        assertTrue(backup.exists(), "覆盖前应备份，避免误覆盖用户已有字幕");
+        File backup = new File(new File(tempDir.toFile(), "sub_bak"), "Show S01E01.ass");
+        assertTrue(backup.exists(), "覆盖前应备份到 sub_bak/，避免误覆盖用户已有字幕");
         assertEquals("OLD", Files.readString(backup.toPath(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void attach_creates_backup_dir_when_absent() throws Exception {
+        File video = video("Show S01E01.mkv");
+        service.attachSubtitle(video, "OLD", "ass", null);
+        File backupDir = new File(tempDir.toFile(), "sub_bak");
+        assertFalse(backupDir.exists(), "首次写入不应凭空创建 sub_bak/");
+
+        service.attachSubtitle(video, "NEW", "ass", null);
+
+        assertTrue(backupDir.isDirectory(), "需要备份时应自动新建 sub_bak/");
     }
 
     @Test
@@ -116,9 +128,9 @@ class SubtitleServiceTest {
     }
 
     @Test
-    void auto_fetch_is_off_by_default() {
-        // 未显式开启时不应触发任何在线抓取
-        assertFalse(service.isAutoFetchEnabled());
+    void manual_fetch_is_off_by_default() {
+        // 未显式开启时不应触发任何在线抓取；字幕一律由用户手动确认后写入
+        assertFalse(service.isManualFetchEnabled());
     }
 
     @Test

@@ -1,11 +1,9 @@
 package ani.rss.task;
 
 import ani.rss.commons.ExceptionUtils;
-import ani.rss.entity.Ani;
 import ani.rss.entity.Config;
 import ani.rss.entity.TorrentsInfo;
 import ani.rss.service.DownloadService;
-import ani.rss.service.SubtitleService;
 import ani.rss.util.other.ConfigUtil;
 import ani.rss.util.other.TorrentUtil;
 import cn.hutool.core.thread.ThreadUtil;
@@ -15,7 +13,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
-import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -26,9 +23,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class RenameTask implements BaseTask {
     @Resource
     private DownloadService downloadService;
-
-    @Resource
-    private SubtitleService subtitleService;
 
     @Override
     public void accept(AtomicBoolean loop) {
@@ -49,16 +43,8 @@ public class RenameTask implements BaseTask {
                 Boolean deleteStandbyRSSOnly = config.getDeleteStandbyRSSOnly();
                 try {
                     TorrentUtil.rename(torrentsInfo);
-                    // 下载改名完成后、OpenList 上传前：自动匹配并补全字幕（ASSRT）。
-                    // 本地模型就地写盘随上传一并上云；OpenList 离线模型直接写入云端视频同目录。
-                    try {
-                        Optional<Ani> aniOpt = downloadService.findAniByDownloadPath(torrentsInfo);
-                        if (aniOpt.isPresent()) {
-                            subtitleService.fetchAndAttach(aniOpt.get(), torrentsInfo);
-                        }
-                    } catch (Exception e) {
-                        log.warn("字幕自动获取失败 {}: {}", torrentsInfo.getName(), ExceptionUtils.getMessage(e));
-                    }
+                    // 字幕不再于下载完成后自动抓取：统一由「字幕匹配」工具手动选择
+                    // 「上传本地字幕」或「获取射手网字幕」，写入前二次确认，避免自动匹配到错误字幕。
                     downloadService.notification(torrentsInfo);
                     if (Boolean.TRUE.equals(deleteStandbyRSSOnly)) {
                         continue;

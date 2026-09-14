@@ -258,6 +258,10 @@ public class PlayController extends BaseController {
         }
         List<PlayItem.Subtitles> subtitles = Arrays.stream(files)
                 .filter(sub -> {
+                    // 只认同层级的真实文件：sub_bak/ 等备份目录不能被当成有效外挂字幕
+                    if (!sub.isFile()) {
+                        return false;
+                    }
                     String ext = FileUtil.extName(sub);
                     if (StrUtil.isBlank(ext)) {
                         return false;

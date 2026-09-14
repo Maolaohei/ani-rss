@@ -34,6 +34,7 @@ export const SETTING_SEARCH_INDEX = [
       '排序', '最大内容宽度', '显示评分', '按星期', '视频列表', '自定义css', '自定义js', 'customjs',
       'customcss', 'webui', '刮削', 'scrape', 'tmdb', 'themoviedb', '备份', 'backup', '导出', '导入',
       '其他', 'other', 'api', 'github', '日志条数', '自动更新', '开机自启', '缓存', '自动备份',
+      '字幕', '字幕手动获取', '字幕自动获取', 'assrt', '射手网', '伪射手', '字幕语言', '字幕季数',
       '网络协议', 'ipv4', 'ipv6', '调试', 'debug', '排除规则', '全局排除', '排除'
     ]
   },

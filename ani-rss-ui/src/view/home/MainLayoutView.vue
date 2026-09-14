@@ -97,7 +97,9 @@ onMounted(() => {
 }
 
 .app-nav {
-  width: 132px;
+  /* 侧边栏需要容纳「字幕匹配」等四字菜单项：过窄时四字项会被挤压/换行，
+     与两字项混排显得参差。这里给足宽度并收紧左右外边距，让四字与两字项左对齐、整齐美观。 */
+  width: 168px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -129,9 +131,10 @@ onMounted(() => {
 
 .app-menu :deep(.el-menu-item) {
   height: 46px;
-  margin: 8px 12px;
+  margin: 8px 10px;
   border-radius: 8px;
   border: none !important;
+  white-space: nowrap;
 }
 
 .app-menu :deep(.el-menu-item.is-active) {
@@ -173,7 +176,7 @@ onMounted(() => {
     gap: 2px;
     padding: 4px 8px;
     box-sizing: border-box;
-    /* 导航项已增至 8 个，窄屏改为横向滚动而不是强行均分（均分会把文字挤没） */
+    /* 导航项已增至 9 个，窄屏改为横向滚动而不是强行均分（均分会把文字挤没） */
     overflow-x: auto;
     overflow-y: hidden;
     -webkit-overflow-scrolling: touch;

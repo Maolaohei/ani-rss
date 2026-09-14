@@ -158,15 +158,16 @@
       </div>
     </div>
   </SettingsItem>
-  <SettingsItem label="字幕自动获取">
+  <SettingsItem label="字幕手动获取">
     <div class="full-width">
       <div>
-        <el-switch v-model="props.config['subtitleAutoFetch']"/>
+        <el-switch v-model="props.config['subtitleManualFetch']"/>
       </div>
       <div class="margin-top-4">
         <el-text class="mx-1" size="small">
-          开启后通过 ASSRT(伪射手网) 在下载完成后自动匹配字幕：按集数命中 + 语言偏好 + 文件名相似度挑选最优条目，
-          重命名为与视频同主名后就地写入（本地下载器），或直接上传到 OpenList 云端视频同目录。
+          字幕统一在「字幕匹配」页面手动处理：可选择<b>手动上传本地字幕</b>，或<b>从射手网(ASSRT)获取</b>字幕。
+          下载完成后不再自动抓取，且无论哪种方式，写入前都会弹窗展示「改名前 / 改名后 / 对应的视频」并二次确认，
+          避免自动匹配到错误字幕。本开关用于启用射手网获取能力。
         </el-text>
       </div>
       <div class="margin-top-4 flex-col gap-8">
@@ -194,7 +195,7 @@
           <el-text class="mx-1" size="small" type="info">与 assrt.net 后台配额一致，默认 5</el-text>
         </div>
         <el-text class="mx-1" size="small" type="info">
-          Token 获取：登录 assrt.net → 用户中心 → API Token（免费）。未填 Token 时即便开启也不会抓取。
+          Token 获取：登录 assrt.net → 用户中心 → API Token（免费）。未填 Token 时即便开启也无法获取。
           接口与字段说明见项目 docs/assrt-api.md。
         </el-text>
       </div>

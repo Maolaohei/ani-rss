@@ -7,8 +7,6 @@ import ani.rss.download.OpenListApi;
 import ani.rss.entity.Ani;
 import ani.rss.entity.OpenListFileInfo;
 import ani.rss.entity.PlayItem;
-import ani.rss.entity.TorrentsInfo;
-import ani.rss.service.DownloadService;
 import ani.rss.service.subtitle.AssrtSubtitleProvider;
 import ani.rss.service.subtitle.SubtitleCandidate;
 import ani.rss.service.subtitle.SubtitleMatchLog;
@@ -18,6 +16,7 @@ import ani.rss.util.other.ConfigUtil;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.util.StrUtil;
 import jakarta.annotation.Resource;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -30,6 +29,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * 字幕匹配与补全。
@@ -39,11 +39,16 @@ import java.util.Map;
  *   <li><b>可发现性</b>——不知道哪几集还没字幕，只能一集集点开看；</li>
  *   <li><b>可补性</b>——拿到字幕后要自己 SSH 上去拷文件。</li>
  * </ol>
- * 本服务提供"缺字幕清单 + 就地附加字幕"。
- * <p>
- * <b>关于在线字幕源</b>：第三方字幕站需要账号/API Key，且可用性与合规性随站点策略变化，
- * 因此不做默认开启的自动抓取；{@link #isAutoFetchEnabled()} 作为显式开关保留，
- * 由调用方在用户明确开启后再接入具体源。默认路径是"检测 + 手动补"。
+ * 本服务提供"缺字幕清单 + 就地附加字幕"，并统一承载<b>手动</b>字幕管理：
+ * <ul>
+ *   <li>导入用户本地上传的字幕（{@link #importLocalSubtitles}）；</li>
+ *   <li>从射手网（ASSRT）获取字幕（{@link #planFetchFromAssrt} / {@link #applyFetchPlan}）。</li>
+ * </ul>
+ * <b>关于在线字幕源</b>：为避免自动匹配到错误字幕，下载完成后<b>不再</b>自动抓取。
+ * 所有写入都必须先经过「预览 → 二次确认」，因此获取类操作拆成两步：
+ * 先 {@link #planFetchFromAssrt} 生成匹配计划（只读，不写盘），
+ * 用户确认后再 {@link #applyFetchPlan} 落盘。计划在内存中短期缓存，
+ * 确认时直接复用预览阶段已下载的字幕内容，避免重复请求字幕源。
  */
 @Slf4j
 @Service
@@ -64,6 +69,35 @@ public class SubtitleService {
      */
     private static final List<String> SUBTITLE_EXT = List.of("ass", "srt", "ssa", "vtt", "sub");
 
+    /**
+     * 字幕覆盖前的备份目录名（视频同目录下），不存在时自动新建。
+     * <p>
+     * 单独收进一个目录，避免 {@code 视频.ass.bak} 散落在视频目录里污染列表、
+     * 也避免被播放侧误当成有效外挂字幕。
+     */
+    private static final String SUBTITLE_BACKUP_DIR = "sub_bak";
+
+    /**
+     * 匹配计划有效期：预览与确认导入之间允许的最大间隔
+     */
+    private static final long PLAN_TTL_MS = 30 * 60 * 1000L;
+
+    /**
+     * 计划缓存条数上限（LRU），防止长期占用内存
+     */
+    private static final int MAX_PLAN_CACHE = 4;
+
+    /**
+     * 射手网匹配计划缓存：planId → 计划。LRU + TTL，确认导入时消费。
+     */
+    private static final Map<String, FetchPlan> PLAN_CACHE =
+            new LinkedHashMap<>(4, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, FetchPlan> eldest) {
+                    return size() > MAX_PLAN_CACHE;
+                }
+            };
+
     @Resource
     private PlayController playController;
 
@@ -74,10 +108,13 @@ public class SubtitleService {
     private AssrtSubtitleProvider assrtSubtitleProvider;
 
     /**
-     * 是否开启了自动获取（当前仅作为开关位，具体源由部署方接入）
+     * 是否启用了手动字幕获取能力（射手网/ASSRT）。
+     * <p>
+     * 对应设置项「字幕手动获取」——历史字段名为 {@code subtitleAutoFetch}，
+     * 因下载完成后不再自动抓取而更名为手动语义。
      */
-    public boolean isAutoFetchEnabled() {
-        return Boolean.TRUE.equals(ConfigUtil.CONFIG.getSubtitleAutoFetch());
+    public boolean isManualFetchEnabled() {
+        return Boolean.TRUE.equals(ConfigUtil.CONFIG.getSubtitleManualFetch());
     }
 
     /**
@@ -151,6 +188,9 @@ public class SubtitleService {
 
     /**
      * 批量导入结果：逐文件的匹配/写入明细 + 汇总计数。
+     * <p>
+     * 预览（dryRun）与正式导入共用同一结构，前端可用同一张表渲染
+     * 「改名前 / 改名后 / 对应的视频 / 语言 / 状态 / 说明」。
      */
     public static class ImportResult {
         /** 参与处理的文件总数 */
@@ -211,6 +251,99 @@ public class SubtitleService {
          * 兜底键：集数 → 视频文件列表（字幕未带季数、或视频名未带季标记时使用）
          */
         private final Map<Integer, List<File>> byEpisode = new LinkedHashMap<>();
+    }
+
+    /**
+     * 射手网获取计划中的单条记录：预览信息 + 确认后写入所需的全部上下文。
+     */
+    @Getter
+    public static class FetchPlanItem {
+        /**
+         * 预览行（originalName / renamedName / videoName / lang / status / reason）
+         */
+        private final Map<String, Object> preview;
+        /**
+         * 已下载的字幕内容；未命中时为 null
+         */
+        private final byte[] content;
+        private final String videoName;
+        private final String originalName;
+        private final String renamedName;
+        private final String langTag;
+        private final String ext;
+        private final Integer season;
+        /**
+         * 本地视频绝对路径（云端场景为空）
+         */
+        private final String localVideoPath;
+        /**
+         * 云端目录（本地场景为空）
+         */
+        private final String cloudDir;
+
+        FetchPlanItem(Map<String, Object> preview, byte[] content, String videoName, String originalName,
+                      String renamedName, String langTag, String ext, Integer season,
+                      String localVideoPath, String cloudDir) {
+            this.preview = preview;
+            this.content = content;
+            this.videoName = videoName;
+            this.originalName = originalName;
+            this.renamedName = renamedName;
+            this.langTag = langTag;
+            this.ext = ext;
+            this.season = season;
+            this.localVideoPath = localVideoPath;
+            this.cloudDir = cloudDir;
+        }
+
+        /**
+         * 是否命中（命中才可写入）
+         */
+        public boolean isMatched() {
+            return content != null && content.length > 0;
+        }
+    }
+
+    /**
+     * 射手网匹配计划：预览与确认导入之间的桥梁。
+     */
+    @Getter
+    public static class FetchPlan {
+        private final String planId;
+        private final String aniId;
+        private final String aniTitle;
+        private final long createdAt = System.currentTimeMillis();
+        private final List<FetchPlanItem> items = new ArrayList<>();
+
+        FetchPlan(String planId, String aniId, String aniTitle) {
+            this.planId = planId;
+            this.aniId = aniId;
+            this.aniTitle = aniTitle;
+        }
+
+        /**
+         * 预览行列表（前端二次确认弹窗直接渲染）
+         */
+        public List<Map<String, Object>> previewItems() {
+            List<Map<String, Object>> previews = new ArrayList<>(items.size());
+            for (FetchPlanItem item : items) {
+                previews.add(item.getPreview());
+            }
+            return previews;
+        }
+
+        /**
+         * 命中数量
+         */
+        public int matchedCount() {
+            int matched = 0;
+            for (FetchPlanItem item : items) {
+                if (item.isMatched()) {
+                    matched++;
+                }
+            }
+            return matched;
+        }
     }
 
     /**
@@ -300,21 +433,18 @@ public class SubtitleService {
             throw new IllegalArgumentException("字幕内容超过 20MiB 上限");
         }
 
-        String mainName = FileUtil.mainName(videoFile);
-        // 语言标签会拼进文件名：只保留字母/数字/&/./-/_（如 chs、jpsc、chs&eng.simplified），
-        // 剔除路径分隔符并折叠连续点，防止经 /subtitleAttach 传入的标签造成目录穿越
-        String tag = StrUtil.blankToDefault(languageTag, "").trim()
-                .replaceAll("[^A-Za-z0-9&._-]", "")
-                .replaceAll("\\.{2,}", ".")
-                .replaceAll("^\\.+|\\.+$", "");
-        String suffix = StrUtil.isBlank(tag) ? "" : "." + tag;
-        File target = new File(videoFile.getParentFile(), mainName + suffix + "." + normalizedExt);
+        File target = new File(videoFile.getParentFile(),
+                expectedSubtitleName(FileUtil.mainName(videoFile), normalizedExt, languageTag));
         if (target.exists()) {
-            // 覆盖前备份，避免误覆盖用户已有的字幕
-            File backup = new File(videoFile.getParentFile(), target.getName() + ".bak");
+            // 覆盖前备份，避免误覆盖用户已有的字幕。
+            // 备份统一收进视频同目录下的 sub_bak/（不存在则新建），
+            // 而不是散落成 video.ass.bak 污染视频目录——那样既难辨认又容易被误当成有效字幕。
+            File backupDir = new File(videoFile.getParentFile(), SUBTITLE_BACKUP_DIR);
             try {
+                FileUtil.mkdir(backupDir);
+                File backup = new File(backupDir, target.getName());
                 FileUtil.copy(target, backup, true);
-                log.info("已存在同名字幕, 覆盖前备份至 {}", backup.getName());
+                log.info("已存在同名字幕, 覆盖前备份至 {}", backup.getAbsolutePath());
             } catch (Exception e) {
                 log.warn("备份已有字幕失败: {}", ExceptionUtils.getMessage(e));
             }
@@ -325,6 +455,29 @@ public class SubtitleService {
         FileUtil.move(temp, target, true);
         log.info("字幕已附加: {} ({} 字节)", target.getName(), content.length);
         return target;
+    }
+
+    /**
+     * 规范化语言标签：只保留字母/数字/&/./-/_（如 chs、jpsc、chs&eng.simplified），
+     * 剔除路径分隔符并折叠连续点，防止经接口传入的标签造成目录穿越。
+     */
+    private static String normalizeLangTag(String languageTag) {
+        return StrUtil.blankToDefault(languageTag, "").trim()
+                .replaceAll("[^A-Za-z0-9&._-]", "")
+                .replaceAll("\\.{2,}", ".")
+                .replaceAll("^\\.+|\\.+$", "");
+    }
+
+    /**
+     * 计算字幕目标文件名：{@code 主名[.{lang}].{ext}}。
+     * <p>
+     * 预览与正式写入必须共用本方法，否则确认弹窗里展示的「改名后」会和实际落盘不一致。
+     */
+    private static String expectedSubtitleName(String mainName, String ext, String languageTag) {
+        String tag = normalizeLangTag(languageTag);
+        String suffix = StrUtil.isBlank(tag) ? "" : "." + tag;
+        String normalizedExt = StrUtil.blankToDefault(ext, "ass").toLowerCase().replace(".", "");
+        return mainName + suffix + "." + normalizedExt;
     }
 
     /**
@@ -349,10 +502,19 @@ public class SubtitleService {
      * @return 逐文件明细与汇总计数
      */
     public ImportResult importLocalSubtitles(Ani ani, List<LocalSubtitleFile> files) {
+        return importLocalSubtitles(ani, files, false);
+    }
+
+    /**
+     * 批量导入本地字幕。
+     *
+     * @param dryRun 为 {@code true} 时只做匹配预览、<b>不写盘</b>，供导入前二次确认使用
+     */
+    public ImportResult importLocalSubtitles(Ani ani, List<LocalSubtitleFile> files, boolean dryRun) {
         if (ani == null) {
             return new ImportResult();
         }
-        return importLocalSubtitles(new File(downloadService.getDownloadPath(ani)), files);
+        return importLocalSubtitles(new File(downloadService.getDownloadPath(ani)), files, dryRun);
     }
 
     /**
@@ -362,6 +524,15 @@ public class SubtitleService {
      * @param files 上传的字幕文件
      */
     ImportResult importLocalSubtitles(File dir, List<LocalSubtitleFile> files) {
+        return importLocalSubtitles(dir, files, false);
+    }
+
+    /**
+     * 批量导入本地字幕（以目录为入口）。
+     *
+     * @param dryRun 为 {@code true} 时只做匹配预览、不写盘
+     */
+    ImportResult importLocalSubtitles(File dir, List<LocalSubtitleFile> files, boolean dryRun) {
         ImportResult result = new ImportResult();
         if (dir == null || files == null || files.isEmpty()) {
             return result;
@@ -407,13 +578,25 @@ public class SubtitleService {
             if (video == null) {
                 result.getItems().add(importItem(originalName, null, null, langTag, "失败",
                         unmatchedReason(index, se)));
-                SubtitleMatchLog.record(new SubtitleMatchLogEntry(
-                        System.currentTimeMillis(), "", originalName, "",
-                        se[0] >= 0 ? se[0] : null, "未命中", langTag));
+                if (!dryRun) {
+                    SubtitleMatchLog.record(new SubtitleMatchLogEntry(
+                            System.currentTimeMillis(), "", originalName, "",
+                            se[0] >= 0 ? se[0] : null, "未命中", langTag));
+                }
                 continue;
             }
 
-            // 4) 按标准命名写入
+            // 4) 预览：只算出目标文件名，不落盘
+            String targetName = expectedSubtitleName(FileUtil.mainName(video), ext, langTag);
+            if (dryRun) {
+                success++;
+                File target = new File(video.getParentFile(), targetName);
+                result.getItems().add(importItem(originalName, targetName, video.getName(), langTag, "已匹配",
+                        target.exists() ? "同名文件已存在，导入时会先备份到 sub_bak/" : ""));
+                continue;
+            }
+
+            // 5) 按标准命名写入
             try {
                 File target = attachSubtitleBytes(video, content, ext, langTag);
                 success++;
@@ -429,8 +612,199 @@ public class SubtitleService {
         return result.setSuccess(success).setFailed(result.getTotal() - success);
     }
 
+    /* ==================== 射手网（ASSRT）手动获取 ==================== */
+
     /**
-     * 组装单条导入明细（字段与前端结果表一一对应）
+     * 生成射手网字幕获取计划（<b>只读，不写盘</b>）。
+     * <p>
+     * 遍历订阅目录内<b>尚无字幕</b>的视频，逐个搜索射手网候选并挑出最优条目，
+     * 下载其内容暂存内存，返回「改名前 / 改名后 / 对应的视频」预览供用户二次确认。
+     * 计划会写入短期缓存，用户确认后由 {@link #applyFetchPlan} 直接消费，
+     * 避免预览与写入各跑一次字幕源请求（射手网有调用频率限制）。
+     *
+     * @param ani 订阅
+     * @return 匹配计划（可能为空计划，表示没有缺失字幕的视频）
+     */
+    public FetchPlan planFetchFromAssrt(Ani ani) {
+        FetchPlan plan = new FetchPlan(UUID.randomUUID().toString(), ani == null ? null : ani.getId(),
+                ani == null ? null : ani.getTitle());
+        if (ani == null) {
+            return plan;
+        }
+        String toolType = StrUtil.blankToDefault(ConfigUtil.CONFIG.getDownloadToolType(), "");
+        if ("OpenList".equals(toolType)) {
+            // OpenList 离线下载：视频落在云端，字幕需上传到云端同目录
+            planCloudFetch(ani, plan);
+        } else {
+            // 其余下载器（qBittorrent / Transmission / aria2 / 本地路径等）均视为本地下载
+            planLocalFetch(ani, plan);
+        }
+        cachePlan(plan);
+        return plan;
+    }
+
+    /**
+     * 消费计划并落盘。
+     * <p>
+     * 仅写入命中项；未命中项原样保留在结果中，便于用户核对失败原因。
+     *
+     * @param plan 由 {@link #takePlan(String)} 取出的计划
+     */
+    public ImportResult applyFetchPlan(FetchPlan plan) {
+        ImportResult result = new ImportResult();
+        if (plan == null || plan.getItems().isEmpty()) {
+            return result;
+        }
+        List<FetchPlanItem> items = plan.getItems();
+        result.setTotal(items.size());
+        OpenListApi api = null;
+        int success = 0;
+        for (FetchPlanItem item : items) {
+            if (!item.isMatched()) {
+                result.getItems().add(item.getPreview());
+                continue;
+            }
+            try {
+                if (StrUtil.isNotBlank(item.getCloudDir())) {
+                    if (api == null) {
+                        api = new OpenListApi();
+                        api.setConfig(ConfigUtil.CONFIG);
+                    }
+                    api.fsPut(item.getCloudDir(), item.getRenamedName(), item.getContent());
+                } else {
+                    attachSubtitleBytes(new File(item.getLocalVideoPath()), item.getContent(),
+                            item.getExt(), item.getLangTag());
+                }
+                success++;
+                result.getItems().add(item.getPreview());
+                SubtitleMatchLog.record(new SubtitleMatchLogEntry(
+                        System.currentTimeMillis(), item.getVideoName(), item.getOriginalName(),
+                        item.getRenamedName(), item.getSeason(), "已匹配", item.getLangTag()));
+                log.info("射手网字幕已写入: {} -> {}", item.getVideoName(), item.getRenamedName());
+            } catch (Exception e) {
+                result.getItems().add(importItem(item.getOriginalName(), null, item.getVideoName(),
+                        item.getLangTag(), "失败", ExceptionUtils.getMessage(e)));
+            }
+        }
+        return result.setSuccess(success).setFailed(items.size() - success);
+    }
+
+    /**
+     * 取出并移除计划（一次性消费）。计划不存在或已过期返回 {@code null}。
+     */
+    public static synchronized FetchPlan takePlan(String planId) {
+        if (StrUtil.isBlank(planId)) {
+            return null;
+        }
+        purgeExpiredPlans();
+        FetchPlan plan = PLAN_CACHE.remove(planId);
+        if (plan == null || System.currentTimeMillis() - plan.getCreatedAt() > PLAN_TTL_MS) {
+            return null;
+        }
+        return plan;
+    }
+
+    private static synchronized void cachePlan(FetchPlan plan) {
+        purgeExpiredPlans();
+        PLAN_CACHE.put(plan.getPlanId(), plan);
+    }
+
+    private static void purgeExpiredPlans() {
+        long now = System.currentTimeMillis();
+        PLAN_CACHE.entrySet().removeIf(e -> now - e.getValue().getCreatedAt() > PLAN_TTL_MS);
+    }
+
+    private void planLocalFetch(Ani ani, FetchPlan plan) {
+        File dir = new File(downloadService.getDownloadPath(ani));
+        if (!dir.exists() || !dir.isDirectory()) {
+            return;
+        }
+        for (File video : listVideoFiles(dir)) {
+            if (hasLocalSubtitle(video)) {
+                log.info("本地已有字幕，跳过: {}", video.getName());
+                continue;
+            }
+            plan.getItems().add(planOne(ani, video.getName(), FileUtil.mainName(video), null, video, null));
+        }
+    }
+
+    private void planCloudFetch(Ani ani, FetchPlan plan) {
+        OpenListApi api = new OpenListApi();
+        api.setConfig(ConfigUtil.CONFIG);
+        String cloudDir = downloadService.getDownloadPath(ani);
+        List<OpenListFileInfo> files = api.fsList(cloudDir, true);
+        for (OpenListFileInfo f : files) {
+            if (Boolean.TRUE.equals(f.getIsDir())) {
+                continue;
+            }
+            if (!FileUtils.isVideoFormat(f.getName())) {
+                continue;
+            }
+            String mainName = FileUtil.mainName(f.getName());
+            if (hasCloudSubtitle(f.getPath(), mainName, api)) {
+                log.info("云端已有字幕，跳过: {}", f.getName());
+                continue;
+            }
+            plan.getItems().add(planOne(ani, f.getName(), mainName, f.getPath(), null, api));
+        }
+    }
+
+    /**
+     * 为单个视频生成计划条目：搜索 → 挑选 → 下载内容（暂存内存，不落盘）。
+     */
+    private FetchPlanItem planOne(Ani ani, String videoName, String mainName, String cloudDir,
+                                  File localVideo, OpenListApi api) {
+        String token = ConfigUtil.CONFIG.getAssrtToken();
+        String lang = StrUtil.blankToDefault(ConfigUtil.CONFIG.getSubtitleLang(), "chs");
+        if (StrUtil.isBlank(token)) {
+            return notMatched(videoName, "未配置 ASSRT Token，无法从射手网获取");
+        }
+        String keyword = StrUtil.blankToDefault(ani.getTitle(), "").trim();
+        if (StrUtil.isBlank(keyword)) {
+            keyword = mainName;
+        }
+        int[] se = AssrtSubtitleProvider.extractSeasonEpisode(videoName);
+        Integer targetSeason = se[0] >= 0 ? se[0] : null;
+        Integer targetEp = se[1] >= 0 ? se[1] : null;
+
+        List<SubtitleCandidate> candidates = assrtSubtitleProvider.search(token, keyword, videoName, lang);
+        if (candidates.isEmpty()) {
+            return notMatched(videoName, "射手网未找到候选字幕（关键词：" + keyword + "）");
+        }
+        for (SubtitleCandidate c : candidates) {
+            try {
+                SubtitlePick pick = assrtSubtitleProvider.download(c, lang, targetSeason, targetEp, videoName, ani);
+                if (pick == null || pick.getContent() == null || pick.getContent().length == 0) {
+                    continue;
+                }
+                byte[] data = pick.getContent();
+                String originalName = StrUtil.blankToDefault(pick.getOriginalName(), c.getFileName());
+                String ext = StrUtil.blankToDefault(c.getExt(), "ass").toLowerCase();
+                String langTag = resolveLangTag(originalName, c);
+                String renamedName = expectedSubtitleName(mainName, ext, langTag);
+                Map<String, Object> preview = importItem(originalName, renamedName, videoName, langTag, "已匹配", "");
+                return new FetchPlanItem(preview, data, videoName, originalName, renamedName, langTag, ext,
+                        pick.getResolvedSeason(),
+                        localVideo == null ? null : localVideo.getAbsolutePath(), cloudDir);
+            } catch (Exception ex) {
+                log.warn("射手网候选写入准备失败 {}: {}", c.getFileName(), ExceptionUtils.getMessage(ex));
+            }
+        }
+        return notMatched(videoName, "射手网候选字幕均无法解析，建议手动上传");
+    }
+
+    /**
+     * 未命中条目：保留视频名与原因，便于用户核对并改用手动上传。
+     */
+    private static FetchPlanItem notMatched(String videoName, String reason) {
+        Map<String, Object> preview = importItem("", null, videoName, "", "未命中", reason);
+        return new FetchPlanItem(preview, null, videoName, "", null, "", "", null, null, null);
+    }
+
+    /**
+     * 组装单条导入/预览明细（字段与前端表格一一对应）。
+     * <p>
+     * originalName = 改名前，renamedName = 改名后，videoName = 对应的视频。
      */
     private static Map<String, Object> importItem(String originalName, String renamedName, String videoName,
                                                   String lang, String status, String reason) {
@@ -519,135 +893,6 @@ public class SubtitleService {
             return null;
         }
         return candidates.size() == 1 ? candidates.get(0) : null;
-    }
-
-    /**
-     * 下载完成后自动匹配并附加/上传字幕（ASSRT）。
-     * <p>
-     * 在 RenameTask 的 rename 之后、OpenList 上传之前调用：本地下载器走 {@link #attachSubtitle}
-     * 就地写入，OpenList 离线下载走 {@link OpenListApi#fsPut} 写入云端，二者都会被既有的
-     * 上传/播放逻辑识别。仅对缺字幕的视频抓取；已存在字幕则跳过。
-     *
-     * @param ani           订阅
-     * @param torrentsInfo  完成的任务（仅用于判定下载器类型）
-     */
-    public void fetchAndAttach(Ani ani, TorrentsInfo torrentsInfo) {
-        if (!isAutoFetchEnabled()) {
-            return;
-        }
-        String token = ConfigUtil.CONFIG.getAssrtToken();
-        if (StrUtil.isBlank(token)) {
-            log.warn("未配置 ASSRT Token，跳过字幕自动获取");
-            return;
-        }
-        String toolType = StrUtil.blankToDefault(ConfigUtil.CONFIG.getDownloadToolType(), "");
-        if ("OpenList".equals(toolType)) {
-            // OpenList 离线下载：视频落在云端，字幕经 fsPut 上传到云端同目录
-            fetchAndAttachCloud(ani);
-        } else {
-            // 其余下载器（qBittorrent / Transmission / aria2 / 本地路径等）均视为本地下载，
-            // 字幕就地写入视频所在目录
-            fetchAndAttachLocal(ani);
-        }
-    }
-
-    private void fetchAndAttachLocal(Ani ani) {
-        String path = downloadService.getDownloadPath(ani);
-        File dir = new File(path);
-        if (!dir.exists()) {
-            return;
-        }
-        for (File video : listVideoFiles(dir)) {
-            fetchForLocalVideo(ani, video);
-        }
-    }
-
-    private void fetchAndAttachCloud(Ani ani) {
-        OpenListApi api = new OpenListApi();
-        api.setConfig(ConfigUtil.CONFIG);
-        String cloudDir = downloadService.getDownloadPath(ani);
-        List<OpenListFileInfo> files = api.fsList(cloudDir, true);
-        for (OpenListFileInfo f : files) {
-            if (Boolean.TRUE.equals(f.getIsDir())) {
-                continue;
-            }
-            if (!FileUtils.isVideoFormat(f.getName())) {
-                continue;
-            }
-            fetchForCloudVideo(ani, f, api);
-        }
-    }
-
-    private void fetchForLocalVideo(Ani ani, File videoFile) {
-        if (hasLocalSubtitle(videoFile)) {
-            log.info("本地已有字幕，跳过: {}", videoFile.getName());
-            return;
-        }
-        fetchCore(ani, videoFile.getName(), FileUtil.mainName(videoFile), null, videoFile, null);
-    }
-
-    private void fetchForCloudVideo(Ani ani, OpenListFileInfo f, OpenListApi api) {
-        String mainName = FileUtil.mainName(f.getName());
-        if (hasCloudSubtitle(f.getPath(), mainName, api)) {
-            log.info("云端已有字幕，跳过: {}", f.getName());
-            return;
-        }
-        fetchCore(ani, f.getName(), mainName, f.getPath(), null, api);
-    }
-
-    private void fetchCore(Ani ani, String videoName, String mainName, String cloudDir,
-                           File localVideo, OpenListApi api) {
-        String token = ConfigUtil.CONFIG.getAssrtToken();
-        String lang = StrUtil.blankToDefault(ConfigUtil.CONFIG.getSubtitleLang(), "chs");
-        if (StrUtil.isBlank(token)) {
-            return;
-        }
-        String keyword = StrUtil.blankToDefault(ani.getTitle(), "").trim();
-        if (StrUtil.isBlank(keyword)) {
-            keyword = mainName;
-        }
-        int[] se = AssrtSubtitleProvider.extractSeasonEpisode(videoName);
-        Integer targetSeason = se[0] >= 0 ? se[0] : null;
-        Integer targetEp = se[1] >= 0 ? se[1] : null;
-        List<SubtitleCandidate> candidates = assrtSubtitleProvider.search(token, keyword, videoName, lang);
-        if (candidates.isEmpty()) {
-            log.info("ASSRT 无匹配字幕: {} (关键词: {})", videoName, keyword);
-            return;
-        }
-        boolean attached = false;
-        for (SubtitleCandidate c : candidates) {
-            try {
-                SubtitlePick pick = assrtSubtitleProvider.download(c, lang, targetSeason, targetEp, videoName, ani);
-                if (pick == null || pick.getContent() == null || pick.getContent().length == 0) {
-                    continue;
-                }
-                byte[] data = pick.getContent();
-                String originalName = StrUtil.blankToDefault(pick.getOriginalName(), c.getFileName());
-                Integer resolvedSeason = pick.getResolvedSeason();
-                String ext = StrUtil.blankToDefault(c.getExt(), "ass").toLowerCase();
-                String langTag = resolveLangTag(originalName, c);
-                String renamedName;
-                if (cloudDir == null) {
-                    File f = attachSubtitle(localVideo, new String(data, StandardCharsets.UTF_8), ext, langTag);
-                    renamedName = f.getName();
-                } else {
-                    renamedName = mainName + (StrUtil.isBlank(langTag) ? "" : "." + langTag) + "." + ext;
-                    api.fsPut(cloudDir, renamedName, data);
-                }
-                SubtitleMatchLog.record(new SubtitleMatchLogEntry(
-                        System.currentTimeMillis(), videoName, originalName, renamedName,
-                        resolvedSeason, "已匹配", langTag));
-                log.info("字幕已{}: {} -> {}", cloudDir == null ? "附加(本地)" : "上传(云端)", videoName, ext);
-                attached = true;
-                return;
-            } catch (Exception ex) {
-                log.warn("字幕候选写入失败 {}: {}", c.getFileName(), ExceptionUtils.getMessage(ex));
-            }
-        }
-        if (!attached) {
-            SubtitleMatchLog.record(new SubtitleMatchLogEntry(
-                    System.currentTimeMillis(), videoName, "", "", null, "未命中", ""));
-        }
     }
 
     /**

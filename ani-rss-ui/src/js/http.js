@@ -645,12 +645,38 @@ export let subtitleMatchLogClear = () => api.post('api/subtitleMatchLogClear')
 
 /**
  * 批量导入本地字幕（multipart：订阅 id + 多个字幕文件）
- * 因需传 FormData，绕开 api.js 的 JSON 封装，与 importConfig 同处理方式。
  * @param formData FormData：aniId、files[]
  * @returns {Promise<unknown>}
  */
-export let subtitleImport = (formData) => {
-    return fetch('api/subtitleImport', {
+export let subtitleImport = (formData) => postFormData('api/subtitleImport', formData)
+
+/**
+ * 预览本地字幕导入（不写盘）：用于导入前二次确认
+ * @param formData FormData：aniId、files[]
+ * @returns {Promise<unknown>}
+ */
+export let subtitleImportPreview = (formData) => postFormData('api/subtitleImportPreview', formData)
+
+/**
+ * 预览射手网(ASSRT)字幕获取（不写盘）：返回 { planId, items, total, matched }
+ * @param aniId 订阅 id
+ * @returns {Promise<unknown>}
+ */
+export let subtitleFetchPreview = (aniId) => api.post('api/subtitleFetchPreview', {aniId}, {silent: true})
+
+/**
+ * 执行射手网字幕写入：消费预览返回的 planId
+ * @param planId 预览计划 id
+ * @returns {Promise<unknown>}
+ */
+export let subtitleFetch = (planId) => api.post('api/subtitleFetch', {planId}, {silent: true})
+
+/**
+ * multipart 表单提交（绕开 api.js 的 JSON 封装，与 importConfig 同处理方式）。
+ * 返回原始 { code, message, data }，由调用方判定业务结果。
+ */
+let postFormData = (url, formData) => {
+    return fetch(url, {
         method: 'POST',
         body: formData,
         headers: {

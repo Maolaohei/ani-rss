@@ -100,58 +100,27 @@
             </div>
           </section>
 
-          <div class="dashboard-duo">
-            <section class="dashboard-section duo-downloading">
-              <div class="section-title">
-                <h3>下载中</h3>
-                <el-tag type="info">{{ activeTorrents.length }}</el-tag>
+          <section class="dashboard-section dashboard-section-full">
+            <div class="section-title">
+              <h3>近 7 天下载</h3>
+              <div class="today-heading-actions">
+                <el-tag type="success">成功 {{ historySummary.success }}</el-tag>
+                <el-tag v-if="historySummary.failed" type="danger">失败 {{ historySummary.failed }}</el-tag>
+                <el-tag type="info">成功率 {{ successRateText }}</el-tag>
               </div>
-              <el-empty v-if="!activeTorrents.length" description="当前无下载中任务"/>
-              <el-table v-else :data="activeTorrents" class="dashboard-table" size="small" height="320">
-                <el-table-column label="类型" width="64">
-                  <template #default="{ row }">
-                    <el-tag :type="isDownloading(row) ? 'primary' : 'success'" size="small">
-                      {{ isDownloading(row) ? '下载' : '做种' }}
-                    </el-tag>
-                  </template>
-                </el-table-column>
-                <el-table-column label="名称" min-width="120" prop="name" show-overflow-tooltip/>
-                <el-table-column label="进度" width="110">
-                  <template #default="{ row }">
-                    <el-progress :percentage="row.progress || 0" :show-text="false"/>
-                  </template>
-                </el-table-column>
-                <el-table-column label="大小" width="84" prop="formatSize"/>
-                <el-table-column label="状态" width="76">
-                  <template #default="{ row }">
-                    {{ stateLabel(row.state) }}
-                  </template>
-                </el-table-column>
-              </el-table>
-            </section>
-
-            <section class="dashboard-section duo-trend">
-              <div class="section-title">
-                <h3>近 7 天下载</h3>
-                <div class="today-heading-actions">
-                  <el-tag type="success">成功 {{ historySummary.success }}</el-tag>
-                  <el-tag v-if="historySummary.failed" type="danger">失败 {{ historySummary.failed }}</el-tag>
-                  <el-tag type="info">成功率 {{ successRateText }}</el-tag>
+            </div>
+            <el-empty v-if="!historyDays.length" description="暂无下载记录"/>
+            <div v-else class="trend">
+              <div v-for="day in historyDays" :key="day.date" class="trend-col"
+                   :title="`${day.date} 完成 ${day.success} / 失败 ${day.failed}`">
+                <div class="trend-bars">
+                  <div class="bar success" :style="{height: barHeight(day.success) + 'px'}"></div>
+                  <div class="bar failed" :style="{height: barHeight(day.failed) + 'px'}"></div>
                 </div>
+                <span class="trend-label">{{ shortDate(day.date) }}</span>
               </div>
-              <el-empty v-if="!historyDays.length" description="暂无下载记录"/>
-              <div v-else class="trend">
-                <div v-for="day in historyDays" :key="day.date" class="trend-col"
-                     :title="`${day.date} 完成 ${day.success} / 失败 ${day.failed}`">
-                  <div class="trend-bars">
-                    <div class="bar success" :style="{height: barHeight(day.success) + 'px'}"></div>
-                    <div class="bar failed" :style="{height: barHeight(day.failed) + 'px'}"></div>
-                  </div>
-                  <span class="trend-label">{{ shortDate(day.date) }}</span>
-                </div>
-              </div>
-            </section>
-          </div>
+            </div>
+          </section>
 
           <section class="dashboard-section">
             <div class="section-title">
@@ -265,7 +234,6 @@ const todayAnis = computed(() => {
 const todayText = computed(() => todayAnis.value.length ? `${todayAnis.value.length} 个订阅` : '没有订阅')
 const downloadingList = computed(() => torrentsInfos.value.filter(isDownloading))
 const seedingList = computed(() => torrentsInfos.value.filter(isSeeding))
-const activeTorrents = computed(() => torrentsInfos.value.filter(item => item.state !== 'stoppedUP'))
 const procrastinatingList = computed(() => {
   const threshold = Number(config.value.procrastinatingDay || 14)
   return enabledAnis.value
@@ -333,26 +301,6 @@ const omitTop = computed(() => enabledAnis.value
 
 const isDownloading = item => downloadingStates.includes(item.state)
 const isSeeding = item => seedingStates.includes(item.state)
-
-const stateLabel = state => {
-  const map = {
-    forcedDL: '强制下载',
-    downloading: '下载中',
-    forcedMetaDL: '获取元数据',
-    metaDL: '元数据',
-    stalledDL: '下载停滞',
-    queuedDL: '等待下载',
-    checkingDL: '检查下载',
-    allocating: '分配空间',
-    moving: '移动中',
-    forcedUP: '强制上传',
-    uploading: '上传中',
-    stalledUP: '做种中',
-    queuedUP: '等待做种',
-    checkingUP: '检查做种'
-  }
-  return map[state] || state || '未知'
-}
 
 const scrollToday = direction => {
   const track = todayTrack.value
@@ -490,15 +438,9 @@ onUnmounted(stopPolling)
   padding-bottom: 8px;
 }
 
-/* 下载中 (1/3) 与 近7天下载 (2/3) 的非对称栅格：信息密度更合理，
-   图表横向跨度更充裕，后续双柱/折线对比也游刃有余 */
-.dashboard-duo {
+/* 「近 7 天下载」独占整行：图表横向跨度更充裕，双柱对比一目了然 */
+.dashboard-section-full {
   grid-column: 1 / -1;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
-  gap: 14px;
-  min-width: 0;
-  align-items: start;
 }
 
 .dashboard-section {
@@ -589,7 +531,7 @@ onUnmounted(stopPolling)
 }
 
 .trend-col {
-  flex: 0 0 auto;
+  flex: 1 1 0;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -605,7 +547,7 @@ onUnmounted(stopPolling)
 }
 
 .bar {
-  width: 12px;
+  width: 16px;
   border-radius: 2px 2px 0 0;
 }
 
@@ -677,19 +619,11 @@ onUnmounted(stopPolling)
   .dashboard-content {
     grid-template-columns: 1fr 1fr;
   }
-
-  .dashboard-duo {
-    grid-template-columns: 1fr;
-  }
 }
 
 @media (max-width: 560px) {
   .metric-grid,
   .dashboard-content {
-    grid-template-columns: 1fr;
-  }
-
-  .dashboard-duo {
     grid-template-columns: 1fr;
   }
 

@@ -185,8 +185,8 @@ class SubtitleImportTest {
         run(sub("番剧A S01E01.ass", "NEW"));
 
         assertEquals("NEW", Files.readString(new File(tempDir.toFile(), "番剧A S01E01.ass").toPath()));
-        File backup = new File(tempDir.toFile(), "番剧A S01E01.ass.bak");
-        assertTrue(backup.exists(), "覆盖前应备份，避免误覆盖用户已有字幕");
+        File backup = new File(new File(tempDir.toFile(), "sub_bak"), "番剧A S01E01.ass");
+        assertTrue(backup.exists(), "覆盖前应备份到 sub_bak/，避免误覆盖用户已有字幕");
         assertEquals("OLD", Files.readString(backup.toPath()));
     }
 

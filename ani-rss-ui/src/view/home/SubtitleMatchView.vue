@@ -2,7 +2,7 @@
   <div class="match-page app-page-layout">
     <PageHeaderView title="字幕匹配" :subtitle="subtitle">
       <template #actions>
-        <el-button icon="Upload" @click="openImport">导入本地字幕</el-button>
+        <el-button icon="Files" type="primary" @click="openDialog">字幕管理</el-button>
         <el-button :loading="loading" icon="Refresh" @click="load">刷新</el-button>
         <el-button :disabled="!records.length" icon="Delete" @click="clearAll">清空</el-button>
       </template>
@@ -10,8 +10,9 @@
     <div class="match-body app-page-content app-page-padding">
       <el-alert class="match-tip" :closable="false" type="info" show-icon>
         <template #title>
-          开启「字幕季数元数据解析」后，字幕番剧名未带 S1/S2 标记时，会自动查 TMDB/Bangumi 与订阅对比推断季数，避免跨季误匹配。
-          相同番剧名只查一次并缓存到本地。下方记录每次匹配结果，便于核对。
+          字幕统一在这里手动处理：可<b>上传本地字幕</b>，或<b>从射手网获取字幕</b>。下载完成后不会自动抓取，
+          且无论哪种方式，写入前都会弹窗展示「改名前 / 改名后 / 对应的视频」并二次确认，避免自动匹配到错误字幕。
+          开启「字幕季数元数据解析」后，字幕番剧名未带 S1/S2 标记时会自动查 TMDB/Bangumi 与订阅对比推断季数，避免跨季误匹配。
         </template>
       </el-alert>
 
@@ -28,16 +29,21 @@
         <el-alert v-if="error" :closable="false" :title="error" type="error" show-icon/>
         <el-empty v-else-if="!loading && !records.length" description="暂无匹配记录"/>
         <el-table v-else :data="records" class="match-table" size="small">
-          <el-table-column label="对应视频" min-width="200" prop="videoName" show-overflow-tooltip/>
-          <el-table-column label="原文件名" min-width="220" prop="originalName" show-overflow-tooltip>
+          <el-table-column label="改名前" min-width="220" prop="originalName" show-overflow-tooltip>
             <template #default="{row}">
               <span v-if="row.originalName">{{ row.originalName }}</span>
               <el-text v-else type="info">—</el-text>
             </template>
           </el-table-column>
-          <el-table-column label="匹配重命名后文件名" min-width="220" prop="renamedName" show-overflow-tooltip>
+          <el-table-column label="改名后" min-width="220" prop="renamedName" show-overflow-tooltip>
             <template #default="{row}">
               <span v-if="row.renamedName">{{ row.renamedName }}</span>
+              <el-text v-else type="info">—</el-text>
+            </template>
+          </el-table-column>
+          <el-table-column label="对应的视频" min-width="200" prop="videoName" show-overflow-tooltip>
+            <template #default="{row}">
+              <span v-if="row.videoName">{{ row.videoName }}</span>
               <el-text v-else type="info">—</el-text>
             </template>
           </el-table-column>
@@ -65,16 +71,33 @@
       </section>
     </div>
 
-    <el-dialog v-model="importVisible" class="import-dialog" title="导入本地字幕" width="780px"
-               :close-on-click-modal="false">
-      <el-form label-width="80px">
+    <el-dialog v-model="dialogVisible" title="字幕管理" width="880px" style="max-width: 94vw"
+               :close-on-click-modal="false" @closed="resetDialog">
+      <el-radio-group v-model="mode" class="mode-switch" :disabled="step !== 'form'">
+        <el-radio-button value="upload">手动上传字幕</el-radio-button>
+        <el-radio-button value="assrt">获取射手网字幕</el-radio-button>
+      </el-radio-group>
+
+      <el-form class="match-form" label-width="90px">
         <el-form-item label="订阅">
-          <el-select v-model="importAniId" clearable filterable class="full-width"
+          <el-select v-model="aniId" :disabled="step !== 'form'" clearable filterable class="full-width"
                      placeholder="选择字幕对应的订阅（匹配该订阅下载目录内的视频）">
             <el-option v-for="ani in aniOptions" :key="ani.id" :label="ani.title" :value="ani.id"/>
           </el-select>
         </el-form-item>
-        <el-form-item label="字幕文件">
+
+        <el-form-item v-if="selectedAni" label="剧集信息">
+          <div class="ani-meta">
+            <el-tag size="small" type="primary">第 {{ selectedAni.season || 1 }} 季</el-tag>
+            <el-tag size="small" type="info">
+              共 {{ selectedAni.totalEpisodeNumber || '未知' }} 集
+            </el-tag>
+            <el-tag size="small">已下载 {{ selectedAni.currentEpisodeNumber ?? 0 }} 集</el-tag>
+            <el-text class="ani-meta-title" size="small" type="info">{{ selectedAni.title }}</el-text>
+          </div>
+        </el-form-item>
+
+        <el-form-item v-if="mode === 'upload'" label="字幕文件">
           <div class="import-dropzone" :class="{'is-dragover': dragOver}"
                @click="pickFiles"
                @dragenter.prevent="dragOver = true"
@@ -103,33 +126,57 @@
             </el-scrollbar>
           </div>
         </el-form-item>
+
+        <el-form-item v-else label="获取说明">
+          <el-text size="small" type="info">
+            将遍历该订阅下载目录内<b>尚未挂字幕</b>的视频，按「季 + 集」从射手网(ASSRT)匹配并挑选最优条目。
+            需先在 设置 → 其他设置 中开启「字幕手动获取」并填写 ASSRT Token。
+            字幕源有调用频率限制（默认 5 次/分钟），缺失集数较多时预览会较慢；配额更高可在同一处调大限制。
+          </el-text>
+        </el-form-item>
       </el-form>
 
-      <el-alert class="import-tip" :closable="false" type="info" show-icon>
+      <el-alert v-if="step === 'form'" class="import-tip" :closable="false" type="info" show-icon>
         <template #title>
           按「季 + 集」自动匹配订阅目录下<b>已重命名</b>的视频：字幕 <b>碧蓝之海 S03E15.cht.ass</b> 对应视频
           <b>碧蓝之海 S03E15.mkv</b>，将重命名为 <b>碧蓝之海 S03E15.cht.ass</b>；无语言标识则命名为
-          <b>碧蓝之海 S03E15.ass</b>。同名文件覆盖前会自动备份为 .bak。
+          <b>碧蓝之海 S03E15.ass</b>。同名文件覆盖前会自动备份到视频同目录的 <b>sub_bak/</b>（不存在则新建）。
         </template>
       </el-alert>
 
-      <section v-if="importResult" class="import-result">
+      <section v-if="step !== 'form'" class="import-result">
         <div class="section-title">
-          <h3>导入结果</h3>
+          <h3>{{ step === 'preview' ? '请确认导入内容' : '导入结果' }}</h3>
           <div class="result-summary">
-            <el-tag size="small" type="success">成功 {{ importResult.success || 0 }}</el-tag>
-            <el-tag v-if="importResult.failed" size="small" type="danger">失败 {{ importResult.failed }}</el-tag>
+            <el-tag size="small" type="success">
+              {{ step === 'preview' ? '可导入' : '成功' }} {{ step === 'preview' ? importableCount : (importResult?.success || 0) }}
+            </el-tag>
+            <el-tag v-if="failedCount" size="small" type="danger">
+              {{ step === 'preview' ? '未命中' : '失败' }} {{ failedCount }}
+            </el-tag>
           </div>
         </div>
-        <el-table :data="importResult.items || []" class="import-result-table" max-height="260" size="small">
-          <el-table-column label="上传文件" min-width="180" prop="originalName" show-overflow-tooltip/>
-          <el-table-column label="重命名后" min-width="180" show-overflow-tooltip>
+
+        <el-alert v-if="step === 'preview'" class="import-tip" :closable="false" type="warning" show-icon>
+          <template #title>
+            以下为<b>将要写入</b>的变更，确认后才会真正写入；同名文件覆盖前会自动备份到视频同目录的 <b>sub_bak/</b>。
+          </template>
+        </el-alert>
+
+        <el-table :data="displayItems" class="import-result-table" max-height="300" size="small">
+          <el-table-column label="改名前" min-width="200" prop="originalName" show-overflow-tooltip>
+            <template #default="{row}">
+              <span v-if="row.originalName">{{ row.originalName }}</span>
+              <el-text v-else type="info">—</el-text>
+            </template>
+          </el-table-column>
+          <el-table-column label="改名后" min-width="200" show-overflow-tooltip>
             <template #default="{row}">
               <span v-if="row.renamedName">{{ row.renamedName }}</span>
               <el-text v-else type="info">—</el-text>
             </template>
           </el-table-column>
-          <el-table-column label="对应视频" min-width="160" show-overflow-tooltip>
+          <el-table-column label="对应的视频" min-width="180" prop="videoName" show-overflow-tooltip>
             <template #default="{row}">
               <span v-if="row.videoName">{{ row.videoName }}</span>
               <el-text v-else type="info">—</el-text>
@@ -156,9 +203,16 @@
       </section>
 
       <template #footer>
-        <el-button @click="importVisible = false">关闭</el-button>
-        <el-button :disabled="!pendingFiles.length" :loading="importing" type="primary" @click="doImport">
-          开始导入
+        <el-button v-if="step === 'preview'" @click="backToForm">返回修改</el-button>
+        <el-button v-else @click="dialogVisible = false">{{ step === 'done' ? '完成' : '取消' }}</el-button>
+
+        <el-button v-if="step === 'form'" :disabled="!canPreview" :loading="previewing" type="primary"
+                   @click="doPreview">
+          {{ mode === 'upload' ? '预览匹配结果' : '获取字幕预览' }}
+        </el-button>
+        <el-button v-else-if="step === 'preview'" :disabled="!importableCount" :loading="importing" type="primary"
+                   @click="doConfirm">
+          确认导入（{{ importableCount }}）
         </el-button>
       </template>
     </el-dialog>
@@ -226,38 +280,63 @@ const clearAll = async () => {
   }
 }
 
-/* ==================== 本地字幕批量导入 ==================== */
+/* ==================== 字幕管理（手动上传 / 射手网获取） ==================== */
 
-const importVisible = ref(false)
-const importAniId = ref('')
+/** 当前步骤：form 填写 → preview 二次确认 → done 结果 */
+const step = ref('form')
+const dialogVisible = ref(false)
+const mode = ref('upload')
+const aniId = ref('')
 const aniOptions = ref([])
-const aniLoading = ref(false)
 const pendingFiles = ref([])
 const dragOver = ref(false)
-const importing = ref(false)
-const importResult = ref(null)
 const fileInputRef = ref()
+const previewing = ref(false)
+const importing = ref(false)
+/** 预览得到的待写入清单（改名前 / 改名后 / 对应的视频） */
+const planItems = ref([])
+/** 射手网预览计划 id，确认导入时回传给后端消费 */
+const planId = ref('')
+const importResult = ref(null)
 
 const acceptExt = SUBTITLE_EXT.map(ext => `.${ext}`).join(',')
 const pendingBytes = computed(() => pendingFiles.value.reduce((sum, f) => sum + (f.size || 0), 0))
 
-const openImport = async () => {
-  importVisible.value = true
+const selectedAni = computed(() => aniOptions.value.find(a => a.id === aniId.value) || null)
+const displayItems = computed(() => step.value === 'preview' ? planItems.value : (importResult.value?.items || []))
+const importableCount = computed(() => planItems.value.filter(item => item.status === '已匹配').length)
+const failedCount = computed(() => step.value === 'preview'
+    ? planItems.value.filter(item => item.status !== '已匹配').length
+    : (importResult.value?.failed || 0))
+const canPreview = computed(() => !!aniId.value && (mode.value === 'assrt' || pendingFiles.value.length > 0))
+
+const openDialog = async () => {
+  dialogVisible.value = true
+  step.value = 'form'
+  mode.value = 'upload'
+  planItems.value = []
+  planId.value = ''
   importResult.value = null
   if (!aniOptions.value.length) {
     await loadAniOptions()
   }
 }
 
+const resetDialog = () => {
+  step.value = 'form'
+  pendingFiles.value = []
+  planItems.value = []
+  planId.value = ''
+  importResult.value = null
+  dragOver.value = false
+}
+
 const loadAniOptions = async () => {
-  aniLoading.value = true
   try {
     const res = await http.listAni()
     aniOptions.value = (res?.data?.weekList || []).flatMap(w => w.items || [])
   } catch (e) {
     aniOptions.value = []
-  } finally {
-    aniLoading.value = false
   }
 }
 
@@ -318,38 +397,97 @@ const clearPending = () => {
   pendingFiles.value = []
 }
 
-const doImport = async () => {
-  if (!importAniId.value) {
+const buildFormData = () => {
+  const formData = new FormData()
+  formData.append('aniId', aniId.value)
+  pendingFiles.value.forEach(file => formData.append('files', file))
+  return formData
+}
+
+/**
+ * 第一步：只做匹配预览（不写盘），把「改名前 / 改名后 / 对应的视频」交给用户确认。
+ */
+const doPreview = async () => {
+  if (!aniId.value) {
     ElMessage.warning('请先选择字幕对应的订阅')
     return
   }
-  if (!pendingFiles.value.length) {
+  if (mode.value === 'upload' && !pendingFiles.value.length) {
     ElMessage.warning('请先选择字幕文件')
     return
   }
+  previewing.value = true
+  planItems.value = []
+  planId.value = ''
+  importResult.value = null
+  try {
+    if (mode.value === 'upload') {
+      const res = await http.subtitleImportPreview(buildFormData())
+      if (res?.code !== 200) {
+        ElMessage.error(res?.message || '预览失败')
+        return
+      }
+      planItems.value = res.data?.items || []
+    } else {
+      const res = await http.subtitleFetchPreview(aniId.value)
+      planItems.value = res.data?.items || []
+      planId.value = res.data?.planId || ''
+    }
+    if (!planItems.value.length) {
+      ElMessage.warning(mode.value === 'upload' ? '没有解析出可导入的字幕' : '该订阅没有缺失字幕的视频')
+      return
+    }
+    step.value = 'preview'
+  } catch (e) {
+    ElMessage.error(e?.message || '预览失败')
+  } finally {
+    previewing.value = false
+  }
+}
 
-  const formData = new FormData()
-  formData.append('aniId', importAniId.value)
-  pendingFiles.value.forEach(file => formData.append('files', file))
+/**
+ * 第二步：用户确认后才真正写入。
+ * 先弹一次确认框（二次确认），再执行写入，避免误点直接落盘。
+ */
+const doConfirm = async () => {
+  const source = mode.value === 'assrt' ? '射手网' : '本地上传'
+  try {
+    await ElMessageBox.confirm(
+        `即将写入 ${importableCount.value} 个字幕文件（来源：${source}）。覆盖同名文件前会自动备份到视频同目录的 sub_bak/，确认继续？`,
+        '确认导入字幕',
+        {type: 'warning', confirmButtonText: '确认导入', cancelButtonText: '再检查一下'}
+    )
+  } catch (e) {
+    return
+  }
 
   importing.value = true
   try {
-    const res = await http.subtitleImport(formData)
-    if (res?.code !== 200) {
-      ElMessage.error(res?.message || '导入失败')
-      return
+    let result
+    if (mode.value === 'upload') {
+      const res = await http.subtitleImport(buildFormData())
+      if (res?.code !== 200) {
+        ElMessage.error(res?.message || '导入失败')
+        return
+      }
+      result = res.data
+    } else {
+      const res = await http.subtitleFetch(planId.value)
+      result = res.data
     }
-    importResult.value = res.data || null
-    const success = res.data?.success || 0
-    const failed = res.data?.failed || 0
+    importResult.value = result || {items: [], success: 0, failed: 0}
+    step.value = 'done'
+    const success = importResult.value.success || 0
+    const failed = importResult.value.failed || 0
     if (success && !failed) {
       ElMessage.success(`导入完成，成功 ${success} 个`)
-      pendingFiles.value = []
     } else if (success) {
       ElMessage.warning(`导入完成：成功 ${success}，失败 ${failed}`)
-      pendingFiles.value = []
     } else {
-      ElMessage.error('全部文件未匹配到视频，请查看下方说明')
+      ElMessage.error('未导入任何字幕，请查看下方说明')
+    }
+    if (mode.value === 'upload') {
+      pendingFiles.value = []
     }
     load()
   } catch (e) {
@@ -357,6 +495,13 @@ const doImport = async () => {
   } finally {
     importing.value = false
   }
+}
+
+const backToForm = () => {
+  step.value = 'form'
+  planItems.value = []
+  planId.value = ''
+  importResult.value = null
 }
 
 onMounted(() => {
@@ -411,6 +556,26 @@ onMounted(() => {
 
 .full-width {
   width: 100%;
+}
+
+.mode-switch {
+  margin-bottom: 16px;
+}
+
+.ani-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ani-meta-title {
+  flex: 1 1 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .import-dropzone {
