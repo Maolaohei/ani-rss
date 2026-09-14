@@ -77,6 +77,24 @@
 
 ---
 
+## 3.4.5 增量（2026-09）
+
+### 字幕匹配重构（手动获取 + 二次确认）
+- 设置项「字幕自动获取」→「字幕手动获取」（`subtitleAutoFetch` → `subtitleManualFetch`，Gson `@SerializedName(alternate=...)` 兼容旧配置）；下载完成后不再自动抓取，字幕统一在「字幕匹配」页管理，避免自动匹配到错误字幕。
+- 导入前二次确认（预览不写盘）：`SubtitleService.importLocalSubtitles(dir, files, dryRun)` + `expectedSubtitleName()`/`normalizeLangTag()`，保证「预览显示文件名 == 实际落盘名」。
+- 射手网(ASSRT) 手动获取：`planFetchFromAssrt`（只读生成计划）+ `applyFetchPlan`（写盘），中间用 LRU+TTL 30min 计划缓存，预览与确认只跑一次射手网请求（避开频率限制）；新增 `/subtitleImportPreview` `/subtitleFetchPreview` `/subtitleFetch`。
+- 字幕覆盖前备份到视频同目录 `sub_bak/`（不再散落 `视频.ass.bak`）；`PlayController` 过滤 `sub_bak/` 避免备份被当成外挂字幕列出。
+
+### UI 调整
+- 移除「工具 → 追番日历」Tab（与订阅页信息重复）；首页移除「下载中」卡片（顶部计数保留）；「近 7 天下载」独占整行、七列均分；侧边栏加宽 132→168px。
+
+### 代码审查修复（Sep 11 之后 42 提交：1×P0 + 4×P1 + 18×P2/P3）
+- **P0 只读令牌提权**：`ViewerPolicy.sanitizeCredentials` 按字段名正则脱敏凭据，`ConfigController.config()` 对 viewer 请求脱敏，阻断只读令牌经 `/config` 读到 `apiKey` 等 10 个凭据字段后提权写接口。
+- **P1**：`PreviewView` 树表索引回 `it.row`（修复子行读错订阅 / 整表白屏）；`SubtitleService` 压缩包字幕扩展名改用 `originalName` 且 `FetchPlan` TTL 改 `stampCreatedAt`；`AniController` 删除本地文件前加 `DeleteGuard` 目录边界闸门（防空模板删 CWD）；`SubscriptionListView` 补 `groupList` emit + `loadVersion` 守卫（修复分组筛选失效）。
+- **P2**：`DownloadService` 占位文件删除后置到 `saveTorrent` 校验之后；`ConfigUtil` 系统通知迁移用 `notificationSystemMigrated` 标志（修复关不掉）；`ShareController` 先限长再流式解压带累计大小上限（修复 zip bomb）；`ItemsUtil` profile 禁用视为无偏好；`DoctorController` 关闭 HTTP 响应；`AniUtil` 合集校验 `verifyCollectionAni` + `saveCover` 移出订阅锁；`OpenList` 重命名图同名不同路冲突抛 `IllegalStateException`；`LibraryController.invalidate` 随订阅同步。
+- **P3（前端）**：`TaskManagerView` 轮询在 KeepAlive 下 `onDeactivated` 停止；`TorrentsInfosView` `useLocalStorage` 防隐私模式白屏 + `:key=tag`；`SubscriptionView` 清筛选不再持久化用户偏好；`LogsView` 先判 `content-type` 再解析（修复把 JSON 错误当 zip）；`PlayListView`/`NotificationView` 列表 `:key` 唯一性。
+- 新增测试 `ViewerPolicyTest`、`DeleteGuardTest`；验证：后端全量 224 测试类 / 0 失败 / 1 跳过，前端 `vite build` 通过。
+
 ## 3.4.4 增量（2026-09）
 
 - **本地字幕批量导入**：字幕匹配页支持选择订阅、点击或拖拽多选字幕文件；后端按季集匹配已重命名视频，自动生成 `剧名 SxxExx[.语言].ass/srt` 标准文件名，并逐文件返回成功/失败原因。
