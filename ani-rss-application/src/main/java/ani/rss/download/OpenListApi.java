@@ -12,6 +12,7 @@ import cn.hutool.core.lang.Assert;
 import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.core.util.ObjectUtil;
 import cn.hutool.core.util.StrUtil;
+import cn.hutool.core.util.URLUtil;
 import cn.hutool.http.Header;
 import cn.hutool.http.HttpRequest;
 import cn.hutool.http.HttpResponse;
@@ -191,6 +192,53 @@ public class OpenListApi {
             return null;
         });
     }
+
+    /**
+     * 上传文件到网盘（fs/put），用于把字幕写入与视频相同的云端目录。
+     * 复用 OpenListUploadNotification 的 PUT 模式，但使用下载器自身的 host/token。
+     *
+     * @param dir      目录
+     * @param fileName 文件名（含扩展名）
+     * @param content  文件内容
+     */
+    public void fsPut(String dir, String fileName, byte[] content) {
+        invalidateFindFilesCache();
+        retryIdempotent("fs/put " + dir + "/" + fileName, () -> {
+            String url = config.getDownloadToolHost() + "/api/fs/put";
+            java.net.http.HttpRequest request = java.net.http.HttpRequest.newBuilder()
+                    .uri(java.net.URI.create(url))
+                    .timeout(java.time.Duration.ofMinutes(5))
+                    .header("Authorization", config.getDownloadToolPassword())
+                    .header("As-Task", "false")
+                    .header("File-Path", URLUtil.encode(dir + "/" + fileName))
+                    .header("Content-Type", "application/octet-stream")
+                    .PUT(java.net.http.HttpRequest.BodyPublishers.ofByteArray(content))
+                    .build();
+            java.net.http.HttpResponse<String> response;
+            try {
+                response = SUBTITLE_HTTP_CLIENT.send(
+                        request, java.net.http.HttpResponse.BodyHandlers.ofString());
+            } catch (java.io.IOException e) {
+                throw new RuntimeException(e);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            }
+            Assert.isTrue(response.statusCode() == 200,
+                    "上传字幕失败 {} 状态码:{}", dir + "/" + fileName, response.statusCode());
+            JsonObject jsonObject = GsonStatic.fromJson(response.body(), JsonObject.class);
+            int code = jsonObject.get("code").getAsInt();
+            Assert.isTrue(code == 200, "上传字幕失败 {} 状态码:{}", dir + "/" + fileName, code);
+            log.info("OpenList 字幕上传完成 {}", fileName);
+            return null;
+        });
+    }
+
+    /**
+     * fs/put 复用单例 HttpClient，避免逐文件新建导致 selector 线程泄漏
+     */
+    private static final java.net.http.HttpClient SUBTITLE_HTTP_CLIENT =
+            java.net.http.HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(30)).build();
 
     /**
      * 批量重命名

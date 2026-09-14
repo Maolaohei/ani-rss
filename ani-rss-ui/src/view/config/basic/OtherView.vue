@@ -165,8 +165,37 @@
       </div>
       <div class="margin-top-4">
         <el-text class="mx-1" size="small">
-          默认关闭。开启后由部署方接入字幕源；未接入时「工具 → 系统自检」与订阅的字幕扫描仍可用来
-          发现缺字幕的剧集，并支持手动就地附加字幕。
+          开启后通过 ASSRT(伪射手网) 在下载完成后自动匹配字幕：按集数命中 + 语言偏好 + 文件名相似度挑选最优条目，
+          重命名为与视频同主名后就地写入（本地下载器），或直接上传到 OpenList 云端视频同目录。
+        </el-text>
+      </div>
+      <div class="margin-top-4 flex-col gap-8">
+        <div>
+          <el-text class="mx-1" size="small">ASSRT Token</el-text>
+          <el-input
+              v-model="props.config['assrtToken']"
+              placeholder="在 assrt.net 用户后台获取的 API Token"
+              show-password
+              style="max-width: 360px"/>
+        </div>
+        <div>
+          <el-text class="mx-1" size="small">字幕语言</el-text>
+          <el-radio-group v-model="props.config['subtitleLang']">
+            <el-radio label="简体 chs" value="chs"/>
+            <el-radio label="繁体 cht" value="cht"/>
+          </el-radio-group>
+        </div>
+        <div>
+          <el-text class="mx-1" size="small">调用频率限制（次/分钟）</el-text>
+          <el-input-number
+              v-model="props.config['assrtRateLimitPerMinute']"
+              :min="1" :max="120" :step="1" controls-position="right"
+              style="max-width: 160px"/>
+          <el-text class="mx-1" size="small" type="info">与 assrt.net 后台配额一致，默认 5</el-text>
+        </div>
+        <el-text class="mx-1" size="small" type="info">
+          Token 获取：登录 assrt.net → 用户中心 → API Token（免费）。未填 Token 时即便开启也不会抓取。
+          接口与字段说明见项目 docs/assrt-api.md。
         </el-text>
       </div>
     </div>

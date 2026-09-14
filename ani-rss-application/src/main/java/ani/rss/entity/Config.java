@@ -761,6 +761,15 @@ public class Config implements Serializable {
     @Schema(description = "字幕独立文件夹")
     private String subtitleIndependentFolderName;
 
+    @Schema(description = "ASSRT(伪射手网) 字幕 Token，用于下载完成后自动匹配并补全字幕")
+    private String assrtToken;
+
+    @Schema(description = "ASSRT 字幕语言偏好：chs(简体) / cht(繁体)")
+    private String subtitleLang;
+
+    @Schema(description = "ASSRT 调用频率限制（次/分钟，token+IP）。与 assrt.net 用户后台配额保持一致；默认 5")
+    private Integer assrtRateLimitPerMinute;
+
     @Schema(description = "bgmApi")
     private String bgmApi;
 
