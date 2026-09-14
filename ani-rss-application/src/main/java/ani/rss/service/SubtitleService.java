@@ -11,6 +11,9 @@ import ani.rss.entity.TorrentsInfo;
 import ani.rss.service.DownloadService;
 import ani.rss.service.subtitle.AssrtSubtitleProvider;
 import ani.rss.service.subtitle.SubtitleCandidate;
+import ani.rss.service.subtitle.SubtitleMatchLog;
+import ani.rss.service.subtitle.SubtitleMatchLogEntry;
+import ani.rss.service.subtitle.SubtitlePick;
 import ani.rss.util.other.ConfigUtil;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.util.StrUtil;
@@ -302,26 +305,39 @@ public class SubtitleService {
             log.info("ASSRT 无匹配字幕: {} (关键词: {})", videoName, keyword);
             return;
         }
+        boolean attached = false;
         for (SubtitleCandidate c : candidates) {
             try {
-                byte[] data = assrtSubtitleProvider.download(c, lang, targetSeason, targetEp, videoName);
-                if (data == null || data.length == 0) {
+                SubtitlePick pick = assrtSubtitleProvider.download(c, lang, targetSeason, targetEp, videoName, ani);
+                if (pick == null || pick.getContent() == null || pick.getContent().length == 0) {
                     continue;
                 }
+                byte[] data = pick.getContent();
+                String originalName = StrUtil.blankToDefault(pick.getOriginalName(), c.getFileName());
+                Integer resolvedSeason = pick.getResolvedSeason();
                 String ext = StrUtil.blankToDefault(c.getExt(), "ass").toLowerCase();
                 String langTag = StrUtil.blankToDefault(c.getLang(), "");
+                String renamedName;
                 if (cloudDir == null) {
-                    attachSubtitle(localVideo, new String(data, StandardCharsets.UTF_8), ext, langTag);
+                    File f = attachSubtitle(localVideo, new String(data, StandardCharsets.UTF_8), ext, langTag);
+                    renamedName = f.getName();
                 } else {
-                    String name = mainName + (StrUtil.isBlank(langTag) ? "" : "." + langTag) + "." + ext;
-                    api.fsPut(cloudDir, name, data);
+                    renamedName = mainName + (StrUtil.isBlank(langTag) ? "" : "." + langTag) + "." + ext;
+                    api.fsPut(cloudDir, renamedName, data);
                 }
-                log.info("字幕已{}: {} -> {}",
-                        cloudDir == null ? "附加(本地)" : "上传(云端)", videoName, ext);
+                SubtitleMatchLog.record(new SubtitleMatchLogEntry(
+                        System.currentTimeMillis(), videoName, originalName, renamedName,
+                        resolvedSeason, "已匹配", langTag));
+                log.info("字幕已{}: {} -> {}", cloudDir == null ? "附加(本地)" : "上传(云端)", videoName, ext);
+                attached = true;
                 return;
             } catch (Exception ex) {
                 log.warn("字幕候选写入失败 {}: {}", c.getFileName(), ExceptionUtils.getMessage(ex));
             }
+        }
+        if (!attached) {
+            SubtitleMatchLog.record(new SubtitleMatchLogEntry(
+                    System.currentTimeMillis(), videoName, "", "", null, "未命中", ""));
         }
     }
 

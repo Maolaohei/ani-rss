@@ -198,6 +198,13 @@
           接口与字段说明见项目 docs/assrt-api.md。
         </el-text>
       </div>
+      <div class="margin-top-8">
+        <el-switch v-model="props.config['subtitleMetaEnabled']"/>
+        <el-text class="mx-1" size="small">
+          启用字幕季数元数据解析（TMDB/Bangumi）：当字幕番剧名未带 S1/S2 等季数标记时，自动查元数据推断季数，
+          避免跨季误匹配（如第 2 季订阅误挂第 1 季字幕）。命中结果会缓存到本地，相同番剧名不再重复查询。
+        </el-text>
+      </div>
     </div>
   </SettingsItem>
 </template>

@@ -146,6 +146,7 @@ export let configData = {
     "assrtToken": "",
     "subtitleLang": "chs",
     "assrtRateLimitPerMinute": 5,
+    "subtitleMetaEnabled": true,
     "allowCors": false,
     "corsOrigins": "",
     "networkPrefer": "",

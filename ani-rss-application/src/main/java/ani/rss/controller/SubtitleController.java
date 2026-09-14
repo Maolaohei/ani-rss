@@ -6,6 +6,8 @@ import ani.rss.entity.Ani;
 import ani.rss.entity.web.Result;
 import ani.rss.service.DownloadService;
 import ani.rss.service.SubtitleService;
+import ani.rss.service.subtitle.SubtitleMatchLog;
+import ani.rss.service.subtitle.SubtitleMatchLogEntry;
 import ani.rss.util.other.AniUtil;
 import cn.hutool.core.util.StrUtil;
 import io.swagger.v3.oas.annotations.Operation;
@@ -16,6 +18,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.io.File;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -107,5 +110,30 @@ public class SubtitleController extends BaseController {
                 "autoFetch", subtitleService.isAutoFetchEnabled(),
                 "supportedExt", java.util.List.of("ass", "srt", "ssa", "vtt", "sub")
         ));
+    }
+
+    @Auth
+    @Operation(summary = "字幕匹配日志")
+    @PostMapping("/subtitleMatchLog")
+    public Result<List<SubtitleMatchLogEntry>> subtitleMatchLog(@RequestBody(required = false) Map<String, Object> body) {
+        int limit = 100;
+        if (body != null && body.get("limit") != null) {
+            try {
+                limit = Integer.parseInt(String.valueOf(body.get("limit")));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        if (limit <= 0 || limit > 200) {
+            limit = 200;
+        }
+        return Result.success(SubtitleMatchLog.list(limit));
+    }
+
+    @Auth
+    @Operation(summary = "清空字幕匹配日志")
+    @PostMapping("/subtitleMatchLogClear")
+    public Result<Map<String, Object>> subtitleMatchLogClear() {
+        SubtitleMatchLog.clear();
+        return Result.success(Map.of("ok", true));
     }
 }

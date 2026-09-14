@@ -46,6 +46,12 @@
           </el-icon>
           <span>工具</span>
         </el-menu-item>
+        <el-menu-item index="/subtitle-match">
+          <el-icon>
+            <Files/>
+          </el-icon>
+          <span>字幕匹配</span>
+        </el-menu-item>
         <el-menu-item index="/logs">
           <el-icon>
             <Tickets/>
@@ -73,7 +79,7 @@
 <script setup>
 import {onMounted} from "vue";
 import {RouterView, useRoute} from "vue-router";
-import {Clock, Collection, Download, House, Setting, Tickets, Tools, VideoCamera} from "@element-plus/icons-vue";
+import {Clock, Collection, Download, Files, House, Setting, Tickets, Tools, VideoCamera} from "@element-plus/icons-vue";
 import {initLayout} from "@/js/global.js";
 
 const route = useRoute()

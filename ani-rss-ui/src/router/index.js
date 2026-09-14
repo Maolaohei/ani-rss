@@ -47,6 +47,10 @@ const routes = [
     {
         path: '/settings',
         component: ConfigView
+    },
+    {
+        path: '/subtitle-match',
+        component: () => import('@/view/home/SubtitleMatchView.vue')
     }
 ]
 

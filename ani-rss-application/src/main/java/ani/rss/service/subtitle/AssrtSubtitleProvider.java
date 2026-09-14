@@ -2,6 +2,7 @@ package ani.rss.service.subtitle;
 
 import ani.rss.commons.ExceptionUtils;
 import ani.rss.commons.GsonStatic;
+import ani.rss.entity.Ani;
 import ani.rss.util.basic.HttpReq;
 import ani.rss.util.other.ConfigUtil;
 import cn.hutool.core.io.FileUtil;
@@ -226,10 +227,11 @@ public class AssrtSubtitleProvider {
      * @param targetSeason  目标季（可空）；合集包解包时用于按季过滤
      * @param targetEp      目标集（可空）；合集包解包时用于按集过滤
      * @param videoName     目标视频文件名（用于压缩包内按相似度挑选）
-     * @return 字幕字节；无法获取返回 null
+     * @param ani           订阅（提供已知季数，供元数据解析对比；可为 null）
+     * @return 字幕挑选结果（含命中原始文件名与解析季数）；无法获取返回 null
      */
-    public byte[] download(SubtitleCandidate c, String preferredLang,
-                           Integer targetSeason, Integer targetEp, String videoName) {
+    public SubtitlePick download(SubtitleCandidate c, String preferredLang,
+                                 Integer targetSeason, Integer targetEp, String videoName, Ani ani) {
         try {
             byte[] data = fetchBytes(c.getUrl());
             if (data == null || data.length == 0) {
@@ -248,9 +250,10 @@ public class AssrtSubtitleProvider {
                 }
             }
             if (c.isArchive()) {
-                return extractBestFromZip(data, c.getFileName(), videoName, preferredLang, targetSeason, targetEp);
+                return extractBestFromZip(data, c.getFileName(), videoName, preferredLang, targetSeason, targetEp, ani);
             }
-            return data;
+            Integer resolved = SubtitleSeasonResolver.resolve(ani, seriesNameOf(c.getFileName()));
+            return new SubtitlePick(data, c.getFileName(), resolved);
         } catch (Exception ex) {
             log.warn("ASSRT 字幕下载失败 {}: {}", c.getFileName(), ExceptionUtils.getMessage(ex));
             return null;
@@ -467,13 +470,26 @@ public class AssrtSubtitleProvider {
      * 当已知目标集数时，只保留命中的那一条（必要时再按季过滤），再在命中集合里
      * 按「语言匹配 + 文件名相似度」选最优；若整包都没有目标集，返回 null 让调用方尝试下一个候选。
      * 目标集数为空时退化为按相似度 + 语言挑选（旧行为）。
+     * <p>
+     * 季数解析（{@link SubtitleSeasonResolver}）：当目标季已知（来自视频名标记或订阅季数）时，
+     * 优先挑选「季数已确认为目标季」的条目；只有当整包都没有季数确认的条目时，才回落到纯相似度挑选，
+     * 避免第 1 季字幕因文件名更短相似度更高而误挂到第 2 季订阅。
+     *
+     * @param ani 订阅（提供已知季数，供元数据解析对比；可为 null）
      */
-    private byte[] extractBestFromZip(byte[] data, String archiveName, String videoName,
-                                     String preferredLang, Integer targetSeason, Integer targetEp) {
+    private SubtitlePick extractBestFromZip(byte[] data, String archiveName, String videoName,
+                                            String preferredLang, Integer targetSeason, Integer targetEp, Ani ani) {
+        Integer subscriptionSeason = (ani != null && ani.getSeason() != null && ani.getSeason() >= 1)
+                ? ani.getSeason() : null;
+        // 目标季：视频名里的显式标记优先；否则用订阅季数作为对照基准
+        Integer effectiveSeason = targetSeason != null ? targetSeason : subscriptionSeason;
+
         try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(data))) {
             ZipEntry entry;
-            byte[] best = null;
-            double bestScore = -1;
+            SubtitlePick bestConfirmed = null;
+            double bestConfirmedScore = -1;
+            SubtitlePick bestFuzzy = null;
+            double bestFuzzyScore = -1;
             while ((entry = zis.getNextEntry()) != null) {
                 if (entry.isDirectory()) {
                     continue;
@@ -484,35 +500,69 @@ public class AssrtSubtitleProvider {
                     continue;
                 }
                 // 已知目标集数时按集/季过滤
+                int[] se = extractSeasonEpisode(name);
+                int s = se[0];
+                int e = se[1];
                 if (targetEp != null) {
-                    int[] se = extractSeasonEpisode(name);
-                    int s = se[0];
-                    int e = se[1];
                     if (e < 0) {
                         continue; // 无法确认集数，跳过
                     }
                     if (e != targetEp) {
                         continue; // 集数不符，跳过
                     }
-                    if (targetSeason != null && s >= 0 && s != targetSeason) {
-                        continue; // 季数不符，跳过
-                    }
                 }
+                if (effectiveSeason != null && s >= 0 && s != effectiveSeason) {
+                    continue; // 显式季标记与目标季不符，跳过
+                }
+
+                // 解析条目季数：显式标记优先，否则走元数据解析（与订阅对比）
+                Integer entrySeason = s >= 0 ? s : SubtitleSeasonResolver.resolve(ani, seriesNameOf(name));
+                boolean seasonConfirmed = effectiveSeason != null
+                        && entrySeason != null && entrySeason.equals(effectiveSeason);
+
                 byte[] content = zis.readAllBytes();
                 double sc = similarity(videoName, name) * 50;
                 if (preferredLang.equalsIgnoreCase(detectLang(name, "", preferredLang))) {
                     sc += 100;
                 }
-                if (sc > bestScore) {
-                    bestScore = sc;
-                    best = content;
+                if (seasonConfirmed) {
+                    if (sc > bestConfirmedScore) {
+                        bestConfirmedScore = sc;
+                        bestConfirmed = new SubtitlePick(content, name, entrySeason);
+                    }
+                } else {
+                    if (sc > bestFuzzyScore) {
+                        bestFuzzyScore = sc;
+                        bestFuzzy = new SubtitlePick(content, name, entrySeason);
+                    }
                 }
             }
-            return best;
+            return bestConfirmed != null ? bestConfirmed : bestFuzzy;
         } catch (Exception ex) {
             log.warn("ASSRT 压缩包解包失败 {}: {}", archiveName, ExceptionUtils.getMessage(ex));
             return null;
         }
+    }
+
+    /**
+     * 从文件名中提取「番剧系列名」（用于元数据季数解析的缓存键与对照）。
+     * 剔除分辨率/编码等技术词与集数标记，保留番剧名主体，例如
+     * {@code High School DxD NEW 第05話} → {@code High School DxD NEW}。
+     */
+    private static String seriesNameOf(String name) {
+        if (StrUtil.isBlank(name)) {
+            return "";
+        }
+        String s = cleanTechnicalTokens(name);
+        // 去掉集数标记：第N話/集/期、E/EP\d+、S\d+E\d+、x\d+（如 1080p 已在前一步剔除）
+        s = s.replaceAll("第[\\s]*[0-9一二三四五六七八九十百千]+[\\s]*(話|话|集|期)", " ")
+                .replaceAll("(?i)\\b[Ee][Pp]?\\s*\\d+", " ")
+                .replaceAll("(?i)\\bS\\d+\\s*E\\d+", " ")
+                .replaceAll("(?i)\\bx\\s*\\d+", " ")
+                .replaceAll("[_\\-\\.\\[\\]()（）]+", " ")
+                .replaceAll("\\s+", " ")
+                .trim();
+        return s;
     }
 
     private String detectLang(String fileName, String langField, String preferredLang) {
