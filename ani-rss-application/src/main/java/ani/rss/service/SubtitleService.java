@@ -312,13 +312,27 @@ public class SubtitleService {
         private final String planId;
         private final String aniId;
         private final String aniTitle;
-        private final long createdAt = System.currentTimeMillis();
+        /**
+         * 计划<b>构建完成</b>的时刻，用于 TTL 判定。
+         * <p>
+         * 由 {@code cachePlan} 在入缓存前重新打点，而不是在对象构造时取扫描开始时间：
+         * 射手网限流默认 5 次/分钟，长季扫描本身就可能超过 30 分钟的 TTL，
+         * 从扫描开始计时会让用户拿到预览时计划已经过期、确认时白跑一轮限流配额。
+         */
+        private long createdAt = System.currentTimeMillis();
         private final List<FetchPlanItem> items = new ArrayList<>();
 
         FetchPlan(String planId, String aniId, String aniTitle) {
             this.planId = planId;
             this.aniId = aniId;
             this.aniTitle = aniTitle;
+        }
+
+        /**
+         * 以当前时刻重新打点 TTL 起点（计划构建完成时调用）
+         */
+        void stampCreatedAt() {
+            this.createdAt = System.currentTimeMillis();
         }
 
         /**
@@ -705,6 +719,8 @@ public class SubtitleService {
     }
 
     private static synchronized void cachePlan(FetchPlan plan) {
+        // TTL 从"计划构建完成"开始算, 而不是扫描开始(见 FetchPlan.createdAt 注释)
+        plan.stampCreatedAt();
         purgeExpiredPlans();
         PLAN_CACHE.put(plan.getPlanId(), plan);
     }
@@ -779,7 +795,10 @@ public class SubtitleService {
                 }
                 byte[] data = pick.getContent();
                 String originalName = StrUtil.blankToDefault(pick.getOriginalName(), c.getFileName());
-                String ext = StrUtil.blankToDefault(c.getExt(), "ass").toLowerCase();
+                // 扩展名必须取自"真正会被写出的那个文件"。
+                // 压缩包候选(zip/rar)的 c.getExt() 是压缩包后缀，直接用会写出 剧名 SxxExx.zip；
+                // pick.getOriginalName() 是解压后挑中的内层字幕名，从这里取才是 ass/sub 等真实后缀。
+                String ext = StrUtil.blankToDefault(FileUtil.extName(originalName), "ass").toLowerCase();
                 String langTag = resolveLangTag(originalName, c);
                 String renamedName = expectedSubtitleName(mainName, ext, langTag);
                 Map<String, Object> preview = importItem(originalName, renamedName, videoName, langTag, "已匹配", "");

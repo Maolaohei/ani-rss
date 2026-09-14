@@ -63,6 +63,8 @@ public class CollectionController extends BaseController {
             throw ResultException.exception("种子文件解析失败, 请确认是有效的 .torrent 文件");
         }
         Ani ani = collectionInfo.getAni();
+        // 尽早校验: 标题会进下载路径、季数会被拆箱, 有问题要在动手下载之前就拒掉
+        AniUtil.verifyCollectionAni(ani);
         String title = ani.getTitle();
         String subgroup = ani.getSubgroup();
         String downloadPath = ani.getDownloadPath();

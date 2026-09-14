@@ -343,9 +343,42 @@ public class ConfigUtil {
 
         migrateMikanHost(CONFIG);
         format(CONFIG);
+        // 必须在 format 之后：format 会用默认值补齐 null 的 statusList
+        migrateNotificationSystem(CONFIG);
         LogUtil.loadLogback();
         log.debug("加载配置文件 {}", configFile);
         TorrentUtil.load();
+    }
+
+    /**
+     * 一次性迁移：为老配置的通知渠道补上 SYSTEM（系统通知）。
+     * <p>
+     * 该动作<b>不能</b>放在 {@link #format(Config)} 里 —— 那条路径在启动、每次保存
+     * ({@link #syncChecked()}) 和接口更新 ({@link #updateFromApi(Config)}) 时都会执行，
+     * 用户取消勾选「系统通知」后会被静默加回，表现为"复选框永远关不掉"。
+     * <p>
+     * 这里用 {@link Config#getNotificationSystemMigrated()} 区分「尚未迁移」与
+     * 「用户主动取消」：只有前者才补，补完置位标记（随下一次保存落盘）。
+     */
+    private static void migrateNotificationSystem(Config config) {
+        if (Boolean.TRUE.equals(config.getNotificationSystemMigrated())) {
+            return;
+        }
+        List<NotificationConfig> notificationConfigList = config.getNotificationConfigList();
+        if (notificationConfigList == null) {
+            return;
+        }
+        for (NotificationConfig notificationConfig : notificationConfigList) {
+            List<NotificationStatusEnum> statusList = notificationConfig.getStatusList();
+            if (statusList == null || statusList.contains(NotificationStatusEnum.SYSTEM)) {
+                continue;
+            }
+            List<NotificationStatusEnum> merged = new ArrayList<>(statusList);
+            merged.add(NotificationStatusEnum.SYSTEM);
+            notificationConfig.setStatusList(merged);
+        }
+        config.setNotificationSystemMigrated(true);
+        log.info("老配置通知渠道已补入「系统通知」状态");
     }
 
     /**
@@ -676,14 +709,6 @@ public class ConfigUtil {
 
         for (NotificationConfig notificationConfig : notificationConfigList) {
             BeanUtil.copyProperties(newNotificationConfig, notificationConfig, copyOptions);
-            // 存量配置迁移：SYSTEM（系统通知）是后加的枚举，老配置的 statusList 里没有它，
-            // 不补的话磁盘预警/追番周报会静默不发送。仅做追加，不删除用户已有选择。
-            List<NotificationStatusEnum> statusList = notificationConfig.getStatusList();
-            if (statusList != null && !statusList.contains(NotificationStatusEnum.SYSTEM)) {
-                List<NotificationStatusEnum> merged = new ArrayList<>(statusList);
-                merged.add(NotificationStatusEnum.SYSTEM);
-                notificationConfig.setStatusList(merged);
-            }
         }
     }
 

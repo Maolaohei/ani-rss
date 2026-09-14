@@ -1549,12 +1549,26 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             planByBase.computeIfAbsent(name.toLowerCase(Locale.ROOT), k -> new ArrayList<>()).add(planItem);
         }
         Map<String, String> renameMap = new LinkedHashMap<>();
+        // 记录"裸文件名 -> 已映射的文件路径"。renameMap 以裸文件名为键，
+        // 不同子目录下的同名文件会互相覆盖，覆盖后只剩一条映射，
+        // 另一个文件既不会被重命名也不会被移动，最终随临时目录被强制清理(产物丢失)。
+        // 这里用它区分"同一个文件被重复列出"(无害) 与"不同目录的同名文件"(必须显式失败)。
+        Map<String, String> mappedPathByName = new HashMap<>();
         List<OpenListFileInfo> files = scan.openListFileInfos();
         for (OpenListFileInfo file : files) {
             if (Boolean.TRUE.equals(file.getIsDir())) {
                 continue;
             }
             String fileName = file.getName();
+            String previousPath = mappedPathByName.get(fileName);
+            if (previousPath != null && !previousPath.equals(file.getPath())) {
+                // 不同目录的同名文件: 裸文件名做键无法区分, 继续下去会静默丢一个产物。
+                // 宁可显式失败(临时目录由上层保留)也不要"报成功但少文件"。
+                throw new IllegalStateException(StrUtil.format(
+                        "合集离线产物存在不同目录的同名文件, 无法确定归位目标: {} [{} / {}]",
+                        fileName, previousPath, file.getPath()));
+            }
+            mappedPathByName.put(fileName, file.getPath());
             List<Item> candidates = planByBase.get(StrUtil.nullToEmpty(fileName).toLowerCase(Locale.ROOT));
             if (candidates == null || candidates.isEmpty()) {
                 log.debug("合集离线产物不在预览计划中, 将随临时目录清理: {}", fileName);

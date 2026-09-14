@@ -213,24 +213,40 @@ const clearFilter = () => {
   emit('clear-filter')
 }
 
+// 请求序号：刷新按钮 / 编辑保存后的 $reLoadList() / 合集添加后刷新会并发触发 getList，
+// 先发的慢响应回来会覆盖新数据，并把 loading 提前置 false。
+let loadVersion = 0
+
 const getList = () => {
+  const version = ++loadVersion
   loading.value = true
   loadError.value = ''
 
   listAni()
       .then(res => {
+        if (version !== loadVersion) {
+          return
+        }
         let data = res.data
         weekList.value = data.weekList
         releaseDateList.value = data.releaseDateList
         emit('loaded', {
           releaseDateList: releaseDateList.value,
+          // 分组下拉由父层渲染，后端 ListAni.groupList 必须透传，否则筛选只有「未分组」
+          groupList: data.groupList || [],
           total: weekList.value.reduce((total, week) => total + week.items.length, 0)
         })
       })
       .catch(e => {
+        if (version !== loadVersion) {
+          return
+        }
         loadError.value = e?.message || '订阅列表加载失败，请检查服务是否可用'
       })
       .finally(() => {
+        if (version !== loadVersion) {
+          return
+        }
         loading.value = false
       })
 }
@@ -260,17 +276,22 @@ const focusAni = aniId => {
   })
 }
 
+/** 定位重试定时器：卸载时统一清理，避免在已销毁的组件上继续重试 */
+const retryTimers = new Set()
+
 /** 跨页定位（任务中心 → 订阅列表）：首次进入时列表可能尚未加载完，做有限重试 */
 const focusAniWithRetry = (aniId, attempts = 0) => {
   if (!aniId || attempts > 4) {
     return
   }
   focusAni(aniId)
-  setTimeout(() => {
+  const timer = setTimeout(() => {
+    retryTimers.delete(timer)
     if (!document.querySelector(`[data-ani-id="${aniId}"]`)) {
       focusAniWithRetry(aniId, attempts + 1)
     }
   }, 600)
+  retryTimers.add(timer)
 }
 
 const route = useRoute()
@@ -299,6 +320,12 @@ onUnmounted(() => {
   if (window.$focusAni === focusAni) {
     delete window.$focusAni
   }
+  // 对称清理：遗留的 $reLoadList 会指向已销毁实例的 getList
+  if (window.$reLoadList === getList) {
+    delete window.$reLoadList
+  }
+  retryTimers.forEach(timer => clearTimeout(timer))
+  retryTimers.clear()
   clearTimeout(highlightTimer)
 })
 

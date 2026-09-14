@@ -1,6 +1,7 @@
 package ani.rss.controller;
 
 import ani.rss.annotation.Auth;
+import ani.rss.commons.DeleteGuard;
 import ani.rss.commons.ExceptionUtils;
 import ani.rss.commons.FileUtils;
 import ani.rss.commons.GsonStatic;
@@ -57,6 +58,17 @@ public class AniController extends BaseController {
     @Resource
     private DownloadService downloadService;
 
+    /**
+     * 订阅列表已变更：落盘并让媒体库缓存失效。
+     * <p>
+     * 媒体库列表有 60 秒缓存（{@code LibraryController.CACHE_TTL_MS}），
+     * 订阅的增删改若不让缓存失效，媒体库最多 60 秒内仍会显示已删除/已改名的订阅。
+     */
+    private static void syncAniList() {
+        AniUtil.sync();
+        LibraryController.invalidate();
+    }
+
     @Auth
     @Operation(summary = "添加订阅")
     @PostMapping("/addAni")
@@ -94,7 +106,7 @@ public class AniController extends BaseController {
 
             AniUtil.getAniList().add(ani);
         }
-        AniUtil.sync();
+        syncAniList();
         Boolean enable = ani.getEnable();
         if (enable) {
             // 必须走任务管理器：才能展示运行中状态/取消/排队，避免只剩 Hash、状态空闲
@@ -204,7 +216,7 @@ public class AniController extends BaseController {
         if (!torrentDir.toString().equals(newTorrentDir.toString())) {
             FileUtil.move(torrentDir, newTorrentDir.getParentFile(), true);
         }
-        AniUtil.sync();
+        syncAniList();
 
         log.info("修改订阅 {} {} {}", ani.getTitle(), ani.getUrl(), ani.getId());
         return Result.success("修改成功");
@@ -228,7 +240,7 @@ public class AniController extends BaseController {
             }
         }
 
-        AniUtil.sync();
+        syncAniList();
         ThreadUtil.execute(() -> {
             for (Ani ani : anis) {
                 File torrentDir = TorrentUtil.getTorrentDir(ani);
@@ -254,6 +266,13 @@ public class AniController extends BaseController {
                 torrentsInfos = TorrentUtil.getTorrentsInfos();
             }
             for (File file : files) {
+                // 安全闸门：下载路径来自订阅自定义位置或全局模板，模板为空时会退化为进程工作目录
+                // (程序目录, 内含 config/、logs/)，也可能被填成 D:/ 这类根路径。
+                // 前端虽有二次确认，但直接调接口同样能触发，必须在后端兜底。
+                if (!DeleteGuard.isSafeToDeleteRecursively(file)) {
+                    log.warn("下载路径过于宽泛, 跳过删除本地文件: {}", FileUtils.getAbsolutePath(file));
+                    continue;
+                }
                 String path = FileUtils.getAbsolutePath(file);
                 for (TorrentsInfo torrentsInfo : torrentsInfos) {
                     String downloadDir = torrentsInfo.getDownloadDir();
@@ -402,7 +421,7 @@ public class AniController extends BaseController {
                     count++;
                 }
             }
-            AniUtil.sync();
+            syncAniList();
             log.info("手动更新总集数完成 共更新{}条订阅", count);
         });
         return Result.success("已开始更新总集数");
@@ -422,7 +441,7 @@ public class AniController extends BaseController {
             ani.setEnable(value);
             EventWebhookUtil.emit(EventTypeEnum.SUBSCRIPTION_ENABLED_CHANGED, ani, Map.of("enable", value));
         }
-        AniUtil.sync();
+        syncAniList();
         return Result.success("修改完成");
     }
 
@@ -445,7 +464,7 @@ public class AniController extends BaseController {
         if (count == 0) {
             return Result.error("未找到可修改的订阅");
         }
-        AniUtil.sync();
+        syncAniList();
         return Result.success(normalized == null
                 ? StrUtil.format("已将 {} 个订阅移出分组", count)
                 : StrUtil.format("已将 {} 个订阅设为分组「{}」", count, normalized));
@@ -586,7 +605,7 @@ public class AniController extends BaseController {
             Ani target = live.orElse(ani);
             SubscriptionHealth.rememberOmit(target, omitList == null ? 0 : omitList.size(), System.currentTimeMillis());
             if (live.isPresent()) {
-                AniUtil.sync();
+                syncAniList();
             }
         } catch (Exception e) {
             log.debug("回写漏集缓存失败: {}", e.getMessage());
@@ -758,7 +777,7 @@ public class AniController extends BaseController {
             BeanUtil.copyProperties(ani, first.get(), ignoreProperties);
         }
 
-        AniUtil.sync();
+        syncAniList();
         return Result.success("导入成功");
     }
 

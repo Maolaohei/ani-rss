@@ -13,7 +13,7 @@
   <div class="notification-container">
     <div>
       <el-space wrap class="flex flex-wrap gap-4" size="small">
-        <el-card v-for="it in props.config['notificationConfigList']" shadow="never" class="notification-card"
+        <el-card v-for="(it, index) in props.config['notificationConfigList']" :key="`${it.notificationType}-${index}`" shadow="never" class="notification-card"
                  :class="{'is-disabled': !it.enable}">
           <div class="flex notification-card-content">
             <div class="notification-card-main">

@@ -1,6 +1,7 @@
 package ani.rss.controller;
 
 import ani.rss.annotation.Auth;
+import ani.rss.auth.ViewerPolicy;
 import ani.rss.commons.ExceptionUtils;
 import ani.rss.commons.FileUtils;
 import ani.rss.commons.MavenUtils;
@@ -90,6 +91,13 @@ public class ConfigController extends BaseController {
         String buildInfo = buildInfo();
         Config config = ObjectUtil.clone(ConfigUtil.CONFIG);
         config.getLogin().setPassword("");
+        // 只读令牌脱敏：/config 在只读白名单内(前端启动依赖它读取展示类配置)，
+        // 但响应里带着 apiKey 等管理凭据。若不抹掉，只读者可拿 apiKey 去调 /setConfig 完成提权。
+        // 脱敏按字段名匹配，后续新增 xxxToken 之类字段会自动被覆盖，不会漏。
+        if (ViewerPolicy.isViewerRequest(Global.REQUEST.get())) {
+            ViewerPolicy.sanitizeCredentials(config);
+            config.getLogin().setKey("");
+        }
         config.setVersion(version)
                 .setBuildInfo(buildInfo)
                 .setVerifyExpirationTime(AfdianUtil.verifyExpirationTime());

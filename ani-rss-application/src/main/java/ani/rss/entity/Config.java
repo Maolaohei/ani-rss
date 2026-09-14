@@ -697,6 +697,16 @@ public class Config implements Serializable {
     private List<NotificationConfig> notificationConfigList;
 
     /**
+     * 迁移标记：SYSTEM（系统通知）是否已补入通知渠道的 statusList。
+     * <p>
+     * 老配置的 statusList 里没有 SYSTEM，需要补一次；但补全不能每次保存都做，
+     * 否则用户取消勾选「系统通知」后会被静默加回。用该标记区分
+     * 「尚未迁移」与「用户主动取消」，只在启动时按标记补一次。
+     */
+    @Schema(description = "系统通知迁移标记", hidden = true)
+    private Boolean notificationSystemMigrated;
+
+    /**
      * 添加订阅时自动复制主rss至备用rss
      */
     @Schema(description = "添加订阅时复制主RSS至备用")

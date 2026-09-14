@@ -617,6 +617,26 @@ public class AniUtil {
     }
 
     /**
+     * 校验「合集关联订阅」的安全字段。
+     * <p>
+     * 合集订阅没有 RSS 地址，因此不能直接复用 {@link #verify(Ani)}（它会断言 url 非空）。
+     * 但下面两点必须校验：
+     * <ul>
+     *   <li>标题会拼入种子缓存目录与下载路径，含 {@code ..} / {@code /} / {@code \} 会导致路径越界；</li>
+     *   <li>{@code season} 会在 getDownloadPath 里被拆箱成 {@code int}，为 null 时 NPE，
+     *       而该异常常被上层 catch 吞成 debug 日志，订阅会静默失效。</li>
+     * </ul>
+     */
+    public static void verifyCollectionAni(Ani ani) {
+        Assert.notNull(ani, "订阅不能为空");
+        String title = ani.getTitle();
+        Assert.notBlank(title, "标题不能为空");
+        Assert.isFalse(title.contains(".."), "标题不能包含 \"..\"");
+        Assert.isFalse(title.contains("/") || title.contains("\\"), "标题不能包含 / 或 \\");
+        Assert.notNull(ani.getSeason(), "季不能为空");
+    }
+
+    /**
      * 将「添加合集」关联的番剧(Ani)加入订阅列表。
      * <p>
      * 合集依赖手动上传的种子，没有 RSS 地址，因此只入列、不启用轮询(enable=false)；
@@ -626,6 +646,17 @@ public class AniUtil {
         if (ani == null || StrUtil.isBlank(ani.getTitle())) {
             return;
         }
+        try {
+            verifyCollectionAni(ani);
+        } catch (IllegalArgumentException e) {
+            // 走到这里合集下载已经开始了, 不能因为"入列"失败就把整个请求判失败; 记录后跳过入列
+            log.warn("合集关联订阅字段不安全, 跳过加入订阅列表: {} ({})", ani.getTitle(), e.getMessage());
+            return;
+        }
+        // 封面补齐必须放在锁外：saveCover 会发起网络请求，封面 URL 不可达时会一直阻塞到
+        // HttpReq 超时，期间所有"添加/删除订阅"都在 SUBSCRIPTION_LOCK 上排队。
+        // saveCover 内部按 URL 的 md5 做了文件缓存，重复 URL 不会二次下载。
+        String cover = saveCover(ani.getImage());
         synchronized (SUBSCRIPTION_LOCK) {
             boolean exists = ANI_LIST.stream()
                     .anyMatch(it -> ObjectUtil.equals(it.getTitle(), ani.getTitle())
@@ -648,6 +679,10 @@ public class AniUtil {
             if (ani.getExclude() == null) {
                 ani.setExclude(new ArrayList<>());
             }
+            if (ani.getOffset() == null) {
+                // getDownloadPath / 集数计算会拆箱使用, 不能留 null
+                ani.setOffset(0);
+            }
             if (ani.getStandbyRssList() == null) {
                 ani.setStandbyRssList(new ArrayList<>());
             }
@@ -657,8 +692,8 @@ public class AniUtil {
             if (ani.getNotDownload() == null) {
                 ani.setNotDownload(new ArrayList<>());
             }
-            // 封面补齐(空 image 走默认封面, 不发起网络请求)
-            ani.setCover(saveCover(ani.getImage()));
+            // 封面已在锁外补齐(空 image 走默认封面, 不发起网络请求)
+            ani.setCover(cover);
             ANI_LIST.add(ani);
             sync();
         }

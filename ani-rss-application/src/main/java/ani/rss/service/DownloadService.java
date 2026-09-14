@@ -98,6 +98,14 @@ public class DownloadService {
         int omitN = omitGaps == null ? 0 : omitGaps.size();
         Integer prevOmit = ani.getOmitCount();
         boolean omitChanged = prevOmit == null || prevOmit != omitN;
+        // 结构化事件: 漏集数量发生变化且确实存在漏集时推送一次。
+        // 加 omitChanged 是为了避免每轮 RSS 扫描都重复推送同一批漏集。
+        if (omitN > 0 && omitChanged) {
+            Map<String, Object> omitEvent = new LinkedHashMap<>();
+            omitEvent.put("omitCount", omitN);
+            omitEvent.put("omitList", omitGaps);
+            EventWebhookUtil.emit(EventTypeEnum.OMIT_DETECTED, ani, omitEvent);
+        }
         SubscriptionHealth.rememberOmit(ani, omitN, System.currentTimeMillis());
         ItemsUtil.omit(ani, items);
         log.debug("{} 共 {} 个", title, items.size());
@@ -156,6 +164,11 @@ public class DownloadService {
             // .5 集
             boolean is5 = ItemsUtil.is5(episode);
 
+            // 「备用RSS占位」待清除任务：只在这里登记, 真正的删除推迟到确认要下载之前。
+            // 若在上面任一闸门(新种子等待/同时下载数/离线进行中/失败队列)就 continue,
+            // 占位文件会被白删 —— 该集在等待窗口内既无占位文件也没有主RSS文件。
+            TorrentsInfo pendingStandbyPlaceholder = null;
+
             // 已经下载过
             if (torrent.exists()) {
                 // v2: 检查版本号，高版本覆盖低版本（洗版）
@@ -209,9 +222,12 @@ public class DownloadService {
                         recordValid = itemDownloaded(ani, item, true, localEpisodeIndex);
                     }
                     if (recordValid) {
-                        // 主RSS记录被"备用RSS占位"证据命中: 清除占位后按未下载处理, 实现主RSS替换。
-                        // 否则备用RSS先下载过的集会被"种子记录已存在/本地文件已存在"永久锁死。
-                        if (removeStandbyPlaceholder(ani, item, torrentsInfos, localEpisodeIndex)) {
+                        // 主RSS记录被"备用RSS占位"证据命中: 登记待清除, 按未下载继续走流程,
+                        // 实现主RSS替换。否则备用RSS先下载过的集会被"种子记录已存在/本地文件已存在"永久锁死。
+                        // 注意这里只登记不删除(见 pendingStandbyPlaceholder 声明处)。
+                        TorrentsInfo standbyPlaceholder = findRemovableStandbyPlaceholder(ani, item, torrentsInfos);
+                        if (standbyPlaceholder != null) {
+                            pendingStandbyPlaceholder = standbyPlaceholder;
                             // fall through 继续正常下载流程(主RSS自己的种子记录保留, 下载时幂等重写)
                         } else {
                             log.debug("种子记录已存在 {}", reName);
@@ -381,9 +397,12 @@ public class DownloadService {
             // 未开启rename不进行检测; 洗版(高版本)不受本地已下载判断拦截
             boolean washing = v2 && item.getVersion() != null && item.getVersion() > 1;
             if (!washing && itemDownloaded(ani, item, true, localEpisodeIndex)) {
-                // 主RSS更新时该集被"备用RSS占位": 删除备用任务与文件, 由主RSS替换(洗版)
-                if (removeStandbyPlaceholder(ani, item, torrentsInfos, localEpisodeIndex)) {
-                    log.info("备用RSS占位已清除, 由主RSS替换下载 {}", reName);
+                // 主RSS更新时该集被"备用RSS占位": 登记待清除, 由主RSS替换(洗版)。
+                // 同样只登记不删除, 见 pendingStandbyPlaceholder 声明处。
+                TorrentsInfo standbyPlaceholder = findRemovableStandbyPlaceholder(ani, item, torrentsInfos);
+                if (standbyPlaceholder != null) {
+                    pendingStandbyPlaceholder = standbyPlaceholder;
+                    log.info("备用RSS占位待清除, 由主RSS替换下载 {}", reName);
                 } else {
                     log.info("本地文件已存在 {}", reName);
                     if (master && !is5) {
@@ -432,6 +451,12 @@ public class DownloadService {
                 continue;
             }
 
+            // 到这里才真正要下载了, 此时清除「备用RSS占位」才是安全的:
+            // 上面任一闸门 continue 都不会走到这里, 占位文件得以保留。
+            if (pendingStandbyPlaceholder != null) {
+                removeStandbyPlaceholderTorrent(ani, item, torrentsInfos, localEpisodeIndex, pendingStandbyPlaceholder);
+            }
+
             deleteStandbyRss(ani, item);
 
             if (!AniUtil.getAniList().contains(ani)) {
@@ -439,6 +464,17 @@ public class DownloadService {
             }
 
             sync = true;
+
+            // 结构化事件: 开始下载(与 DOWNLOAD_END 成对, 便于外部程序对账)
+            Map<String, Object> startEvent = new LinkedHashMap<>();
+            startEvent.put("reName", reName);
+            startEvent.put("infoHash", hash);
+            startEvent.put("episode", episode);
+            startEvent.put("size", item.getLength());
+            startEvent.put("source", config.getDownloadToolType());
+            startEvent.put("subgroup", item.getSubgroup());
+            startEvent.put("master", master);
+            EventWebhookUtil.emit(EventTypeEnum.DOWNLOAD_START, ani, startEvent);
 
             download(ani, item, savePath, saveTorrent);
 
@@ -525,25 +561,44 @@ public class DownloadService {
     }
 
     /**
-     * 主RSS更新时清除「备用RSS占位」: 删除备用任务与其文件, 让主RSS版本替换(洗版)。
+     * 检测是否存在「可清除的备用RSS占位」——<b>只检测, 不删除</b>。
      * <p>
-     * 修复: 备用RSS先下载某集后, 主RSS出种会被 itemDownloaded 的"本地文件已存在/
-     * 已存在下载任务"判定(按集数/重命名匹配, 不区分来源)永久拦截,
-     * 而负责替换的 deleteStandbyRss 在该判定之后才执行, 替换永远无法发生。
+     * 与 {@link #removeStandbyPlaceholderTorrent} 拆开是因为删除时机很关键：
+     * 调用方在"判定为占位"后还要经过新种子等待/同时下载数/离线进行中/失败队列等闸门,
+     * 任何一条 continue 都不该把占位文件删掉(否则该集在等待窗口内既无占位文件也无主RSS文件)。
      *
-     * @return 是否成功清除; false 时调用方保持原"本地文件已存在"跳过行为
+     * @return 可清除的占位任务; {@code null} 表示不存在或尚不可清除
      */
-    boolean removeStandbyPlaceholder(Ani ani, Item item,
-                                     List<TorrentsInfo> torrentsInfos,
-                                     Set<String> localEpisodeIndex) {
+    TorrentsInfo findRemovableStandbyPlaceholder(Ani ani, Item item,
+                                                 List<TorrentsInfo> torrentsInfos) {
         TorrentsInfo standbyTorrent = findStandbyPlaceholderTorrent(ani, item, torrentsInfos).orElse(null);
         if (standbyTorrent == null) {
-            return false;
+            return null;
         }
         List<String> tags = standbyTorrent.getTags();
         if (tags == null || !tags.contains(TorrentsTags.RENAME.getValue())) {
             // 备用任务未完成重命名(可能仍在下载/尚未就绪), 等待下轮
             log.debug("备用RSS占位未完成重命名, 等待下轮 {}", standbyTorrent.getName());
+            return null;
+        }
+        return standbyTorrent;
+    }
+
+    /**
+     * 实际清除「备用RSS占位」: 删除备用任务与其文件, 让主RSS版本替换(洗版)。
+     * <p>
+     * 修复: 备用RSS先下载某集后, 主RSS出种会被 itemDownloaded 的"本地文件已存在/
+     * 已存在下载任务"判定(按集数/重命名匹配, 不区分来源)永久拦截,
+     * 而负责替换的 deleteStandbyRss 在该判定之后才执行, 替换永远无法发生。
+     *
+     * @param standbyTorrent {@link #findRemovableStandbyPlaceholder} 的结果
+     * @return 是否成功清除
+     */
+    boolean removeStandbyPlaceholderTorrent(Ani ani, Item item,
+                                            List<TorrentsInfo> torrentsInfos,
+                                            Set<String> localEpisodeIndex,
+                                            TorrentsInfo standbyTorrent) {
+        if (standbyTorrent == null) {
             return false;
         }
         // 非强制删除: 保持"任务已完成才允许删"的安全语义; 删除文件以实现替换
@@ -555,6 +610,18 @@ public class DownloadService {
         stripLocalEpisodeIndex(localEpisodeIndex, ani, item);
         log.info("主RSS更新, 已删除备用RSS占位任务与文件, 由主RSS替换 {}", item.getReName());
         return true;
+    }
+
+    /**
+     * 检测并立即清除「备用RSS占位」。
+     *
+     * @return 是否成功清除; false 时调用方保持原"本地文件已存在"跳过行为
+     */
+    boolean removeStandbyPlaceholder(Ani ani, Item item,
+                                     List<TorrentsInfo> torrentsInfos,
+                                     Set<String> localEpisodeIndex) {
+        return removeStandbyPlaceholderTorrent(ani, item, torrentsInfos, localEpisodeIndex,
+                findRemovableStandbyPlaceholder(ani, item, torrentsInfos));
     }
 
     /**

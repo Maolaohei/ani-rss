@@ -79,7 +79,7 @@
             <template #footer>
               <div class="flex torrents-footer">
                 <div>
-                  <el-tag v-for="tag in torrentsInfo['tagList']" class="torrents-tag-spacer" type="info">
+                  <el-tag v-for="tag in torrentsInfo['tagList']" :key="tag" class="torrents-tag-spacer" type="info">
                     {{ tag }}
                   </el-tag>
                 </div>
@@ -102,6 +102,7 @@
 <script setup>
 import {computed, onActivated, onDeactivated, onUnmounted, ref, watch} from "vue";
 import {useRoute} from "vue-router";
+import {useLocalStorage} from "@vueuse/core";
 import * as http from "@/js/http.js";
 import {ArrowDown, Check, Sort, SortDown, SortUp} from "@element-plus/icons-vue";
 import {formatSize} from "@/js/format.js";
@@ -118,23 +119,31 @@ const route = useRoute()
 
 const TAB_STORE_KEY = 'task-center-tab'
 const queryTab = route.query.tab === 'pipeline' || route.query.tab === 'downloader' ? route.query.tab : null
-const rememberedTab = localStorage.getItem(TAB_STORE_KEY)
-const viewTab = ref(queryTab || rememberedTab || 'downloader')
+// 用 useLocalStorage 而不是裸 localStorage：隐私模式/禁用存储时 getItem 会抛 SecurityError，
+// 而这段代码在 setup 顶层执行，一抛就是整页空白。useLocalStorage 内部已做降级。
+const rememberedTab = useLocalStorage(TAB_STORE_KEY, '')
+const viewTab = ref(queryTab || rememberedTab.value || 'downloader')
 
 const subtitle = computed(() => viewTab.value === 'pipeline'
     ? '追番流水线 · RSS 调度 / 离线等待 / 失败队列 / 残留运维'
     : `下载器任务 共 ${torrentsInfos.value.length} 个`)
 
+/** 组件是否已销毁：异步回调返回时用它跳过对已卸载组件的赋值（赋值会间接触发轮询开关） */
+let destroyed = false
+
 // 无显式跳转、无历史记忆时，OpenList 用户默认看流水线
 http.config().then(res => {
-  if (!queryTab && !rememberedTab && res?.data?.downloadToolType === 'OpenList') {
+  if (destroyed) {
+    return
+  }
+  if (!queryTab && !rememberedTab.value && res?.data?.downloadToolType === 'OpenList') {
     viewTab.value = 'pipeline'
   }
 }).catch(() => {
 })
 
 watch(viewTab, value => {
-  localStorage.setItem(TAB_STORE_KEY, value)
+  rememberedTab.value = value
   value === 'downloader' ? resumePolling() : pausePolling()
 })
 
@@ -258,7 +267,10 @@ onActivated(() => {
   }
 })
 onDeactivated(pausePolling)
-onUnmounted(pausePolling)
+onUnmounted(() => {
+  destroyed = true
+  pausePolling()
+})
 </script>
 
 <style scoped>

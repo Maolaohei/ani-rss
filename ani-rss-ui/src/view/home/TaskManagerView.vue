@@ -252,7 +252,7 @@
 </template>
 
 <script setup>
-import {computed, onMounted, onUnmounted, ref} from "vue";
+import {computed, onActivated, onDeactivated, onMounted, onUnmounted, ref} from "vue";
 import {useRouter} from "vue-router";
 import {useIntervalFn} from "@vueuse/core";
 import {ElMessage, ElMessageBox} from "element-plus";
@@ -599,6 +599,11 @@ const applyResponseStatus = (seq, data) => {
 }
 
 const show = () => {
+  // 本页被 <KeepAlive> 缓存，离开再回来是「复用」而不是重新挂载：
+  // 必须先把上一轮轮询停掉并复位 disposed，否则 pollStatus 的 while 会因为
+  // disposed=true 立刻退出，页面看起来"打开但一直不刷新"。
+  disposed = false
+  pollToken++
   statusError.value = ''
   pollStatus()
   // 先取一次真实状态再决定是否加载失败明细：
@@ -608,6 +613,12 @@ const show = () => {
       loadFailedQueue()
     }
   })
+}
+
+/** 停止轮询：递增 token 让在途的 pollStatus 循环下一轮退出 */
+const stopPolling = () => {
+  disposed = true
+  pollToken++
 }
 
 /** 状态不可用时常驻告警里的“数据已过期”说明（tick 每秒推进以刷新秒数） */
@@ -916,10 +927,11 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 onMounted(show)
 
-onUnmounted(() => {
-  disposed = true
-  pollToken++
-})
+// <KeepAlive> 下离开路由只触发 deactivated、不会 unmounted，
+// 只挂 onUnmounted 会让 2–4 秒一次的轮询常驻后台。
+onActivated(show)
+onDeactivated(stopPolling)
+onUnmounted(stopPolling)
 </script>
 
 <style scoped>

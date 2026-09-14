@@ -117,10 +117,30 @@ const releaseDate = ref('')
 const releaseDateList = ref([])
 const subscriptionTotal = ref(0)
 const refreshLoading = ref(false)
-const enable = useLocalStorage('select-enable', '已启用')
+const enablePref = useLocalStorage('select-enable', '已启用')
+// 「只看已启用」是用户偏好，应当记住；但"定位跳转时清筛选"(onClearFilter) 只是一次性动作，
+// 不该把偏好改写成「全部」——否则用户下次打开订阅页看到的会是全部订阅。
+// 所以另开一个仅本次会话生效的覆盖值：只有用户自己在下拉里选才会持久化。
+const enableSession = ref(null)
+const enable = computed({
+  get: () => enableSession.value ?? enablePref.value,
+  set: value => {
+    enableSession.value = null
+    enablePref.value = value
+  }
+})
 /** 分组筛选："未分组" 用一个不会与真实分组名冲突的哨兵值 */
 const UNGROUPED = '__ungrouped__'
-const group = useLocalStorage('select-group', '')
+const groupPref = useLocalStorage('select-group', '')
+// 与 enable 同理：清筛选不该把用户选过的分组偏好持久化成「全部」
+const groupSession = ref(null)
+const group = computed({
+  get: () => groupSession.value ?? groupPref.value,
+  set: value => {
+    groupSession.value = null
+    groupPref.value = value
+  }
+})
 const groupList = ref([])
 const enableSelect = [
   {
@@ -176,9 +196,10 @@ const listLoaded = data => {
 
 const onClearFilter = () => {
   title.value = ''
-  enable.value = '全部'
+  // 只改本次会话的覆盖值, 不动持久化的偏好(见 enable 的 computed 定义)
+  enableSession.value = '全部'
   releaseDate.value = ''
-  group.value = ''
+  groupSession.value = ''
   selectChange()
 }
 

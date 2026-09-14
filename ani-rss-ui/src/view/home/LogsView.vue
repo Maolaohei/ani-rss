@@ -219,6 +219,22 @@ const downloadLogs = async () => {
       method: 'GET',
       headers: authorization.value ? {Authorization: authorization.value} : {}
     })
+    // 鉴权失败/服务异常时后端返回的是 200 + JSON 错误体（CustomExceptionHandler 没设 @ResponseStatus），
+    // 只看 res.ok 会为 true，于是把这段 JSON 存成 ani-rss-logs-*.zip。先按内容类型识别。
+    const contentType = res.headers.get('content-type') || ''
+    if (contentType.includes('application/json')) {
+      let message = `下载日志失败（HTTP ${res.status}）`
+      try {
+        const body = await res.json()
+        if (body?.message) {
+          message = body.message
+        }
+      } catch (_) {
+        // 解析失败就用默认文案
+      }
+      ElMessage.error(message)
+      return
+    }
     if (!res.ok) {
       ElMessage.error(`下载日志失败（HTTP ${res.status}）`)
       return

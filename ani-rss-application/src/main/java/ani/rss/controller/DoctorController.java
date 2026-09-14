@@ -246,14 +246,17 @@ public class DoctorController extends BaseController {
             return timed(DoctorCheck.warn(key, label, "未配置 Mikan Host", "在「基本设置」中填写 Mikan Host"), start);
         }
         try {
-            HttpResponse response = HttpReq.get(host, PROBE_TIMEOUT_MS).execute();
-            int status = response.getStatus();
-            if (status >= 200 && status < 400) {
-                return timed(DoctorCheck.ok(key, label, StrUtil.format("{} 返回 HTTP {}", host, status)), start);
+            // try-with-resources 关闭连接：本方法只看状态码不读 body，
+            // 不关闭会泄漏连接(该端点在只读白名单内, 可被反复调用)。
+            try (HttpResponse response = HttpReq.get(host, PROBE_TIMEOUT_MS).execute()) {
+                int status = response.getStatus();
+                if (status >= 200 && status < 400) {
+                    return timed(DoctorCheck.ok(key, label, StrUtil.format("{} 返回 HTTP {}", host, status)), start);
+                }
+                return timed(DoctorCheck.fail(key, label,
+                        StrUtil.format("{} 返回 HTTP {}", host, status),
+                        "可能是 Cloudflare 拦截或站点改版，尝试配置代理"), start);
             }
-            return timed(DoctorCheck.fail(key, label,
-                    StrUtil.format("{} 返回 HTTP {}", host, status),
-                    "可能是 Cloudflare 拦截或站点改版，尝试配置代理"), start);
         } catch (Exception e) {
             return timed(DoctorCheck.fail(key, label,
                     "无法访问 " + host + ": " + ExceptionUtils.getMessage(e),

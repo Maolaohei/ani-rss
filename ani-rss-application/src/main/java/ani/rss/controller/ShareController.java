@@ -17,6 +17,9 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -24,6 +27,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.zip.GZIPInputStream;
 
 /**
  * 订阅分享 / 一键导入。
@@ -41,6 +45,14 @@ public class ShareController extends BaseController {
      * 分享码载荷上限（解码后字节），防止超大 payload 打爆内存
      */
     private static final int MAX_PAYLOAD_BYTES = 2 * 1024 * 1024;
+
+    /**
+     * 分享码字符串长度上限（Base64 字符数）。
+     * <p>
+     * 在 Base64 解码<b>之前</b>拦截：否则一个几百 MB 的请求体光是解码就会先吃掉大量堆。
+     * 正常分享码只有几 KB，4M 字符留了足够余量。
+     */
+    private static final int MAX_CODE_LENGTH = 4 * 1024 * 1024;
 
     /**
      * 单次分享的订阅数上限
@@ -212,19 +224,41 @@ public class ShareController extends BaseController {
     }
 
     static List<Ani> decode(String code) {
+        if (StrUtil.isBlank(code) || code.length() > MAX_CODE_LENGTH) {
+            throw new IllegalArgumentException("分享码不是合法的 Base64");
+        }
         byte[] gzipped = Base64.decode(code);
         if (gzipped == null) {
             throw new IllegalArgumentException("分享码不是合法的 Base64");
         }
-        byte[] raw = ZipUtil.unGzip(gzipped);
-        if (raw == null) {
-            throw new IllegalArgumentException("分享码不是合法的压缩数据");
-        }
-        if (raw.length > MAX_PAYLOAD_BYTES) {
-            throw new IllegalArgumentException("分享码内容过大");
-        }
+        // 流式解压并边读边限长。不能先 ZipUtil.unGzip 再校验长度：
+        // 那是一次性把整个结果读进内存，gzip 压缩比可达千倍，几 MB 分享码就能展开成 GB 级
+        // 数组把堆打爆，事后再判 raw.length 已经太晚。
+        byte[] raw = ungzipLimited(gzipped, MAX_PAYLOAD_BYTES);
         List<Ani> list = GsonStatic.fromJsonList(new String(raw, StandardCharsets.UTF_8), Ani.class);
         return list == null ? new ArrayList<>() : list;
+    }
+
+    /**
+     * 流式解压 gzip，累计输出超过上限立即中止（防 zip bomb）。
+     */
+    private static byte[] ungzipLimited(byte[] gzipped, int maxBytes) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream(Math.min(maxBytes, 8192));
+        byte[] buffer = new byte[8192];
+        try (GZIPInputStream in = new GZIPInputStream(new ByteArrayInputStream(gzipped))) {
+            int len;
+            while ((len = in.read(buffer)) != -1) {
+                if (out.size() + len > maxBytes) {
+                    throw new IllegalArgumentException("分享码内容过大");
+                }
+                out.write(buffer, 0, len);
+            }
+        } catch (IllegalArgumentException e) {
+            throw e;
+        } catch (IOException e) {
+            throw new IllegalArgumentException("分享码不是合法的压缩数据");
+        }
+        return out.toByteArray();
     }
 
     /**

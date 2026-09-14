@@ -939,7 +939,10 @@ public class ItemsUtil {
         List<Item> result = new ArrayList<>();
 
         // 2. 每集内部分为合集源和单集源，优先合集
-        boolean preferCollection = profile == null || profile.preferCollectionOrDefault();
+        // 质量规则整体关闭时(preferCollection 的宿主是 QualityProfile)必须视同"没有 profile"，
+        // 否则用户先关掉「优先合集包」再关掉质量规则，去重仍会按已配置的 preferCollection 跑，
+        // 与 QualityProfile "enable=false 行为零变化" 的自述矛盾。
+        boolean preferCollection = profile == null || !profile.enabled() || profile.preferCollectionOrDefault();
         for (Map.Entry<Double, List<Item>> entry : grouped.entrySet()) {
             List<Item> episodeItems = entry.getValue();
 

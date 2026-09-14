@@ -4,7 +4,7 @@
     <div v-loading="listLoading" v-if="list.length || listLoading">
       <el-scrollbar style="height: 500px;">
         <div class="grid-container">
-          <div v-for="it in list">
+          <div v-for="it in list" :key="it.filename">
             <el-card shadow="never" :class="{'is-current': isCurrentEpisode(it)}">
               <div class="grid-item">
                 <div>

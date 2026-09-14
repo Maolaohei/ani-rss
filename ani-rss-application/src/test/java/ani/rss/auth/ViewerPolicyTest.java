@@ -1,5 +1,6 @@
 package ani.rss.auth;
 
+import ani.rss.entity.Config;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -56,5 +57,77 @@ class ViewerPolicyTest {
     void rejects_blank_uri() {
         assertFalse(ViewerPolicy.isReadOnlyAllowed(null));
         assertFalse(ViewerPolicy.isReadOnlyAllowed(""));
+    }
+
+    @Test
+    void isViewerRequest_is_false_without_request() {
+        assertFalse(ViewerPolicy.isViewerRequest(null));
+    }
+
+    /**
+     * 只读令牌能读到 /config，所以响应必须脱敏，否则可拿 apiKey 提权。
+     * <p>
+     * 这里<b>硬编码</b>字段清单而不是复用实现里的正则：实现改成硬编码名单时漏掉字段，本测试要能红。
+     */
+    @Test
+    void sanitizeCredentials_blanks_every_credential_field() {
+        Config config = new Config();
+        config.setTmdbApiKey("tmdb-key");
+        config.setDownloadToolPassword("qb-pass");
+        config.setProxyPassword("proxy-pass");
+        config.setBgmToken("bgm-token");
+        config.setBgmAppSecret("bgm-secret");
+        config.setBgmRefreshToken("bgm-refresh");
+        config.setApiKey("ADMIN-API-KEY");
+        config.setGithubToken("gh-token");
+        config.setAssrtToken("assrt-token");
+        config.setViewerApiKey("viewer-key");
+
+        ViewerPolicy.sanitizeCredentials(config);
+
+        assertAll(
+                () -> assertEquals("", config.getTmdbApiKey()),
+                () -> assertEquals("", config.getDownloadToolPassword()),
+                () -> assertEquals("", config.getProxyPassword()),
+                () -> assertEquals("", config.getBgmToken()),
+                () -> assertEquals("", config.getBgmAppSecret()),
+                () -> assertEquals("", config.getBgmRefreshToken()),
+                // 提权的关键：管理令牌绝不能出现在只读响应里
+                () -> assertEquals("", config.getApiKey()),
+                () -> assertEquals("", config.getGithubToken()),
+                () -> assertEquals("", config.getAssrtToken()),
+                () -> assertEquals("", config.getViewerApiKey())
+        );
+    }
+
+    /**
+     * 脱敏只应作用于凭据字段，不能误伤展示类配置（否则只读用户的前端会拿不到下载目录模板等）。
+     */
+    @Test
+    void sanitizeCredentials_keeps_non_credential_fields() {
+        Config config = new Config();
+        config.setMikanHost("https://mikanani.me");
+        config.setDownloadToolHost("http://127.0.0.1:8080");
+        config.setDownloadToolUsername("admin");
+        config.setDownloadPathTemplate("/media/番剧");
+        config.setTmdbApi("tmdb-api-host");
+        // 名字含 "key" 但是集合，不是凭据
+        config.setPriorityKeywords(java.util.List.of("简繁", "1080p"));
+
+        ViewerPolicy.sanitizeCredentials(config);
+
+        assertAll(
+                () -> assertEquals("https://mikanani.me", config.getMikanHost()),
+                () -> assertEquals("http://127.0.0.1:8080", config.getDownloadToolHost()),
+                () -> assertEquals("admin", config.getDownloadToolUsername()),
+                () -> assertEquals("/media/番剧", config.getDownloadPathTemplate()),
+                () -> assertEquals("tmdb-api-host", config.getTmdbApi()),
+                () -> assertEquals(java.util.List.of("简繁", "1080p"), config.getPriorityKeywords())
+        );
+    }
+
+    @Test
+    void sanitizeCredentials_tolerates_null() {
+        assertDoesNotThrow(() -> ViewerPolicy.sanitizeCredentials(null));
     }
 }
