@@ -767,6 +767,20 @@ public class ItemsUtil {
             int partEp = RenameUtil.extractPartEpisode(title);
 
             if (range != null && !range.isEmpty()) {
+                // 总集数为 1: 实为单集, 不得标记 episodeRange —— 下游一律以
+                // 「episodeRange 非空」判定合集(合集临时目录/缺集校验/合集优先去重/预览折叠),
+                // 标记后会把「只有 1 集」的条目错误当成合集处理。
+                if (range.size() == 1) {
+                    Item clone = cloneItem(item);
+                    double newEp = range.get(0) + offset;
+                    clone.setEpisode(newEp);
+                    String rn = clone.getReName();
+                    if (rn != null) {
+                        clone.setReName(updateEpisodeInReName(rn, newEp, ani));
+                    }
+                    expanded.add(clone);
+                    continue;
+                }
                 // 范围种子: 01-06 → [1,2,3,4,5,6]
                 // 偏移后的完整范围（含 offset）
                 List<Double> shiftedRange = range.stream()
@@ -789,6 +803,18 @@ public class ItemsUtil {
             }
 
             if (list != null && !list.isEmpty()) {
+                // 总集数为 1: 同 range 分支, 按单集处理而非合集
+                if (list.size() == 1) {
+                    Item clone = cloneItem(item);
+                    double newEp = list.get(0) + offset;
+                    clone.setEpisode(newEp);
+                    String rn = clone.getReName();
+                    if (rn != null) {
+                        clone.setReName(updateEpisodeInReName(rn, newEp, ani));
+                    }
+                    expanded.add(clone);
+                    continue;
+                }
                 // 列表种子: 01,02,03 → [1,2,3]
                 List<Double> shiftedList = list.stream()
                         .map(ep -> ep + offset).collect(Collectors.toList());

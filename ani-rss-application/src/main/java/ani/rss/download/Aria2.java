@@ -275,11 +275,13 @@ public class Aria2 implements BaseDownload {
             return false;
         }
 
-        // 统计视频文件数量，判断是否为多文件合集
-        long videoCount = files.stream()
-                .filter(f -> FileUtils.isVideoFormat(FileUtil.extName(f.getName())))
-                .count();
-        boolean isMultiFile = videoCount > 1;
+        // 多集判定以「可识别的不同集数」为准（BaseDownload#isMultiEpisode），而非视频文件数量：
+        // 单集种子常附带 NCOP/PV/菜单等视频文件，按文件数判断会把只有 1 集的条目误当合集
+        List<String> videoNames = files.stream()
+                .map(File::getName)
+                .filter(name -> FileUtils.isVideoFormat(FileUtil.extName(name)))
+                .toList();
+        boolean isMultiFile = isMultiEpisode(videoNames);
 
         int attempted = 0;
         int failed = 0;

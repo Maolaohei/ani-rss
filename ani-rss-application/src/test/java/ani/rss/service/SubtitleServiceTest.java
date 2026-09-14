@@ -1,5 +1,6 @@
 package ani.rss.service;
 
+import ani.rss.service.subtitle.SubtitleCandidate;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -118,5 +119,42 @@ class SubtitleServiceTest {
     void auto_fetch_is_off_by_default() {
         // 未显式开启时不应触发任何在线抓取
         assertFalse(service.isAutoFetchEnabled());
+    }
+
+    @Test
+    void attach_keeps_multi_level_language_tag() throws Exception {
+        File video = video("番剧A S01E03.mkv");
+        File subtitle = service.attachSubtitle(video, "content", "ass", "chs&eng.simplified");
+        assertEquals("番剧A S01E03.chs&eng.simplified.ass", subtitle.getName());
+    }
+
+    @Test
+    void attach_sanitizes_language_tag_path_payload() throws Exception {
+        File video = video("Show S01E01.mkv");
+        File subtitle = service.attachSubtitle(video, "content", "ass", "../../evil");
+        assertEquals(video.getParentFile(), subtitle.getParentFile(), "语言标签不应造成目录穿越");
+        assertEquals("Show S01E01.evil.ass", subtitle.getName());
+    }
+
+    @Test
+    void resolveLangTag_prefers_source_file_language_token() {
+        // 规则 2: 字幕源文件名带语言标识时, 追加对应后缀(保留原始标识, 统一小写)
+        SubtitleCandidate c = new SubtitleCandidate();
+        c.setLang("chs");
+        assertEquals("cht", service.resolveLangTag("碧蓝之海 3 - 15.cht.ass", c));
+        assertEquals("jpsc", service.resolveLangTag("碧蓝之海 3 - 15.jpsc.ass", c));
+        assertEquals("jptc", service.resolveLangTag("碧蓝之海 3 - 15.jptc.ass", c));
+        assertEquals("sc", service.resolveLangTag("碧蓝之海 3 - 15.sc.ass", c));
+        assertEquals("tc", service.resolveLangTag("碧蓝之海 3 - 15.tc.ass", c));
+    }
+
+    @Test
+    void resolveLangTag_falls_back_to_api_lang_then_blank() {
+        SubtitleCandidate c = new SubtitleCandidate();
+        c.setLang("chs");
+        // 规则 3: 源文件名无语言标识 → 回落接口 lang 字段; 字段也为空 → 无后缀
+        assertEquals("chs", service.resolveLangTag("Grand Blue Dreaming - 15.ass", c));
+        c.setLang("");
+        assertEquals("", service.resolveLangTag("Grand Blue Dreaming - 15.ass", c));
     }
 }

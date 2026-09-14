@@ -629,3 +629,32 @@ export let subtitleAttach = (payload) => api.post('api/subtitleAttach', payload)
  * @returns {Promise<unknown>}
  */
 export let subtitleStatus = () => api.post('api/subtitleStatus')
+
+/**
+ * 字幕匹配记录
+ * @param limit 返回条数（后端上限 200）
+ * @returns {Promise<unknown>}
+ */
+export let subtitleMatchLog = (limit) => api.post('api/subtitleMatchLog', {limit})
+
+/**
+ * 清空字幕匹配记录
+ * @returns {Promise<unknown>}
+ */
+export let subtitleMatchLogClear = () => api.post('api/subtitleMatchLogClear')
+
+/**
+ * 批量导入本地字幕（multipart：订阅 id + 多个字幕文件）
+ * 因需传 FormData，绕开 api.js 的 JSON 封装，与 importConfig 同处理方式。
+ * @param formData FormData：aniId、files[]
+ * @returns {Promise<unknown>}
+ */
+export let subtitleImport = (formData) => {
+    return fetch('api/subtitleImport', {
+        method: 'POST',
+        body: formData,
+        headers: {
+            'Authorization': authorization.value
+        }
+    }).then(res => res.json())
+}

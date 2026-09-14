@@ -106,4 +106,38 @@ class ExpandMultiEpisodeTest {
         assertEquals(1, out.size(), "无范围不应展开");
         assertEquals(1.0, out.get(0).getEpisode());
     }
+
+    @Test
+    void single_episode_range_is_treated_as_single_not_collection() {
+        // 总集数为 1: 形如 [01-01] 的范围实为单集, 不能标记 episodeRange(否则被当合集处理)
+        Ani ani = ani(false, null);
+        Item base = item("测试番剧 01-01 [1080P]", "测试番剧 S01E01");
+        List<Item> out = ItemsUtil.expandMultiEpisode(ani, List.of(base));
+        assertEquals(1, out.size(), "总集数为 1 不应展开");
+        assertNull(out.get(0).getEpisodeRange(), "总集数为 1 不应标记 episodeRange");
+        assertEquals(1.0, out.get(0).getEpisode());
+    }
+
+    @Test
+    void single_episode_range_keeps_range_value_as_episode() {
+        // 范围值即真实集数: 05-05 应落第 5 集(而非合集占位的第 1 集)
+        Ani ani = ani(false, null);
+        Item base = item("测试番剧 05-05 [1080P]", "测试番剧 S01E05");
+        List<Item> out = ItemsUtil.expandMultiEpisode(ani, List.of(base));
+        assertEquals(1, out.size());
+        assertNull(out.get(0).getEpisodeRange());
+        assertEquals(5.0, out.get(0).getEpisode());
+        assertEquals("测试番剧 S01E05", out.get(0).getReName());
+    }
+
+    @Test
+    void single_episode_range_applies_offset() {
+        Ani ani = ani(false, null);
+        ani.setOffset(100);
+        Item base = item("测试番剧 01-01 [1080P]", "测试番剧 S01E01");
+        List<Item> out = ItemsUtil.expandMultiEpisode(ani, List.of(base));
+        assertEquals(1, out.size());
+        assertNull(out.get(0).getEpisodeRange());
+        assertEquals(101.0, out.get(0).getEpisode());
+    }
 }

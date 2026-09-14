@@ -13,11 +13,16 @@ import cn.hutool.core.util.StrUtil;
 import io.swagger.v3.oas.annotations.Operation;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.io.File;
+import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -110,6 +115,65 @@ public class SubtitleController extends BaseController {
                 "autoFetch", subtitleService.isAutoFetchEnabled(),
                 "supportedExt", java.util.List.of("ass", "srt", "ssa", "vtt", "sub")
         ));
+    }
+
+    /**
+     * 单次导入的文件数上限，防止超大表单拖垮接口
+     */
+    private static final int MAX_SUBTITLE_UPLOAD_COUNT = 200;
+
+    /**
+     * 单文件大小上限 20MiB，与 {@code SubtitleService.MAX_SUBTITLE_BYTES} 一致
+     */
+    private static final long MAX_SUBTITLE_UPLOAD_SIZE = 20L * 1024 * 1024;
+
+    @Auth
+    @Operation(summary = "批量导入本地字幕")
+    @PostMapping(value = "/subtitleImport", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public Result<SubtitleService.ImportResult> subtitleImport(
+            @RequestParam("aniId") String aniId,
+            @RequestParam("files") List<MultipartFile> files) throws Exception {
+        if (StrUtil.isBlank(aniId)) {
+            return Result.error("参数缺失: aniId");
+        }
+        if (files == null || files.isEmpty()) {
+            return Result.error("请至少选择一个字幕文件");
+        }
+        if (files.size() > MAX_SUBTITLE_UPLOAD_COUNT) {
+            return Result.error("单次最多导入 " + MAX_SUBTITLE_UPLOAD_COUNT + " 个字幕文件");
+        }
+        Optional<Ani> aniOpt = AniUtil.getAniList().stream()
+                .filter(a -> Objects.equals(a.getId(), aniId))
+                .findFirst();
+        if (aniOpt.isEmpty()) {
+            return Result.error("订阅不存在");
+        }
+
+        // 读入内存前逐个做大小校验，避免超大文件撑爆堆
+        List<SubtitleService.LocalSubtitleFile> uploads = new ArrayList<>();
+        for (MultipartFile file : files) {
+            if (file == null || file.isEmpty()) {
+                continue;
+            }
+            if (file.getSize() > MAX_SUBTITLE_UPLOAD_SIZE) {
+                return Result.error("字幕文件超过 20MiB 上限: " + file.getOriginalFilename());
+            }
+            String name = StrUtil.blankToDefault(file.getOriginalFilename(), "subtitle");
+            try (InputStream inputStream = file.getInputStream()) {
+                uploads.add(new SubtitleService.LocalSubtitleFile(name, inputStream.readAllBytes()));
+            }
+        }
+        if (uploads.isEmpty()) {
+            return Result.error("请至少选择一个字幕文件");
+        }
+
+        Ani ani = aniOpt.get();
+        try {
+            return Result.success(subtitleService.importLocalSubtitles(ani, uploads));
+        } catch (Exception e) {
+            log.error("批量导入字幕失败 {}: {}", ani.getTitle(), ExceptionUtils.getMessage(e));
+            return Result.error("导入失败: " + ExceptionUtils.getMessage(e));
+        }
     }
 
     @Auth

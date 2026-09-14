@@ -13,6 +13,7 @@ import cn.hutool.core.util.StrUtil;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -241,70 +242,56 @@ public interface BaseDownload {
     }
 
     /**
+     * 判断一组文件是否构成「多集」。
+     * <p>
+     * 以「可识别出的<b>不同集数</b>」为准，而不是视频文件数量：单集种子常附带
+     * NCOP/PV/菜单/预告等多个视频文件，按文件数判断会把<b>只有 1 集</b>的条目
+     * 误当合集，进而走 {@link #getFileReNameMulti} 逐文件提取集数。
+     * <p>
+     * 只有在确认存在 2 个以上不同集数时才判为多集；提取不到集数、或只提取到
+     * 1 个集数时按单集处理（与单文件路径一致，重名文件由调用方去重跳过）。
+     *
+     * @param fileNames 文件名列表（可含字幕等非视频文件，非视频名通常提取不到集数）
+     */
+    default boolean isMultiEpisode(List<String> fileNames) {
+        if (CollectionUtil.isEmpty(fileNames)) {
+            return false;
+        }
+        Set<Double> episodes = new HashSet<>();
+        for (String name : fileNames) {
+            String episode = extractEpisodeFromFileName(name);
+            if (StrUtil.isBlank(episode)) {
+                continue;
+            }
+            try {
+                // 归一化为数值，避免 "01" 与 "1" 被当成两个不同集数
+                episodes.add(Double.parseDouble(episode));
+            } catch (NumberFormatException ignored) {
+                // 非数字形态的集数标记不参与判定
+            }
+            if (episodes.size() > 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * 提取字幕语言后缀（可多级，如 xx.chs&eng.simplified.ass → "chs&eng.simplified"）。
      * 仅识别已知语言/轨道 token，避免把文件主名中的数字段当语言（如 Vol.1.ass → 1）。
+     * <p>
+     * 实现已上移到 {@link ani.rss.commons.FileUtils#extractSubtitleLangSuffix(String)}，
+     * 与 ASSRT 字幕补全、合集预览共用同一套 token 与命名口径（含 jpsc / jptc，统一小写）。
      */
     default String extractSubtitleLangSuffix(String name) {
-        String base = FileUtil.mainName(name);
-        java.util.List<String> parts = new ArrayList<>();
-        while (StrUtil.isNotBlank(base)) {
-            String cur = FileUtil.extName(base);
-            if (StrUtil.isBlank(cur) || !isKnownSubtitleLangToken(cur)) {
-                break;
-            }
-            parts.add(0, cur);
-            String next = FileUtil.mainName(base);
-            if (next.equals(base)) {
-                break;
-            }
-            base = next;
-        }
-        return parts.isEmpty() ? null : String.join(".", parts);
+        return FileUtils.extractSubtitleLangSuffix(name);
     }
 
     /**
      * 是否为已知字幕语言/轨道 token
      */
     default boolean isKnownSubtitleLangToken(String token) {
-        if (StrUtil.isBlank(token)) {
-            return false;
-        }
-        switch (token.toLowerCase()) {
-            case "zh":
-            case "zh-hans":
-            case "zh-hant":
-            case "sc":
-            case "tc":
-            case "chs":
-            case "cht":
-            case "chinese":
-            case "cn":
-            case "jp":
-            case "jpn":
-            case "ja":
-            case "eng":
-            case "en":
-            case "english":
-            case "kor":
-            case "kr":
-            case "krn":
-            case "korean":
-            case "chs&eng":
-            case "cht&eng":
-            case "zh&en":
-            case "simplified":
-            case "traditional":
-            case "default":
-            case "full":
-            case "forced":
-            case "sign":
-            case "signs":
-            case "songs":
-            case "comment":
-                return true;
-            default:
-                return false;
-        }
+        return FileUtils.isKnownSubtitleLangToken(token);
     }
 
     /**

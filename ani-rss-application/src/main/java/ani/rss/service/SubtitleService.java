@@ -28,6 +28,7 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -126,6 +127,93 @@ public class SubtitleService {
     }
 
     /**
+     * 待导入的本地字幕（原始文件名 + 原始字节）。
+     * <p>
+     * 与 Spring 的 {@code MultipartFile} 解耦，便于单测直接构造。
+     */
+    public static class LocalSubtitleFile {
+        private final String filename;
+        private final byte[] content;
+
+        public LocalSubtitleFile(String filename, byte[] content) {
+            this.filename = filename;
+            this.content = content;
+        }
+
+        public String getFilename() {
+            return filename;
+        }
+
+        public byte[] getContent() {
+            return content;
+        }
+    }
+
+    /**
+     * 批量导入结果：逐文件的匹配/写入明细 + 汇总计数。
+     */
+    public static class ImportResult {
+        /** 参与处理的文件总数 */
+        private int total;
+        /** 成功匹配并写入的数量 */
+        private int success;
+        /** 失败数量（格式不支持 / 解析不出集数 / 找不到视频 / 写入异常） */
+        private int failed;
+        /** 逐文件明细 */
+        private List<Map<String, Object>> items = new ArrayList<>();
+
+        public int getTotal() {
+            return total;
+        }
+
+        public ImportResult setTotal(int total) {
+            this.total = total;
+            return this;
+        }
+
+        public int getSuccess() {
+            return success;
+        }
+
+        public ImportResult setSuccess(int success) {
+            this.success = success;
+            return this;
+        }
+
+        public int getFailed() {
+            return failed;
+        }
+
+        public ImportResult setFailed(int failed) {
+            this.failed = failed;
+            return this;
+        }
+
+        public List<Map<String, Object>> getItems() {
+            return items;
+        }
+
+        public ImportResult setItems(List<Map<String, Object>> items) {
+            this.items = items;
+            return this;
+        }
+    }
+
+    /**
+     * 目录内视频的索引：用于把字幕按「季 + 集」定位到唯一视频。
+     */
+    private static class VideoIndex {
+        /**
+         * 主键：规范化 {@code SxxExx}（小写，如 {@code s03e15}）→ 视频文件
+         */
+        private final Map<String, File> bySeasonEpisode = new LinkedHashMap<>();
+        /**
+         * 兜底键：集数 → 视频文件列表（字幕未带季数、或视频名未带季标记时使用）
+         */
+        private final Map<Integer, List<File>> byEpisode = new LinkedHashMap<>();
+    }
+
+    /**
      * 扫描订阅目录，列出没有字幕的视频
      */
     public SubtitleReport scanMissing(Ani ani, String downloadPath) {
@@ -164,10 +252,10 @@ public class SubtitleService {
     }
 
     /**
-     * 就地附加字幕文件。
+     * 就地附加字幕文件（文本内容）。
      * <p>
-     * 字幕命名与视频主文件名保持一致，这样播放侧的
-     * {@code getSubtitlesByVideo} 能按"主文件名前缀"匹配到它。
+     * 与 {@link #attachSubtitleBytes(File, byte[], String, String)} 的区别仅在于入参形态：
+     * 本方法把文本按 UTF-8 编码后落盘，适用于已在内存中解码为字符串的场景（如在线源抓取）。
      *
      * @param videoFile       视频文件
      * @param subtitleContent 字幕内容（ass/srt 文本）
@@ -176,6 +264,28 @@ public class SubtitleService {
      * @return 写入的字幕文件
      */
     public File attachSubtitle(File videoFile, String subtitleContent, String ext, String languageTag) {
+        if (StrUtil.isBlank(subtitleContent)) {
+            throw new IllegalArgumentException("字幕内容为空");
+        }
+        return attachSubtitleBytes(videoFile, subtitleContent.getBytes(StandardCharsets.UTF_8), ext, languageTag);
+    }
+
+    /**
+     * 就地附加字幕文件（原始字节，不做字符串编解码）。
+     * <p>
+     * 本地导入的字幕可能是 GBK 等非 UTF-8 编码，若先解码为字符串再按 UTF-8 重编码会破坏内容，
+     * 因此这里直接写原始字节。
+     * <p>
+     * 字幕命名与视频主文件名保持一致（{@code 剧名 SxxExx[.{lang}].{ext}}），这样播放侧的
+     * {@code getSubtitlesByVideo} 能按"主文件名前缀"匹配到它。
+     *
+     * @param videoFile   视频文件
+     * @param content     字幕原始字节
+     * @param ext         字幕扩展名（ass/srt/ssa/vtt/sub）
+     * @param languageTag 语言标签（如 chs/cht，可空），会追加到文件名
+     * @return 写入的字幕文件
+     */
+    public File attachSubtitleBytes(File videoFile, byte[] content, String ext, String languageTag) {
         if (videoFile == null || !videoFile.exists() || !videoFile.isFile()) {
             throw new IllegalArgumentException("视频文件不存在");
         }
@@ -183,16 +293,21 @@ public class SubtitleService {
         if (!SUBTITLE_EXT.contains(normalizedExt)) {
             throw new IllegalArgumentException("不支持的字幕格式: " + ext + "（支持 " + String.join("/", SUBTITLE_EXT) + "）");
         }
-        if (StrUtil.isBlank(subtitleContent)) {
+        if (content == null || content.length == 0) {
             throw new IllegalArgumentException("字幕内容为空");
         }
-        byte[] bytes = subtitleContent.getBytes(StandardCharsets.UTF_8);
-        if (bytes.length > MAX_SUBTITLE_BYTES) {
+        if (content.length > MAX_SUBTITLE_BYTES) {
             throw new IllegalArgumentException("字幕内容超过 20MiB 上限");
         }
 
         String mainName = FileUtil.mainName(videoFile);
-        String suffix = StrUtil.isBlank(languageTag) ? "" : "." + languageTag.trim();
+        // 语言标签会拼进文件名：只保留字母/数字/&/./-/_（如 chs、jpsc、chs&eng.simplified），
+        // 剔除路径分隔符并折叠连续点，防止经 /subtitleAttach 传入的标签造成目录穿越
+        String tag = StrUtil.blankToDefault(languageTag, "").trim()
+                .replaceAll("[^A-Za-z0-9&._-]", "")
+                .replaceAll("\\.{2,}", ".")
+                .replaceAll("^\\.+|\\.+$", "");
+        String suffix = StrUtil.isBlank(tag) ? "" : "." + tag;
         File target = new File(videoFile.getParentFile(), mainName + suffix + "." + normalizedExt);
         if (target.exists()) {
             // 覆盖前备份，避免误覆盖用户已有的字幕
@@ -206,10 +321,204 @@ public class SubtitleService {
         }
         // 原子写：先写临时文件再移动，避免写一半留下损坏字幕
         File temp = new File(videoFile.getParentFile(), target.getName() + ".temp");
-        FileUtil.writeBytes(bytes, temp);
+        FileUtil.writeBytes(content, temp);
         FileUtil.move(temp, target, true);
-        log.info("字幕已附加: {} ({} 字节)", target.getName(), bytes.length);
+        log.info("字幕已附加: {} ({} 字节)", target.getName(), content.length);
         return target;
+    }
+
+    /**
+     * 批量导入本地字幕。
+     * <p>
+     * 上传的字幕按「季 + 集」与订阅下载目录下<b>已重命名</b>的视频文件匹配，匹配成功后以
+     * {@code 剧名 SxxExx[.{lang}].{ext}} 命名就地写入视频同目录，从而被播放侧的外挂字幕识别。
+     * <p>
+     * 匹配优先级：
+     * <ol>
+     *   <li>规范化 {@code SxxExx} 精确命中（如字幕 {@code 碧蓝之海 S03E15.cht.ass} → 视频 {@code 碧蓝之海 S03E15.mkv}）；</li>
+     *   <li>仅解析出集数时，回落到「集数 → 视频」，<b>仅当该集数在目录内唯一</b>时才采用，避免跨季误匹配。</li>
+     * </ol>
+     * 语言后缀取字幕文件名中的语言标识（sc/tc/chs/cht/jp/jpsc/jptc 等，见
+     * {@link FileUtils#extractSubtitleLangSuffix(String)}），无则命名为 {@code 剧名 SxxExx.ext}。
+     * <p>
+     * 本方法只处理本地目录（含离线下载订阅的本地落盘目录）；若订阅目录不存在（如纯云端离线订阅），
+     * 全部文件以统一原因失败返回，不抛异常。
+     *
+     * @param ani   订阅（其下载目录为导入目标）
+     * @param files 上传的字幕文件
+     * @return 逐文件明细与汇总计数
+     */
+    public ImportResult importLocalSubtitles(Ani ani, List<LocalSubtitleFile> files) {
+        if (ani == null) {
+            return new ImportResult();
+        }
+        return importLocalSubtitles(new File(downloadService.getDownloadPath(ani)), files);
+    }
+
+    /**
+     * 批量导入本地字幕（以目录为入口，便于复用与单测）。
+     *
+     * @param dir   视频所在目录（订阅下载目录）
+     * @param files 上传的字幕文件
+     */
+    ImportResult importLocalSubtitles(File dir, List<LocalSubtitleFile> files) {
+        ImportResult result = new ImportResult();
+        if (dir == null || files == null || files.isEmpty()) {
+            return result;
+        }
+        result.setTotal(files.size());
+
+        String path = dir.getPath();
+        if (!dir.exists() || !dir.isDirectory()) {
+            for (LocalSubtitleFile f : files) {
+                result.getItems().add(importItem(f.getFilename(), null, null, null, "失败",
+                        "订阅下载目录不存在: " + path));
+            }
+            return result.setFailed(files.size());
+        }
+
+        VideoIndex index = buildVideoIndex(dir);
+        int success = 0;
+        for (LocalSubtitleFile f : files) {
+            String originalName = StrUtil.blankToDefault(f.getFilename(), "");
+            String ext = FileUtil.extName(originalName).toLowerCase(Locale.ROOT);
+
+            // 1) 扩展名白名单
+            if (!SUBTITLE_EXT.contains(ext)) {
+                result.getItems().add(importItem(originalName, null, null, null, "失败",
+                        "不支持的字幕格式: " + (StrUtil.isBlank(ext) ? "(无扩展名)" : ext)));
+                continue;
+            }
+            // 2) 内容与大小
+            byte[] content = f.getContent();
+            if (content == null || content.length == 0) {
+                result.getItems().add(importItem(originalName, null, null, null, "失败", "字幕内容为空"));
+                continue;
+            }
+            if (content.length > MAX_SUBTITLE_BYTES) {
+                result.getItems().add(importItem(originalName, null, null, null, "失败", "字幕超过 20MiB 上限"));
+                continue;
+            }
+
+            // 3) 解析语言后缀 + 季集
+            String langTag = StrUtil.blankToDefault(FileUtils.extractSubtitleLangSuffix(originalName), "");
+            int[] se = AssrtSubtitleProvider.extractSeasonEpisode(originalName);
+            File video = matchVideo(index, se);
+            if (video == null) {
+                result.getItems().add(importItem(originalName, null, null, langTag, "失败",
+                        unmatchedReason(index, se)));
+                SubtitleMatchLog.record(new SubtitleMatchLogEntry(
+                        System.currentTimeMillis(), "", originalName, "",
+                        se[0] >= 0 ? se[0] : null, "未命中", langTag));
+                continue;
+            }
+
+            // 4) 按标准命名写入
+            try {
+                File target = attachSubtitleBytes(video, content, ext, langTag);
+                success++;
+                result.getItems().add(importItem(originalName, target.getName(), video.getName(), langTag, "已匹配", ""));
+                SubtitleMatchLog.record(new SubtitleMatchLogEntry(
+                        System.currentTimeMillis(), video.getName(), originalName, target.getName(),
+                        se[0] >= 0 ? se[0] : null, "已匹配", langTag));
+            } catch (Exception e) {
+                result.getItems().add(importItem(originalName, null, video.getName(), langTag, "失败",
+                        ExceptionUtils.getMessage(e)));
+            }
+        }
+        return result.setSuccess(success).setFailed(result.getTotal() - success);
+    }
+
+    /**
+     * 组装单条导入明细（字段与前端结果表一一对应）
+     */
+    private static Map<String, Object> importItem(String originalName, String renamedName, String videoName,
+                                                  String lang, String status, String reason) {
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("originalName", originalName);
+        item.put("renamedName", renamedName);
+        item.put("videoName", videoName);
+        item.put("lang", lang);
+        item.put("status", status);
+        item.put("reason", reason);
+        return item;
+    }
+
+    /**
+     * 未命中时给出可行动的原因说明
+     */
+    private static String unmatchedReason(VideoIndex index, int[] se) {
+        if (se[1] < 0) {
+            return "无法从字幕文件名解析集数（可改名为「剧名 SxxExx.ass」后重试）";
+        }
+        if (se[0] >= 0) {
+            return "未找到对应视频 S" + se[0] + "E" + se[1];
+        }
+        List<File> candidates = index.byEpisode.get(se[1]);
+        if (candidates != null && candidates.size() > 1) {
+            return "第 " + se[1] + " 集存在多个候选视频，集数不唯一（请在字幕文件名中补上 Sxx 季数）";
+        }
+        return "未找到第 " + se[1] + " 集视频";
+    }
+
+    /**
+     * 建立目录内视频索引（递归、限量，与扫描逻辑一致）
+     */
+    private VideoIndex buildVideoIndex(File dir) {
+        VideoIndex index = new VideoIndex();
+        for (File video : listVideoFiles(dir)) {
+            String name = video.getName();
+            String key = canonicalSeasonEpisode(name);
+            if (key != null) {
+                index.bySeasonEpisode.putIfAbsent(key, video);
+            }
+            int[] se = AssrtSubtitleProvider.extractSeasonEpisode(name);
+            if (se[1] >= 0) {
+                index.byEpisode.computeIfAbsent(se[1], k -> new ArrayList<>()).add(video);
+            }
+        }
+        return index;
+    }
+
+    /**
+     * 规范化季集键（{@code s3e15}）。
+     * <p>
+     * 与 {@link #matchVideo} 必须共用同一套解析（{@link AssrtSubtitleProvider#extractSeasonEpisode}），
+     * 否则 {@code S02E05} 会被建索引成 {@code s02e05} 却按 {@code s2e5} 查找，永远匹配不上。
+     * 季、集都解析不出时返回 {@code null}（由「集数兜底」处理）。
+     */
+    private static String canonicalSeasonEpisode(String name) {
+        int[] se = AssrtSubtitleProvider.extractSeasonEpisode(name);
+        if (se[0] >= 0 && se[1] >= 0) {
+            return "s" + se[0] + "e" + se[1];
+        }
+        return null;
+    }
+
+    /**
+     * 把字幕定位到唯一视频：
+     * <ol>
+     *   <li>季集键精确命中；</li>
+     *   <li>回落「集数 → 视频」，仅当该集数在目录内唯一时采用。</li>
+     * </ol>
+     * 返回 {@code null} 表示未命中或存在歧义（歧义时宁可失败也不跨季误配）。
+     */
+    private static File matchVideo(VideoIndex index, int[] se) {
+        int episode = se[1];
+        if (episode < 0) {
+            return null;
+        }
+        if (se[0] >= 0) {
+            File exact = index.bySeasonEpisode.get("s" + se[0] + "e" + episode);
+            if (exact != null) {
+                return exact;
+            }
+        }
+        List<File> candidates = index.byEpisode.get(episode);
+        if (candidates == null || candidates.isEmpty()) {
+            return null;
+        }
+        return candidates.size() == 1 ? candidates.get(0) : null;
     }
 
     /**
@@ -316,7 +625,7 @@ public class SubtitleService {
                 String originalName = StrUtil.blankToDefault(pick.getOriginalName(), c.getFileName());
                 Integer resolvedSeason = pick.getResolvedSeason();
                 String ext = StrUtil.blankToDefault(c.getExt(), "ass").toLowerCase();
-                String langTag = StrUtil.blankToDefault(c.getLang(), "");
+                String langTag = resolveLangTag(originalName, c);
                 String renamedName;
                 if (cloudDir == null) {
                     File f = attachSubtitle(localVideo, new String(data, StandardCharsets.UTF_8), ext, langTag);
@@ -339,6 +648,25 @@ public class SubtitleService {
             SubtitleMatchLog.record(new SubtitleMatchLogEntry(
                     System.currentTimeMillis(), videoName, "", "", null, "未命中", ""));
         }
+    }
+
+    /**
+     * 解析字幕语言后缀。
+     * <p>
+     * 优先取「字幕源文件名」里的语言标识（sc / tc / chs / cht / jp / jpsc / jptc 等），
+     * 保留原始标识（统一小写）——例如源文件 {@code ...碧蓝之海 3 - 15.cht.ass} 得到 {@code cht}；
+     * 源文件名未带语言标识时，回落 ASSRT 接口返回的 lang 字段；二者皆无则返回空串，
+     * 此时字幕命名为 {@code 剧名 SxxExx.ext}（无语言后缀）。
+     *
+     * @param originalName 字幕源文件名（压缩包内条目名或候选文件名）
+     * @param c            ASSRT 候选（提供接口 lang 字段兜底）
+     */
+    String resolveLangTag(String originalName, SubtitleCandidate c) {
+        String fromName = FileUtils.extractSubtitleLangSuffix(originalName);
+        if (StrUtil.isNotBlank(fromName)) {
+            return fromName;
+        }
+        return StrUtil.blankToDefault(c.getLang(), "");
     }
 
     private boolean hasLocalSubtitle(File videoFile) {

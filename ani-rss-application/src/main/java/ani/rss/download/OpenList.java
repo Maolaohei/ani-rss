@@ -251,8 +251,12 @@ public class OpenList implements BaseDownload, OfflineDownloader {
      * title=种子根目录名(isCollection 分支用它做临时目录名),
      * reName=模板基名(预览首个文件的 reName 主名, 含 SxxExx, 供季数解析/日志/通知),
      * episodeRange=预览集数集(驱动等待期就绪判定与缺集校验)。
+     * <p>
+     * 总集数为 1 时不写 episodeRange：下游一律以「episodeRange 非空」判定合集
+     * （临时目录用原标题、缺集校验、合集完成通知、合集优先去重），
+     * 只有 1 集的条目应作为单集处理，否则会被误判为合集。
      */
-    private Item buildCollectionItem(List<Item> plan, String torrentName) {
+    Item buildCollectionItem(List<Item> plan, String torrentName) {
         List<Double> episodes = plan.stream()
                 .map(Item::getEpisode)
                 .filter(Objects::nonNull)
@@ -268,10 +272,11 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 .findFirst()
                 .orElseGet(() -> plan.get(0).getReName());
         String base = StrUtil.isNotBlank(firstReName) ? FileUtil.mainName(firstReName) : "";
+        List<Double> episodeRange = episodes.size() > 1 ? episodes : null;
         return new Item()
                 .setTitle(StrUtil.blankToDefault(torrentName, base))
                 .setReName(base)
-                .setEpisodeRange(episodes)
+                .setEpisodeRange(episodeRange)
                 .setEpisode(episodes.isEmpty() ? null : episodes.get(0));
     }
 
@@ -1270,11 +1275,13 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             }
         }
 
-        String message = ctx.collectionPlan != null
+        // 手动合集入口(collectionPlan 非空)且确为多集时才用合集措辞；总集数为 1 时按单集收尾
+        boolean collectionDownload = ctx.collectionPlan != null && ctx.isCollection;
+        String message = collectionDownload
                 ? StrFormatter.format("{} 合集下载完成, 共归位 {} 个文件", item.getReName(), renameMap.size())
                 : StrFormatter.format("{} 下载完成", item.getReName());
         NotificationUtil.send(config, ani, message, NotificationStatusEnum.DOWNLOAD_END);
-        recordHistory(ani, item, ctx.collectionPlan != null ? "离线合集完成" : "离线下载完成");
+        recordHistory(ani, item, collectionDownload ? "离线合集完成" : "离线下载完成");
         return true;
     }
 

@@ -33,6 +33,23 @@ public class FileUtils {
     private static final Set<String> IMAGE_FORMAT = Set.of("png", "jpg", "jpeg", "webp", "svg");
 
     /**
+     * 已知字幕语言/轨道 token（统一小写比较）。
+     * <p>
+     * 用于从字幕文件名中提取「语言后缀」，覆盖 SC / TC / JP / CHT / CHS 及其双语组合
+     * （jpsc / jptc 等），以及 chs&eng 这类多语言合并写法。仅识别已知 token，
+     * 避免把文件主名里的数字段当语言（如 {@code Vol.1.ass} → 1）。
+     */
+    private static final Set<String> SUBTITLE_LANG_TOKENS = Set.of(
+            "zh", "zh-hans", "zh-hant", "zh-cn", "zh-tw", "cn",
+            "sc", "tc", "chs", "cht", "chinese", "chinese-simplified", "chinese-traditional",
+            "simplified", "traditional",
+            "jp", "jpn", "ja", "jpsc", "jptc", "jpchs", "jpcht", "jp-sc", "jp-tc",
+            "eng", "en", "english",
+            "kor", "kr", "krn", "korean",
+            "chs&eng", "cht&eng", "zh&en", "jpsc&eng", "jptc&eng",
+            "default", "full", "forced", "sign", "signs", "songs", "comment");
+
+    /**
      * 判断文件名是否为视频
      *
      * @param filename 文件名
@@ -74,6 +91,50 @@ public class FileUtils {
         }
 
         return extNames.contains(filename);
+    }
+
+    /**
+     * 是否为已知字幕语言/轨道 token（大小写不敏感）
+     *
+     * @param token 待判断的单个文件名段
+     */
+    public static boolean isKnownSubtitleLangToken(String token) {
+        if (StrUtil.isBlank(token)) {
+            return false;
+        }
+        return SUBTITLE_LANG_TOKENS.contains(token.toLowerCase());
+    }
+
+    /**
+     * 提取字幕语言后缀（可多级，如 {@code xx.chs&eng.simplified.ass → "chs&eng.simplified"}）。
+     * <p>
+     * 从文件名末尾往前逐段识别已知语言/轨道 token，全部统一小写，便于
+     * 「剧名 SxxExx.{lang}.{ext}」命名。无法识别任何语言段时返回 {@code null}，
+     * 由调用方退化为「剧名 SxxExx.{ext}」。
+     *
+     * @param name 字幕文件名（可含目录前缀）
+     * @return 语言后缀（不含前导点），无则 {@code null}
+     */
+    public static String extractSubtitleLangSuffix(String name) {
+        if (StrUtil.isBlank(name)) {
+            return null;
+        }
+        // 去掉目录前缀，避免 "Subs/xx.chs.ass" 的 extName 取到空串
+        String base = FileUtil.mainName(FileUtil.getName(name));
+        List<String> parts = new java.util.ArrayList<>();
+        while (StrUtil.isNotBlank(base)) {
+            String cur = FileUtil.extName(base);
+            if (StrUtil.isBlank(cur) || !isKnownSubtitleLangToken(cur)) {
+                break;
+            }
+            parts.add(0, cur.toLowerCase());
+            String next = FileUtil.mainName(base);
+            if (next.equals(base)) {
+                break;
+            }
+            base = next;
+        }
+        return parts.isEmpty() ? null : String.join(".", parts);
     }
 
     /**

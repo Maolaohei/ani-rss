@@ -314,7 +314,9 @@ public class CollectionController extends BaseController {
                     String extName = FileUtil.extName(title);
 
                     if (FileUtils.isSubtitleFormat(extName)) {
-                        String lang = FileUtil.extName(FileUtil.mainName(title));
+                        // 语言后缀与下载器重命名口径一致（含 jpsc/jptc 等双语标识，统一小写）；
+                        // 原实现取 mainName 的最后一段，会把 "xxx.1080p.ass" 的 1080p 误当语言
+                        String lang = FileUtils.extractSubtitleLangSuffix(title);
                         if (StrUtil.isNotBlank(lang)) {
                             reName += "." + lang;
                         }
