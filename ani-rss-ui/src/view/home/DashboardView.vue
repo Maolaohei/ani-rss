@@ -100,56 +100,58 @@
             </div>
           </section>
 
-          <section class="dashboard-section">
-            <div class="section-title">
-              <h3>下载中</h3>
-              <el-tag type="info">{{ activeTorrents.length }}</el-tag>
-            </div>
-            <el-empty v-if="!activeTorrents.length" description="当前无下载中任务"/>
-            <el-table v-else :data="activeTorrents" class="dashboard-table" size="small">
-              <el-table-column label="类型" width="76">
-                <template #default="{ row }">
-                  <el-tag :type="isDownloading(row) ? 'primary' : 'success'" size="small">
-                    {{ isDownloading(row) ? '下载' : '做种' }}
-                  </el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column label="名称" min-width="220" prop="name" show-overflow-tooltip/>
-              <el-table-column label="进度" width="150">
-                <template #default="{ row }">
-                  <el-progress :percentage="row.progress || 0" :show-text="false"/>
-                </template>
-              </el-table-column>
-              <el-table-column label="大小" width="110" prop="formatSize"/>
-              <el-table-column label="状态" width="100">
-                <template #default="{ row }">
-                  {{ stateLabel(row.state) }}
-                </template>
-              </el-table-column>
-            </el-table>
-          </section>
+          <div class="dashboard-duo">
+            <section class="dashboard-section duo-downloading">
+              <div class="section-title">
+                <h3>下载中</h3>
+                <el-tag type="info">{{ activeTorrents.length }}</el-tag>
+              </div>
+              <el-empty v-if="!activeTorrents.length" description="当前无下载中任务"/>
+              <el-table v-else :data="activeTorrents" class="dashboard-table" size="small" height="320">
+                <el-table-column label="类型" width="64">
+                  <template #default="{ row }">
+                    <el-tag :type="isDownloading(row) ? 'primary' : 'success'" size="small">
+                      {{ isDownloading(row) ? '下载' : '做种' }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="名称" min-width="120" prop="name" show-overflow-tooltip/>
+                <el-table-column label="进度" width="110">
+                  <template #default="{ row }">
+                    <el-progress :percentage="row.progress || 0" :show-text="false"/>
+                  </template>
+                </el-table-column>
+                <el-table-column label="大小" width="84" prop="formatSize"/>
+                <el-table-column label="状态" width="76">
+                  <template #default="{ row }">
+                    {{ stateLabel(row.state) }}
+                  </template>
+                </el-table-column>
+              </el-table>
+            </section>
 
-          <section class="dashboard-section">
-            <div class="section-title">
-              <h3>近 7 天下载</h3>
-              <div class="today-heading-actions">
-                <el-tag type="success">成功 {{ historySummary.success }}</el-tag>
-                <el-tag v-if="historySummary.failed" type="danger">失败 {{ historySummary.failed }}</el-tag>
-                <el-tag type="info">成功率 {{ successRateText }}</el-tag>
-              </div>
-            </div>
-            <el-empty v-if="!historyDays.length" description="暂无下载记录"/>
-            <div v-else class="trend">
-              <div v-for="day in historyDays" :key="day.date" class="trend-col"
-                   :title="`${day.date} 完成 ${day.success} / 失败 ${day.failed}`">
-                <div class="trend-bars">
-                  <div class="bar success" :style="{height: barHeight(day.success) + 'px'}"></div>
-                  <div class="bar failed" :style="{height: barHeight(day.failed) + 'px'}"></div>
+            <section class="dashboard-section duo-trend">
+              <div class="section-title">
+                <h3>近 7 天下载</h3>
+                <div class="today-heading-actions">
+                  <el-tag type="success">成功 {{ historySummary.success }}</el-tag>
+                  <el-tag v-if="historySummary.failed" type="danger">失败 {{ historySummary.failed }}</el-tag>
+                  <el-tag type="info">成功率 {{ successRateText }}</el-tag>
                 </div>
-                <span class="trend-label">{{ shortDate(day.date) }}</span>
               </div>
-            </div>
-          </section>
+              <el-empty v-if="!historyDays.length" description="暂无下载记录"/>
+              <div v-else class="trend">
+                <div v-for="day in historyDays" :key="day.date" class="trend-col"
+                     :title="`${day.date} 完成 ${day.success} / 失败 ${day.failed}`">
+                  <div class="trend-bars">
+                    <div class="bar success" :style="{height: barHeight(day.success) + 'px'}"></div>
+                    <div class="bar failed" :style="{height: barHeight(day.failed) + 'px'}"></div>
+                  </div>
+                  <span class="trend-label">{{ shortDate(day.date) }}</span>
+                </div>
+              </div>
+            </section>
+          </div>
 
           <section class="dashboard-section">
             <div class="section-title">
@@ -488,6 +490,17 @@ onUnmounted(stopPolling)
   padding-bottom: 8px;
 }
 
+/* 下载中 (1/3) 与 近7天下载 (2/3) 的非对称栅格：信息密度更合理，
+   图表横向跨度更充裕，后续双柱/折线对比也游刃有余 */
+.dashboard-duo {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: 14px;
+  min-width: 0;
+  align-items: start;
+}
+
 .dashboard-section {
   min-width: 0;
   padding: 12px;
@@ -570,7 +583,7 @@ onUnmounted(stopPolling)
 .trend {
   display: flex;
   align-items: flex-end;
-  gap: 6px;
+  gap: 10px;
   overflow-x: auto;
   padding-bottom: 4px;
 }
@@ -581,18 +594,18 @@ onUnmounted(stopPolling)
   flex-direction: column;
   align-items: center;
   gap: 4px;
-  min-width: 30px;
+  min-width: 46px;
 }
 
 .trend-bars {
   height: 60px;
   display: flex;
   align-items: flex-end;
-  gap: 2px;
+  gap: 3px;
 }
 
 .bar {
-  width: 9px;
+  width: 12px;
   border-radius: 2px 2px 0 0;
 }
 
@@ -664,11 +677,19 @@ onUnmounted(stopPolling)
   .dashboard-content {
     grid-template-columns: 1fr 1fr;
   }
+
+  .dashboard-duo {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 560px) {
   .metric-grid,
   .dashboard-content {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-duo {
     grid-template-columns: 1fr;
   }
 
