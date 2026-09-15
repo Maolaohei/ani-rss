@@ -3,13 +3,14 @@ package ani.rss.service.subtitle;
 import ani.rss.commons.ExceptionUtils;
 import ani.rss.commons.GsonStatic;
 import ani.rss.entity.Ani;
+import ani.rss.entity.Config;
 import ani.rss.util.basic.HttpReq;
+import ani.rss.util.basic.HttpRequestPlus;
 import ani.rss.util.other.ConfigUtil;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.http.HttpResponse;
 import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.core.util.StrUtil;
-import cn.hutool.core.util.URLUtil;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -24,6 +25,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -35,23 +37,53 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * ASSRT（伪射手网）字幕源。
  * <p>
- * 使用官方 API（api.assrt.net），以 token 为查询参数；先 {@code sub/search} 列出候选，
- * 必要时 {@code sub/detail} 拉取直链，再按「集数命中 + 语言偏好 + 文件名相似度」打分，
- * 由调用方挑选最优并下载。
+ * 使用官方 API（api.assrt.net），以 token 为查询参数。调用分两步：
+ * <ol>
+ *   <li>{@link #searchItems}——以番剧标题（优先英文）<b>单次</b>搜索，返回候选条目供用户挑选；</li>
+ *   <li>{@link #resolveCandidates} / {@link #download}——用户选定后再解析具体文件并下载。</li>
+ * </ol>
+ * 之所以把「搜索」与「下载」拆开，是因为 ASSRT 配额很紧（默认 5 次/分钟）：旧实现按
+ * 「每个视频 × 精确/宽泛两档」发请求，还要逐条调 {@code sub/detail} 补全文件列表，
+ * 一次批量匹配就能打满配额并触发 {@code 30900}。现在搜索阶段只发一次请求。
  * <p>
- * 搜索分两档：先以视频文件名 + {@code no_muxer=1} 精确命中单集字幕；无果再以番剧标题宽泛搜索，
- * 此时可能命中横跨多季的<b>完整合集包</b>——合集包不在候选阶段按集数剔除，而是在
- * {@link #extractBestFromZip} 中按目标集/季挑选并重命名。解包仅支持 zip（rar/7z 跳过，交由下一个候选）。
+ * 网络层：所有 API 调用都走 {@link #getWithRetry}——连接/读取超时分离、瞬时故障指数退避重试、
+ * 主域名不可用时回退备用域名 {@code api.makedie.me}。下载直链走 CDN，不在此列。
+ * <p>
+ * 解包仅支持 zip（rar/7z 跳过，交由下一个候选）。
  */
 @Slf4j
 @Service
 public class AssrtSubtitleProvider {
 
     private static final String SEARCH_API = "https://api.assrt.net/v1/sub/search";
+    private static final String SEARCH_API_FALLBACK = "https://api.makedie.me/v1/sub/search";
     private static final String DETAIL_API = "https://api.assrt.net/v1/sub/detail";
+    private static final String DETAIL_API_FALLBACK = "https://api.makedie.me/v1/sub/detail";
 
     private static final List<String> SUB_EXT = List.of("ass", "srt", "ssa", "vtt", "sub");
     private static final List<String> ARCHIVE_EXT = List.of("zip", "rar", "7z");
+
+    /**
+     * 连接（TCP 握手 + TLS）超时默认值。链路握手通常很快，15s 足够，且能较快暴露
+     * 「SYN 无响应」这类被防火墙丢包的情况。
+     */
+    private static final int DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
+
+    /**
+     * 读取（等待响应体）超时默认值。ASSRT 在库忙时出数据明显偏慢，
+     * 旧实现的 20s 共用超时偏紧，这里放宽到 30s。
+     */
+    private static final int DEFAULT_READ_TIMEOUT_MS = 30_000;
+
+    /**
+     * 瞬时故障重试次数（不含首次），默认 2，即最多请求 3 次
+     */
+    private static final int DEFAULT_RETRY_COUNT = 2;
+
+    /**
+     * 重试基础退避（毫秒），按 1s / 2s / 4s 指数递增
+     */
+    private static final long RETRY_BACKOFF_MS = 1_000L;
 
     /**
      * 语言关键字，用于从文件名/字段里识别 chs / cht
@@ -87,136 +119,206 @@ public class AssrtSubtitleProvider {
     private static final int DEFAULT_QUOTA_PER_MINUTE = 5;
     private static final AtomicLong LAST_API_TS = new AtomicLong(0);
 
+    /* ==================== 搜索 ==================== */
+
     /**
-     * 搜索字幕候选。
-     *
-     * @param token          ASSRT token（空则直接返回空）
-     * @param keyword        搜索关键词（通常为番剧标题）
-     * @param videoName      目标视频文件名，用于集数与文件名匹配
-     * @param preferredLang  偏好语言 chs / cht
-     * @return 按评分降序的候选列表
-     */
-    /**
-     * 搜索字幕候选。
+     * 单次搜索候选条目。
      * <p>
-     * 采用两档策略：
-     * <ol>
-     *   <li><b>精确优先</b>——以视频文件名 + {@code no_muxer=1}（隐含 is_file=1）搜索，优先命中单集字幕；</li>
-     *   <li><b>宽泛兜底</b>——精确无果时以番剧标题搜索，可能命中<b>横跨多季的完整合集包</b>，
-     *       交由解包阶段按目标集数挑选（见 {@link #extractBestFromZip}）。</li>
-     * </ol>
+     * 只发<b>一次</b> {@code sub/search} 请求：既不按视频逐个搜索，也不加 {@code no_muxer}
+     * 做「精确 + 宽泛」两档，更不在搜索阶段按季集过滤——候选全量返回给用户自行挑选，
+     * 既省配额，也避免自动匹配到错误字幕。
      *
-     * @param token          ASSRT token（空则直接返回空）
-     * @param keyword        搜索关键词（通常为番剧标题），兜底搜索使用
-     * @param videoName      目标视频文件名，用于集数匹配与精确搜索
-     * @param preferredLang  偏好语言 chs / cht
-     * @return 按评分降序的候选列表
+     * @param token         ASSRT token（空则返回空列表）
+     * @param keyword       搜索关键词（优先番剧英文标题）
+     * @param preferredLang 偏好语言 chs / cht，仅用于排序打分
+     * @return 按评分降序的候选条目
      */
-    public List<SubtitleCandidate> search(String token, String keyword, String videoName, String preferredLang) {
-        List<SubtitleCandidate> candidates = new ArrayList<>();
-        if (StrUtil.isBlank(token)) {
-            return candidates;
+    public List<AssrtSubtitleItem> searchItems(String token, String keyword, String preferredLang) {
+        List<AssrtSubtitleItem> items = new ArrayList<>();
+        if (StrUtil.isBlank(token) || StrUtil.isBlank(keyword)) {
+            return items;
         }
-        int[] se = extractSeasonEpisode(videoName);
-        Integer videoSeason = se[0] >= 0 ? se[0] : null;
-        Integer videoEp = se[1] >= 0 ? se[1] : null;
-
-        // 1) 精确搜索：以视频文件名 + no_muxer 命中单集字幕
-        if (StrUtil.isNotBlank(videoName)) {
-            candidates.addAll(doSearch(token, videoName, true, videoName, preferredLang, videoSeason, videoEp));
-        }
-        // 2) 宽泛搜索：以番剧标题兜底，可能命中完整合集包
-        if (candidates.isEmpty() && StrUtil.isNotBlank(keyword)) {
-            candidates.addAll(doSearch(token, keyword, false, videoName, preferredLang, videoSeason, videoEp));
-        }
-
-        candidates.sort(Comparator.comparingDouble(SubtitleCandidate::getScore).reversed());
-        return candidates;
-    }
-
-    /**
-     * 执行一次 {@code sub/search} 并把结果解析为候选列表。
-     *
-     * @param noMuxer 是否附加 {@code no_muxer=1}（以视频文件名精匹配）
-     */
-    private List<SubtitleCandidate> doSearch(String token, String query, boolean noMuxer,
-                                             String videoName, String preferredLang,
-                                             Integer videoSeason, Integer videoEp) {
-        List<SubtitleCandidate> candidates = new ArrayList<>();
         try {
-            String q = URLEncoder.encode(query.trim(), StandardCharsets.UTF_8);
-            String url = SEARCH_API + "?token=" + token + "&q=" + q + "&cnt=15&pos=0"
-                    + (noMuxer ? "&no_muxer=1" : "");
-            throttle();
-            String body;
-            try (HttpResponse res = HttpReq.get(url).execute()) {
-                HttpReq.assertStatus(res);
-                body = res.body();
-            }
+            String body = getWithRetry(searchUrl(SEARCH_API, token, keyword),
+                    searchUrl(SEARCH_API_FALLBACK, token, keyword));
             JsonObject root = GsonStatic.fromJson(body, JsonObject.class);
             if (root == null) {
-                return candidates;
+                return items;
             }
             JsonArray subs = resolveSubs(root);
             if (subs == null) {
-                return candidates;
+                return items;
             }
-
             for (JsonElement e : subs) {
                 if (!e.isJsonObject()) {
                     continue;
                 }
-                JsonObject s = e.getAsJsonObject();
-                long id = s.has("id") ? s.get("id").getAsLong() : 0L;
-                String release = optString(s, "videoname", "name", "release", "native_name");
-                String langField = optString(s, "lang", "language", "langchi");
-
-                List<JsonObject> files = resolveFiles(s, "files");
-                if (files.isEmpty() && id > 0) {
-                    files = fetchDetailFiles(token, id);
-                }
-                if (files.isEmpty()) {
-                    // 仅有压缩包直链的情况（合集包常走这里）
-                    String pkgUrl = optString(s, "url");
-                    if (StrUtil.isNotBlank(pkgUrl)) {
-                        SubtitleCandidate arc = archiveCandidate(pkgUrl, release);
-                        if (arc != null) {
-                            scoreAndGate(arc, videoName, release, preferredLang, videoSeason, videoEp);
-                            if (arc.getScore() >= 0) {
-                                candidates.add(arc);
-                            }
-                        }
-                    }
-                    continue;
-                }
-
-                for (JsonObject f : files) {
-                    String fName = optString(f, "f", "name", "filename");
-                    String fUrl = optString(f, "url");
-                    if (StrUtil.isBlank(fUrl) || StrUtil.isBlank(fName)) {
-                        continue;
-                    }
-                    String ext = FileUtil.extName(fName).toLowerCase();
-                    boolean archive = ARCHIVE_EXT.contains(ext);
-                    if (!archive && !SUB_EXT.contains(ext)) {
-                        continue;
-                    }
-                    SubtitleCandidate c = new SubtitleCandidate();
-                    c.setUrl(fUrl);
-                    c.setFileName(fName);
-                    c.setExt(ext);
-                    c.setArchive(archive);
-                    c.setLang(detectLang(fName, langField, preferredLang));
-                    scoreAndGate(c, videoName, release, preferredLang, videoSeason, videoEp);
-                    if (c.getScore() >= 0) {
-                        candidates.add(c);
-                    }
+                AssrtSubtitleItem item = toItem(e.getAsJsonObject(), keyword, preferredLang);
+                if (item != null) {
+                    items.add(item);
                 }
             }
+            items.sort(Comparator.comparingDouble(AssrtSubtitleItem::getScore).reversed());
         } catch (Exception ex) {
-            log.warn("ASSRT 搜索失败 {}: {}", query, ExceptionUtils.getMessage(ex));
+            log.warn("ASSRT 搜索失败 {}: {}", keyword, ExceptionUtils.getMessage(ex));
         }
+        return items;
+    }
+
+    /**
+     * 把搜索结果的一条记录转为候选条目；无可用信息时返回 {@code null}。
+     */
+    private AssrtSubtitleItem toItem(JsonObject s, String keyword, String preferredLang) {
+        long id = s.has("id") ? s.get("id").getAsLong() : 0L;
+        String release = optString(s, "videoname", "name", "release", "native_name");
+        String langField = optString(s, "lang", "language", "langchi");
+        String pkgUrl = optString(s, "url");
+
+        AssrtSubtitleItem item = new AssrtSubtitleItem();
+        item.setId(id);
+        item.setTitle(release);
+        item.setLang(detectLang("", langField, preferredLang));
+
+        List<AssrtSubtitleItem.FileEntry> entries = new ArrayList<>();
+        for (JsonObject f : resolveFiles(s, "files")) {
+            AssrtSubtitleItem.FileEntry entry = toEntry(f, langField, preferredLang);
+            if (entry != null) {
+                entries.add(entry);
+            }
+        }
+        item.setFiles(entries);
+        item.setFileCount(entries.isEmpty() ? -1 : entries.size());
+
+        if (entries.isEmpty() && StrUtil.isNotBlank(pkgUrl)) {
+            // 只有整包直链（合集常见形态）
+            item.setArchive(true);
+            item.setUrl(pkgUrl);
+        }
+        if (entries.isEmpty() && StrUtil.isBlank(pkgUrl) && id <= 0) {
+            // 既无文件、又无直链、还没有 id 可以补全，整条记录没有价值
+            return null;
+        }
+
+        // 排序打分：语言偏好 > 标题相似度 > ass/ssa 格式 > 整包降级
+        double score = 0;
+        String lang = StrUtil.blankToDefault(item.getLang(), "");
+        if (preferredLang != null && preferredLang.equalsIgnoreCase(lang)) {
+            score += 100;
+        } else if (lang.isEmpty()) {
+            score += 10;
+        } else {
+            score -= 40;
+        }
+        score += similarity(keyword, release) * 20;
+        boolean hasAss = entries.stream()
+                .anyMatch(en -> "ass".equals(en.getExt()) || "ssa".equals(en.getExt()));
+        if (hasAss) {
+            score += 8;
+        }
+        if (item.isArchive()) {
+            score -= 25;
+        }
+        item.setScore(score);
+        return item;
+    }
+
+    /**
+     * 把 {@code files[]} / {@code filelist[]} 里的一项转为文件条目；
+     * 非字幕且非压缩包的条目返回 {@code null}。
+     */
+    private AssrtSubtitleItem.FileEntry toEntry(JsonObject f, String langField, String preferredLang) {
+        String name = optString(f, "f", "name", "filename");
+        String url = optString(f, "url");
+        if (StrUtil.isBlank(url) || StrUtil.isBlank(name)) {
+            return null;
+        }
+        String ext = FileUtil.extName(name).toLowerCase(Locale.ROOT);
+        boolean archive = ARCHIVE_EXT.contains(ext);
+        if (!archive && !SUB_EXT.contains(ext)) {
+            return null;
+        }
+        AssrtSubtitleItem.FileEntry entry = new AssrtSubtitleItem.FileEntry();
+        entry.setName(name);
+        entry.setUrl(url);
+        entry.setExt(ext);
+        entry.setArchive(archive);
+        entry.setLang(detectLang(name, langField, preferredLang));
+        return entry;
+    }
+
+    /* ==================== 解析与下载 ==================== */
+
+    /**
+     * 把用户选中的候选条目解析为可下载的具体文件。
+     * <p>
+     * 条目内联了 {@code files} 时直接展开（<b>不消耗</b>额外配额）；否则按 id 调一次
+     * {@code sub/detail} 补全。整包条目（仅有 {@code url}）包装成压缩包候选，
+     * 交由 {@link #download} 解包后按目标集数挑选。
+     *
+     * @param token         ASSRT token
+     * @param item          用户选中的候选条目
+     * @param preferredLang 偏好语言，用于候选排序
+     * @return 按「单文件优先、格式优先、语言匹配优先」排序的候选文件
+     */
+    public List<SubtitleCandidate> resolveCandidates(String token, AssrtSubtitleItem item,
+                                                     String preferredLang) {
+        List<SubtitleCandidate> candidates = new ArrayList<>();
+        if (item == null) {
+            return candidates;
+        }
+        List<AssrtSubtitleItem.FileEntry> entries = new ArrayList<>(item.getFiles());
+        if (entries.isEmpty() && item.getId() > 0) {
+            for (JsonObject f : fetchDetailFiles(token, item.getId())) {
+                AssrtSubtitleItem.FileEntry entry = toEntry(f, item.getLang(), preferredLang);
+                if (entry != null) {
+                    entries.add(entry);
+                }
+            }
+        }
+        for (AssrtSubtitleItem.FileEntry entry : entries) {
+            SubtitleCandidate c = new SubtitleCandidate();
+            c.setUrl(entry.getUrl());
+            c.setFileName(entry.getName());
+            c.setExt(entry.getExt());
+            c.setArchive(entry.isArchive());
+            c.setLang(StrUtil.blankToDefault(entry.getLang(), item.getLang()));
+            candidates.add(c);
+        }
+        if (candidates.isEmpty() && StrUtil.isNotBlank(item.getUrl())) {
+            SubtitleCandidate arc = archiveCandidate(item.getUrl(), item.getTitle());
+            if (arc != null) {
+                arc.setLang(StrUtil.blankToDefault(item.getLang(), ""));
+                candidates.add(arc);
+            }
+        }
+        // 单文件优先（合集包要解包且可能不含目标集）；其次 ass/ssa；最后语言匹配
+        candidates.sort(Comparator
+                .comparingInt((SubtitleCandidate c) -> c.isArchive() ? 1 : 0)
+                .thenComparingInt(c -> ("ass".equals(c.getExt()) || "ssa".equals(c.getExt())) ? 0 : 1)
+                .thenComparingInt(c -> preferredLang != null && preferredLang.equalsIgnoreCase(c.getLang()) ? 0 : 1));
         return candidates;
+    }
+
+    /**
+     * 判断单文件候选是否与目标视频的季/集匹配。
+     * <p>
+     * 双方都能解析且不一致时返回 {@code false}（剔除）；任一方解析不出则放行，避免误伤。
+     * 压缩包候选不适用本判定（合集包内条目在解包阶段逐个判定）。
+     *
+     * @param candidateName 候选文件名
+     * @param release       候选的发布名（辅助解析）
+     * @param videoSeason   目标季（可空）
+     * @param videoEp       目标集（可空）
+     */
+    public static boolean matchesEpisode(String candidateName, String release,
+                                         Integer videoSeason, Integer videoEp) {
+        int[] ce = extractSeasonEpisode(candidateName + " " + release);
+        Integer cSeason = ce[0] >= 0 ? ce[0] : null;
+        Integer cEp = ce[1] >= 0 ? ce[1] : null;
+        if (videoEp != null && cEp != null && !videoEp.equals(cEp)) {
+            return false;
+        }
+        return videoSeason == null || cSeason == null || videoSeason.equals(cSeason);
     }
 
     /**
@@ -260,55 +362,143 @@ public class AssrtSubtitleProvider {
         }
     }
 
+    /* ==================== 网络层：超时 / 重试 / 域名回退 ==================== */
+
     /**
-     * 评分并按集/季门槛过滤（返回 score<0 表示被门槛剔除）。
+     * 带超时与重试的 GET。
      * <p>
-     * 压缩包（完整合集包）单个文件名无法对应目标集数，<b>不在候选阶段按集数剔除</b>，
-     * 只做降级处理，真正按目标集数挑选交给 {@link #extractBestFromZip}。
+     * 瞬时故障（连接/读取超时、连接被重置、DNS 失败、5xx、429 与 ASSRT 的 30900 限流）
+     * 按 1s / 2s / 4s 指数退避重试；重试时<b>交替使用主/备域名</b>，主域名持续不可用时
+     * 下一次尝试直接换 {@code api.makedie.me}。确定性错误（token 无效 20001、
+     * 关键词过短 101 等 4xx）直接抛出，不做无谓重试。
      *
-     * @param videoSeason 目标季（可空）
-     * @param videoEp     目标集（可空）
+     * @param primaryUrl  主域名请求地址
+     * @param fallbackUrl 备用域名请求地址（可空）
      */
-    private void scoreAndGate(SubtitleCandidate c, String videoName, String release, String preferredLang,
-                              Integer videoSeason, Integer videoEp) {
-        double score = 0;
-        String lang = StrUtil.blankToDefault(c.getLang(), "");
-        if (preferredLang != null && preferredLang.equalsIgnoreCase(lang)) {
-            score += 100;
-        } else if (lang.isEmpty()) {
-            score += 10;
-        } else {
-            score -= 40;
+    private String getWithRetry(String primaryUrl, String fallbackUrl) {
+        String[] urls = StrUtil.isBlank(fallbackUrl) || fallbackUrl.equals(primaryUrl)
+                ? new String[]{primaryUrl}
+                : new String[]{primaryUrl, fallbackUrl};
+        int retry = retryCount();
+        RuntimeException last = null;
+        for (int attempt = 0; attempt <= retry; attempt++) {
+            String url = urls[attempt % urls.length];
+            // 抑制底层 ERROR 日志：瞬时故障会在这里重试，由下面带上下文的 WARN 记录
+            HttpRequestPlus.setRetryMode(true);
+            try {
+                return getOnce(url);
+            } catch (RuntimeException e) {
+                last = e;
+                if (!isTransient(e)) {
+                    throw e;
+                }
+                if (attempt >= retry) {
+                    break;
+                }
+                long delay = RETRY_BACKOFF_MS << attempt;
+                log.warn("ASSRT 请求临时故障，准备重试 attempt={}/{} url={} delayMs={} error={}",
+                        attempt + 1, retry + 1, url, delay, ExceptionUtils.getMessage(e));
+                ThreadUtil.sleep(delay);
+            } finally {
+                HttpRequestPlus.setRetryMode(false);
+            }
         }
-        score += similarity(videoName, c.getFileName()) * 60;
-        if (StrUtil.isNotBlank(release)) {
-            score += similarity(videoName, release) * 20;
-        }
-        if ("ass".equals(c.getExt()) || "ssa".equals(c.getExt())) {
-            score += 8;
-        }
-
-        if (c.isArchive()) {
-            // 合集包：候选阶段不按集数剔除，降级后留给解包阶段挑选
-            score -= 25;
-            c.setScore(score);
-            return;
-        }
-
-        // 集数/季数门槛：双方都能解析且不一致才剔除（避免误伤）
-        int[] ce = extractSeasonEpisode(c.getFileName() + " " + release);
-        Integer cSeason = ce[0] >= 0 ? ce[0] : null;
-        Integer cEp = ce[1] >= 0 ? ce[1] : null;
-        if (videoEp != null && cEp != null && !videoEp.equals(cEp)) {
-            c.setScore(-1);
-            return;
-        }
-        if (videoSeason != null && cSeason != null && !videoSeason.equals(cSeason)) {
-            c.setScore(-1);
-            return;
-        }
-        c.setScore(score);
+        throw last == null ? new IllegalStateException("ASSRT 请求失败") : last;
     }
+
+    /**
+     * 执行一次 ASSRT API 请求（限流 + 分离超时）。
+     * 非 2xx 一律抛异常，交由 {@link #getWithRetry} 判定是否可重试。
+     */
+    private String getOnce(String url) {
+        throttle();
+        try (HttpResponse res = HttpReq.get(url, connectTimeoutMs(), readTimeoutMs()).execute()) {
+            int status = res.getStatus();
+            if (status >= 200 && status < 300) {
+                return res.body();
+            }
+            throw new IllegalStateException("url: " + url + ", status: " + status);
+        }
+    }
+
+    /**
+     * 判断是否为可重试的瞬时故障。
+     * <p>
+     * 除网络层异常（超时/连接失败/DNS）外，还覆盖服务端 5xx、429，以及 ASSRT 文档中
+     * 明确要求「退避重试」的 {@code 30900}（超出接口调用限制）。
+     */
+    static boolean isTransient(Throwable throwable) {
+        Throwable current = throwable;
+        while (current != null) {
+            String className = current.getClass().getSimpleName().toLowerCase(Locale.ROOT);
+            String message = StrUtil.blankToDefault(current.getMessage(), "").toLowerCase(Locale.ROOT);
+            if (className.contains("sockettimeout")
+                    || className.contains("connectexception")
+                    || className.contains("noroutetohost")
+                    || className.contains("unknownhost")
+                    || className.contains("socketexception")
+                    || message.contains("read timed out")
+                    || message.contains("connect timed out")
+                    || message.contains("connection reset")
+                    || message.contains("connection refused")
+                    || message.contains("status: 429")
+                    || message.contains("status: 500")
+                    || message.contains("status: 502")
+                    || message.contains("status: 503")
+                    || message.contains("status: 504")
+                    || message.contains("30900")) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    private static String searchUrl(String api, String token, String query) {
+        String q = URLEncoder.encode(query.trim(), StandardCharsets.UTF_8);
+        String t = URLEncoder.encode(token.trim(), StandardCharsets.UTF_8);
+        return api + "?token=" + t + "&q=" + q + "&cnt=15&pos=0";
+    }
+
+    /**
+     * ASSRT 连接超时（毫秒）：取自配置，非法/未配置时回落默认
+     */
+    private static int connectTimeoutMs() {
+        return clamp(configInt(c -> c.getAssrtConnectTimeoutMs()), 3_000, 120_000, DEFAULT_CONNECT_TIMEOUT_MS);
+    }
+
+    /**
+     * ASSRT 读取超时（毫秒）：取自配置，非法/未配置时回落默认
+     */
+    private static int readTimeoutMs() {
+        return clamp(configInt(c -> c.getAssrtReadTimeoutMs()), 5_000, 300_000, DEFAULT_READ_TIMEOUT_MS);
+    }
+
+    /**
+     * 瞬时故障重试次数：取自配置，非法/未配置时回落默认（上限 5 次，避免长时间阻塞）
+     */
+    private static int retryCount() {
+        return clamp(configInt(c -> c.getAssrtRetryCount()), 0, 5, DEFAULT_RETRY_COUNT);
+    }
+
+    private static int configInt(java.util.function.ToIntFunction<Config> getter) {
+        try {
+            Config config = ConfigUtil.CONFIG;
+            return config == null ? Integer.MIN_VALUE : getter.applyAsInt(config);
+        } catch (Exception ignored) {
+            // 配置未就绪（如单测环境）时回落默认
+            return Integer.MIN_VALUE;
+        }
+    }
+
+    private static int clamp(int value, int min, int max, int fallback) {
+        if (value == Integer.MIN_VALUE) {
+            return fallback;
+        }
+        return Math.max(min, Math.min(max, value));
+    }
+
+    /* ==================== 内部工具 ==================== */
 
     private static JsonArray resolveSubs(JsonObject root) {
         JsonElement subEl = root.get("sub");
@@ -344,15 +534,12 @@ public class AssrtSubtitleProvider {
         return files;
     }
 
+    /**
+     * 按 id 调一次 {@code sub/detail} 补全文件列表；失败返回空列表。
+     */
     private List<JsonObject> fetchDetailFiles(String token, long id) {
         try {
-            String url = DETAIL_API + "?token=" + token + "&id=" + id;
-            throttle();
-            String body;
-            try (HttpResponse res = HttpReq.get(url).execute()) {
-                HttpReq.assertStatus(res);
-                body = res.body();
-            }
+            String body = getWithRetry(detailUrl(DETAIL_API, token, id), detailUrl(DETAIL_API_FALLBACK, token, id));
             JsonObject root = GsonStatic.fromJson(body, JsonObject.class);
             if (root == null || !root.has("sub")) {
                 return List.of();
@@ -378,16 +565,19 @@ public class AssrtSubtitleProvider {
                     JsonObject wrap = new JsonObject();
                     wrap.addProperty("f", arc.getFileName());
                     wrap.addProperty("url", arc.getUrl());
-                    wrap.addProperty("isArchive", true);
-                    files.add(wrap);
+                    return List.of(wrap);
                 }
             }
-            ThreadUtil.sleep(500);
-            return files;
+            return List.of();
         } catch (Exception ex) {
             log.warn("ASSRT 详情获取失败 id={}: {}", id, ExceptionUtils.getMessage(ex));
             return List.of();
         }
+    }
+
+    private static String detailUrl(String api, String token, long id) {
+        String t = URLEncoder.encode(token.trim(), StandardCharsets.UTF_8);
+        return api + "?token=" + t + "&id=" + id;
     }
 
     private SubtitleCandidate archiveCandidate(String pkgUrl, String release) {
@@ -396,7 +586,7 @@ public class AssrtSubtitleProvider {
             int slash = pkgUrl.lastIndexOf('/');
             name = slash >= 0 ? pkgUrl.substring(slash + 1) : "package";
         }
-        String ext = FileUtil.extName(name).toLowerCase();
+        String ext = FileUtil.extName(name).toLowerCase(Locale.ROOT);
         if (!ARCHIVE_EXT.contains(ext)) {
             ext = "zip";
         }
@@ -434,13 +624,9 @@ public class AssrtSubtitleProvider {
      */
     private static long currentMinIntervalMs() {
         int rpm = DEFAULT_QUOTA_PER_MINUTE;
-        try {
-            Integer cfg = ConfigUtil.CONFIG.getAssrtRateLimitPerMinute();
-            if (cfg != null && cfg > 0) {
-                rpm = cfg;
-            }
-        } catch (Exception ignored) {
-            // 配置未就绪时回落默认
+        int configured = configInt(c -> c.getAssrtRateLimitPerMinute());
+        if (configured != Integer.MIN_VALUE && configured > 0) {
+            rpm = configured;
         }
         if (rpm > 120) {
             rpm = 120;
@@ -454,7 +640,7 @@ public class AssrtSubtitleProvider {
             safeUrl = "https:" + safeUrl;
         }
         byte[] data;
-        try (HttpResponse res = HttpReq.get(safeUrl).execute()) {
+        try (HttpResponse res = HttpReq.get(safeUrl, connectTimeoutMs(), readTimeoutMs()).execute()) {
             if (!res.isOk()) {
                 data = new byte[0];
             } else {
@@ -495,7 +681,7 @@ public class AssrtSubtitleProvider {
                     continue;
                 }
                 String name = entry.getName();
-                String ext = FileUtil.extName(name).toLowerCase();
+                String ext = FileUtil.extName(name).toLowerCase(Locale.ROOT);
                 if (!SUB_EXT.contains(ext)) {
                     continue;
                 }
@@ -566,7 +752,7 @@ public class AssrtSubtitleProvider {
     }
 
     private String detectLang(String fileName, String langField, String preferredLang) {
-        String lower = StrUtil.blankToDefault(fileName, "").toLowerCase();
+        String lower = StrUtil.blankToDefault(fileName, "").toLowerCase(Locale.ROOT);
         for (String kw : LANG_HINTS.getOrDefault(preferredLang, List.of())) {
             if (lower.contains(kw)) {
                 return preferredLang;
@@ -580,7 +766,7 @@ public class AssrtSubtitleProvider {
             }
         }
         if (StrUtil.isNotBlank(langField)) {
-            String lf = langField.toLowerCase();
+            String lf = langField.toLowerCase(Locale.ROOT);
             for (Map.Entry<String, List<String>> e : LANG_HINTS.entrySet()) {
                 for (String kw : e.getValue()) {
                     if (lf.contains(kw)) {
@@ -610,7 +796,7 @@ public class AssrtSubtitleProvider {
         if (StrUtil.isBlank(s)) {
             return set;
         }
-        for (String t : s.toLowerCase().split("[^\\w\\u4e00-\\u9fa5]+")) {
+        for (String t : s.toLowerCase(Locale.ROOT).split("[^\\w\\u4e00-\\u9fa5]+")) {
             if (t.isEmpty() || t.matches("\\d+")) {
                 continue;
             }

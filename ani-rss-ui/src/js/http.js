@@ -658,11 +658,22 @@ export let subtitleImport = (formData) => postFormData('api/subtitleImport', for
 export let subtitleImportPreview = (formData) => postFormData('api/subtitleImportPreview', formData)
 
 /**
- * 预览射手网(ASSRT)字幕获取（不写盘）：返回 { planId, items, total, matched }
+ * 搜索射手网(ASSRT)字幕候选：单次搜索，返回 { searchId, keyword, candidates, total }
+ * 由用户从 candidates 里自行挑选，再调 subtitleFetchPreview 下载选中项。
  * @param aniId 订阅 id
  * @returns {Promise<unknown>}
  */
-export let subtitleFetchPreview = (aniId) => api.post('api/subtitleFetchPreview', {aniId}, {silent: true})
+export let subtitleAssrtSearch = (aniId) => api.post('api/subtitleAssrtSearch', {aniId}, {silent: true})
+
+/**
+ * 预览射手网(ASSRT)字幕获取（不写盘）：下载用户选中的候选，返回 { planId, items, total, matched }
+ * @param aniId 订阅 id
+ * @param searchId 搜索结果 id（来自 subtitleAssrtSearch）
+ * @param index 用户选中的候选序号
+ * @returns {Promise<unknown>}
+ */
+export let subtitleFetchPreview = (aniId, searchId, index) =>
+    api.post('api/subtitleFetchPreview', {aniId, searchId, index}, {silent: true})
 
 /**
  * 执行射手网字幕写入：消费预览返回的 planId

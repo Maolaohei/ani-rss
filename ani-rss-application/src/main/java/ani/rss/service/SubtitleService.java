@@ -7,6 +7,7 @@ import ani.rss.download.OpenListApi;
 import ani.rss.entity.Ani;
 import ani.rss.entity.OpenListFileInfo;
 import ani.rss.entity.PlayItem;
+import ani.rss.service.subtitle.AssrtSubtitleItem;
 import ani.rss.service.subtitle.AssrtSubtitleProvider;
 import ani.rss.service.subtitle.SubtitleCandidate;
 import ani.rss.service.subtitle.SubtitleMatchLog;
@@ -42,13 +43,17 @@ import java.util.UUID;
  * 本服务提供"缺字幕清单 + 就地附加字幕"，并统一承载<b>手动</b>字幕管理：
  * <ul>
  *   <li>导入用户本地上传的字幕（{@link #importLocalSubtitles}）；</li>
- *   <li>从射手网（ASSRT）获取字幕（{@link #planFetchFromAssrt} / {@link #applyFetchPlan}）。</li>
+ *   <li>从射手网（ASSRT）获取字幕（{@link #searchAssrt} / {@link #planFetchFromAssrt} / {@link #applyFetchPlan}）。</li>
  * </ul>
  * <b>关于在线字幕源</b>：为避免自动匹配到错误字幕，下载完成后<b>不再</b>自动抓取。
- * 所有写入都必须先经过「预览 → 二次确认」，因此获取类操作拆成两步：
- * 先 {@link #planFetchFromAssrt} 生成匹配计划（只读，不写盘），
- * 用户确认后再 {@link #applyFetchPlan} 落盘。计划在内存中短期缓存，
- * 确认时直接复用预览阶段已下载的字幕内容，避免重复请求字幕源。
+ * 射手网获取拆成三步，每一步都不写盘：
+ * <ol>
+ *   <li>{@link #searchAssrt}——以番剧<b>英文标题</b>发起<b>单次</b>搜索，返回候选条目供用户挑选
+ *       （ASSRT 配额紧，默认 5 次/分钟，因此不按视频/集数拆分请求）；</li>
+ *   <li>{@link #planFetchFromAssrt}——用户选中某条候选后才下载其内容，生成匹配计划（只读）；</li>
+ *   <li>{@link #applyFetchPlan}——用户二次确认后落盘。</li>
+ * </ol>
+ * 搜索结果与匹配计划都在内存中短期缓存，避免重复请求字幕源。
  */
 @Slf4j
 @Service
@@ -97,6 +102,26 @@ public class SubtitleService {
                     return size() > MAX_PLAN_CACHE;
                 }
             };
+
+    /**
+     * 射手网搜索结果缓存：searchId → 候选条目。
+     * <p>
+     * 搜索与「用户选中后的下载」之间可能间隔较久（用户要逐条比较），故缓存候选条目本身，
+     * 而不是把 ASSRT 的下载直链透给前端——直链带时效，且重新搜索会白白消耗配额。
+     * 同样 LRU + TTL。
+     */
+    private static final Map<String, CachedSearch> SEARCH_CACHE =
+            new LinkedHashMap<>(4, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, CachedSearch> eldest) {
+                    return size() > MAX_PLAN_CACHE;
+                }
+            };
+
+    /**
+     * 搜索结果缓存的有效期，与匹配计划一致
+     */
+    private static final long SEARCH_TTL_MS = 30 * 60 * 1000L;
 
     @Resource
     private PlayController playController;
@@ -357,6 +382,50 @@ public class SubtitleService {
                 }
             }
             return matched;
+        }
+    }
+
+    /**
+     * 射手网搜索结果：单次搜索得到的候选条目 + 后续选择所需的 {@code searchId}。
+     * <p>
+     * 前端据此渲染候选列表（字幕名 / 语言 / 类型 / 文件数），用户选中某一条后再回传
+     * {@code searchId + index} 进入下载与写入流程。
+     */
+    @Getter
+    public static class AssrtSearchResult {
+        /**
+         * 搜索结果缓存 id，用于「选中某条候选后生成计划」时取回候选
+         */
+        private final String searchId;
+        /**
+         * 实际使用的搜索关键词（便于用户判断为什么搜不到，通常是番剧英文标题）
+         */
+        private final String keyword;
+        /**
+         * 候选列表（前端表格数据）
+         */
+        private final List<Map<String, Object>> candidates;
+
+        AssrtSearchResult(String searchId, String keyword, List<Map<String, Object>> candidates) {
+            this.searchId = searchId;
+            this.keyword = keyword;
+            this.candidates = candidates;
+        }
+    }
+
+    /**
+     * 搜索结果缓存条目：候选条目 + 所属订阅 + 构建时刻（TTL 判定）。
+     */
+    private static class CachedSearch {
+        private final String aniId;
+        private final String keyword;
+        private final List<AssrtSubtitleItem> items;
+        private final long createdAt = System.currentTimeMillis();
+
+        CachedSearch(String aniId, String keyword, List<AssrtSubtitleItem> items) {
+            this.aniId = aniId;
+            this.keyword = keyword;
+            this.items = items;
         }
     }
 
@@ -629,29 +698,91 @@ public class SubtitleService {
     /* ==================== 射手网（ASSRT）手动获取 ==================== */
 
     /**
-     * 生成射手网字幕获取计划（<b>只读，不写盘</b>）。
+     * 射手网字幕<b>搜索</b>（只读，不写盘、不下载）。
      * <p>
-     * 遍历订阅目录内<b>尚无字幕</b>的视频，逐个搜索射手网候选并挑出最优条目，
-     * 下载其内容暂存内存，返回「改名前 / 改名后 / 对应的视频」预览供用户二次确认。
-     * 计划会写入短期缓存，用户确认后由 {@link #applyFetchPlan} 直接消费，
-     * 避免预览与写入各跑一次字幕源请求（射手网有调用频率限制）。
+     * 只发<b>一次</b> {@code sub/search} 请求，关键词优先取番剧<b>英文标题</b>
+     * （见 {@link #searchKeyword}）——ASSRT 的条目名以英文/原文为主，用中文标题常常搜不到。
+     * 不再按「每个视频 × 精确/宽泛两档」拆分请求：那会在一次批量匹配里打满配额
+     * （默认 5 次/分钟）并触发 {@code 30900}。
+     * <p>
+     * 候选条目原样返回给用户自行挑选，后端不做任何自动挑选——避免自动匹配到错误字幕。
+     * 结果写入短期缓存，用户选中后由
+     * {@link #planFetchFromAssrt(Ani, String, int)} 取回并进入下载流程。
      *
      * @param ani 订阅
-     * @return 匹配计划（可能为空计划，表示没有缺失字幕的视频）
+     * @return 搜索结果（含 searchId 与候选列表）；未配置 Token 或搜索失败时候选为空
      */
-    public FetchPlan planFetchFromAssrt(Ani ani) {
+    public AssrtSearchResult searchAssrt(Ani ani) {
+        if (ani == null) {
+            return new AssrtSearchResult("", "", List.of());
+        }
+        String token = StrUtil.blankToDefault(ConfigUtil.CONFIG.getAssrtToken(), "");
+        String lang = StrUtil.blankToDefault(ConfigUtil.CONFIG.getSubtitleLang(), "chs");
+        String keyword = searchKeyword(ani);
+        if (StrUtil.isBlank(token) || StrUtil.isBlank(keyword)) {
+            return new AssrtSearchResult("", keyword, List.of());
+        }
+
+        List<AssrtSubtitleItem> items = assrtSubtitleProvider.searchItems(token, keyword, lang);
+        List<Map<String, Object>> candidates = new ArrayList<>(items.size());
+        for (int i = 0; i < items.size(); i++) {
+            AssrtSubtitleItem item = items.get(i);
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("index", i);
+            row.put("title", item.getTitle());
+            row.put("lang", item.getLang());
+            row.put("archive", item.isArchive());
+            // 未知文件数（需选中后调 detail 补全）用 -1 表示，前端据此显示「需解析」
+            row.put("fileCount", item.getFileCount());
+            candidates.add(row);
+        }
+
+        String searchId = UUID.randomUUID().toString();
+        cacheSearch(searchId, new CachedSearch(ani.getId(), keyword, items));
+        return new AssrtSearchResult(searchId, keyword, candidates);
+    }
+
+    /**
+     * 按用户选中的候选条目生成射手网字幕获取计划（<b>只读，不写盘</b>）。
+     * <p>
+     * 流程：取回搜索结果 → 解析选中条目为具体字幕文件（内联文件直接用，否则调一次
+     * {@code sub/detail}）→ 遍历订阅目录内<b>尚无字幕</b>的视频，逐个从候选中挑选最匹配的一条
+     * 并下载内容暂存内存，返回「改名前 / 改名后 / 对应的视频」预览供用户二次确认。
+     *
+     * @param ani       订阅
+     * @param searchId  {@link #searchAssrt} 返回的搜索结果 id
+     * @param itemIndex 用户选中的候选下标
+     * @return 匹配计划（可能为空计划）
+     */
+    public FetchPlan planFetchFromAssrt(Ani ani, String searchId, int itemIndex) {
         FetchPlan plan = new FetchPlan(UUID.randomUUID().toString(), ani == null ? null : ani.getId(),
                 ani == null ? null : ani.getTitle());
         if (ani == null) {
             return plan;
         }
+        CachedSearch cached = takeSearch(searchId);
+        if (cached == null) {
+            throw new IllegalStateException("搜索结果已过期，请重新搜索");
+        }
+        if (itemIndex < 0 || itemIndex >= cached.items.size()) {
+            throw new IllegalArgumentException("候选序号超出范围");
+        }
+
+        String token = StrUtil.blankToDefault(ConfigUtil.CONFIG.getAssrtToken(), "");
+        String lang = StrUtil.blankToDefault(ConfigUtil.CONFIG.getSubtitleLang(), "chs");
+        AssrtSubtitleItem selected = cached.items.get(itemIndex);
+        List<SubtitleCandidate> candidates = assrtSubtitleProvider.resolveCandidates(token, selected, lang);
+        if (candidates.isEmpty()) {
+            throw new IllegalStateException("所选字幕条目没有可下载的文件，请换一个候选");
+        }
+
         String toolType = StrUtil.blankToDefault(ConfigUtil.CONFIG.getDownloadToolType(), "");
         if ("OpenList".equals(toolType)) {
             // OpenList 离线下载：视频落在云端，字幕需上传到云端同目录
-            planCloudFetch(ani, plan);
+            planCloudFetch(ani, plan, candidates, lang);
         } else {
             // 其余下载器（qBittorrent / Transmission / aria2 / 本地路径等）均视为本地下载
-            planLocalFetch(ani, plan);
+            planLocalFetch(ani, plan, candidates, lang);
         }
         cachePlan(plan);
         return plan;
@@ -730,7 +861,96 @@ public class SubtitleService {
         PLAN_CACHE.entrySet().removeIf(e -> now - e.getValue().getCreatedAt() > PLAN_TTL_MS);
     }
 
-    private void planLocalFetch(Ani ani, FetchPlan plan) {
+    private static synchronized void cacheSearch(String searchId, CachedSearch search) {
+        purgeExpiredSearches();
+        SEARCH_CACHE.put(searchId, search);
+    }
+
+    /**
+     * 取出搜索结果（可重复取用：用户可能反复比较不同候选后才生成计划）。
+     * 不存在或已过期返回 {@code null}。
+     */
+    private static synchronized CachedSearch takeSearch(String searchId) {
+        if (StrUtil.isBlank(searchId)) {
+            return null;
+        }
+        purgeExpiredSearches();
+        CachedSearch search = SEARCH_CACHE.get(searchId);
+        if (search == null || System.currentTimeMillis() - search.createdAt > SEARCH_TTL_MS) {
+            return null;
+        }
+        return search;
+    }
+
+    private static void purgeExpiredSearches() {
+        long now = System.currentTimeMillis();
+        SEARCH_CACHE.entrySet().removeIf(e -> now - e.getValue().createdAt > SEARCH_TTL_MS);
+    }
+
+    /**
+     * 选择射手网搜索关键词：<b>优先英文标题</b>。
+     * <p>
+     * ASSRT 的条目名以英文/原文为主，用中文标题常常搜不到，故按以下优先级取第一个可用者：
+     * <ol>
+     *   <li>TMDB 名称（含拉丁字母，通常是英文标题）；</li>
+     *   <li>订阅标题（含拉丁字母，如 RSS 里的英文原名）；</li>
+     *   <li>日文原名——ASSRT 对日文名收录较好，是中文标题之外的最佳兜底；</li>
+     *   <li>TMDB 名称 / 订阅标题（无拉丁字母时的兜底）。</li>
+     * </ol>
+     * 关键词会先剔除 TMDB 附加的年份与 id 后缀（如 {@code High School DxD (2018) {tmdb-12345}}），
+     * 否则会把搜索范围收得过窄。
+     */
+    static String searchKeyword(Ani ani) {
+        if (ani == null) {
+            return "";
+        }
+        String tmdb = cleanKeyword(ani.getThemoviedbName());
+        String title = cleanKeyword(ani.getTitle());
+        String jp = cleanKeyword(ani.getJpTitle());
+        if (containsLatin(tmdb)) {
+            return tmdb;
+        }
+        if (containsLatin(title)) {
+            return title;
+        }
+        if (StrUtil.isNotBlank(jp)) {
+            return jp;
+        }
+        if (StrUtil.isNotBlank(tmdb)) {
+            return tmdb;
+        }
+        return title;
+    }
+
+    /**
+     * 清洗搜索关键词：去掉 TMDB 附加的 {@code {tmdb-12345}} 与年份括号，折叠多余空白。
+     */
+    private static String cleanKeyword(String keyword) {
+        if (StrUtil.isBlank(keyword)) {
+            return "";
+        }
+        return keyword.replaceAll("\\{tmdb-\\d+\\}", " ")
+                .replaceAll("\\[\\s*\\d{4}\\s*\\]", " ")
+                .replaceAll("\\(\\s*\\d{4}\\s*\\)", " ")
+                .replaceAll("[_\\-]+", " ")
+                .replaceAll("\\s+", " ")
+                .trim();
+    }
+
+    private static boolean containsLatin(String s) {
+        if (StrUtil.isBlank(s)) {
+            return false;
+        }
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void planLocalFetch(Ani ani, FetchPlan plan, List<SubtitleCandidate> candidates, String lang) {
         File dir = new File(downloadService.getDownloadPath(ani));
         if (!dir.exists() || !dir.isDirectory()) {
             return;
@@ -740,11 +960,12 @@ public class SubtitleService {
                 log.info("本地已有字幕，跳过: {}", video.getName());
                 continue;
             }
-            plan.getItems().add(planOne(ani, video.getName(), FileUtil.mainName(video), null, video, null));
+            plan.getItems().add(planOne(ani, video.getName(), FileUtil.mainName(video), null, video, null,
+                    candidates, lang));
         }
     }
 
-    private void planCloudFetch(Ani ani, FetchPlan plan) {
+    private void planCloudFetch(Ani ani, FetchPlan plan, List<SubtitleCandidate> candidates, String lang) {
         OpenListApi api = new OpenListApi();
         api.setConfig(ConfigUtil.CONFIG);
         String cloudDir = downloadService.getDownloadPath(ani);
@@ -761,33 +982,33 @@ public class SubtitleService {
                 log.info("云端已有字幕，跳过: {}", f.getName());
                 continue;
             }
-            plan.getItems().add(planOne(ani, f.getName(), mainName, f.getPath(), null, api));
+            plan.getItems().add(planOne(ani, f.getName(), mainName, f.getPath(), null, api, candidates, lang));
         }
     }
 
     /**
-     * 为单个视频生成计划条目：搜索 → 挑选 → 下载内容（暂存内存，不落盘）。
+     * 为单个视频生成计划条目：从<b>用户选中的候选</b>里挑出匹配该视频的一条并下载内容
+     * （暂存内存，不落盘）。
+     * <p>
+     * 单文件候选先做季/集门槛校验（{@link AssrtSubtitleProvider#matchesEpisode}），
+     * 避免把第 3 集的字幕挂到第 5 集；压缩包候选交给解包阶段按目标集数挑选。
+     * 候选全部不匹配时返回未命中条目，让用户换一个候选或改用手动上传。
      */
     private FetchPlanItem planOne(Ani ani, String videoName, String mainName, String cloudDir,
-                                  File localVideo, OpenListApi api) {
-        String token = ConfigUtil.CONFIG.getAssrtToken();
-        String lang = StrUtil.blankToDefault(ConfigUtil.CONFIG.getSubtitleLang(), "chs");
-        if (StrUtil.isBlank(token)) {
-            return notMatched(videoName, "未配置 ASSRT Token，无法从射手网获取");
-        }
-        String keyword = StrUtil.blankToDefault(ani.getTitle(), "").trim();
-        if (StrUtil.isBlank(keyword)) {
-            keyword = mainName;
+                                  File localVideo, OpenListApi api,
+                                  List<SubtitleCandidate> candidates, String lang) {
+        if (candidates == null || candidates.isEmpty()) {
+            return notMatched(videoName, "所选字幕没有可下载的文件，建议重新搜索或手动上传");
         }
         int[] se = AssrtSubtitleProvider.extractSeasonEpisode(videoName);
         Integer targetSeason = se[0] >= 0 ? se[0] : null;
         Integer targetEp = se[1] >= 0 ? se[1] : null;
 
-        List<SubtitleCandidate> candidates = assrtSubtitleProvider.search(token, keyword, videoName, lang);
-        if (candidates.isEmpty()) {
-            return notMatched(videoName, "射手网未找到候选字幕（关键词：" + keyword + "）");
-        }
         for (SubtitleCandidate c : candidates) {
+            if (!c.isArchive() && !AssrtSubtitleProvider.matchesEpisode(c.getFileName(), "", targetSeason, targetEp)) {
+                // 单文件候选与目标视频的季/集不符，跳过（压缩包不在此判定）
+                continue;
+            }
             try {
                 SubtitlePick pick = assrtSubtitleProvider.download(c, lang, targetSeason, targetEp, videoName, ani);
                 if (pick == null || pick.getContent() == null || pick.getContent().length == 0) {
@@ -809,7 +1030,7 @@ public class SubtitleService {
                 log.warn("射手网候选写入准备失败 {}: {}", c.getFileName(), ExceptionUtils.getMessage(ex));
             }
         }
-        return notMatched(videoName, "射手网候选字幕均无法解析，建议手动上传");
+        return notMatched(videoName, "所选字幕无法匹配该视频（集数/季数不符），建议换一个候选或手动上传");
     }
 
     /**

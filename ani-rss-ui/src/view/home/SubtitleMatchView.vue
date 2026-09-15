@@ -129,9 +129,10 @@
 
         <el-form-item v-else label="获取说明">
           <el-text size="small" type="info">
-            将遍历该订阅下载目录内<b>尚未挂字幕</b>的视频，按「季 + 集」从射手网(ASSRT)匹配并挑选最优条目。
+            先<b>搜索候选</b>：以该订阅的<b>英文标题</b>向射手网(ASSRT)发起<b>单次</b>搜索（不按季集拆分请求），
+            列出候选字幕后由你挑选；选中后再下载并预览，确认无误才写入。
             需先在 设置 → 其他设置 中开启「字幕手动获取」并填写 ASSRT Token。
-            字幕源有调用频率限制（默认 5 次/分钟），缺失集数较多时预览会较慢；配额更高可在同一处调大限制。
+            字幕源有调用频率限制（默认 5 次/分钟），因此搜索阶段只发一次请求。
           </el-text>
         </el-form-item>
       </el-form>
@@ -144,7 +145,62 @@
         </template>
       </el-alert>
 
-      <section v-if="step !== 'form'" class="import-result">
+      <section v-if="step === 'select'" class="import-result">
+        <div class="section-title">
+          <h3>选择字幕</h3>
+          <div class="result-summary">
+            <el-tag size="small" type="primary">共 {{ candidates.length }} 条候选</el-tag>
+            <el-tag size="small" type="info">关键词：{{ searchKeyword || '—' }}</el-tag>
+          </div>
+        </div>
+
+        <el-alert class="import-tip" :closable="false" type="info" show-icon>
+          <template #title>
+            已用<b>英文标题</b>单次搜索，未按季集拆分请求。请点击选中一条最合适的字幕（合集包会自动按目标集数解包挑选），
+            再点「使用选中字幕」下载并预览。
+          </template>
+        </el-alert>
+
+        <el-empty v-if="!candidates.length" description="未搜索到候选字幕，可换用「手动上传字幕」"/>
+
+        <el-table v-else :data="candidates" class="import-result-table" highlight-current-row max-height="320"
+                  size="small" @row-click="onRowClick">
+          <el-table-column width="44">
+            <template #default="{row}">
+              <el-icon v-if="row.index === selectedIndex" color="var(--el-color-primary)">
+                <Select/>
+              </el-icon>
+            </template>
+          </el-table-column>
+          <el-table-column label="字幕名" min-width="300" prop="title" show-overflow-tooltip>
+            <template #default="{row}">
+              <span v-if="row.title">{{ row.title }}</span>
+              <el-text v-else type="info">（无标题）</el-text>
+            </template>
+          </el-table-column>
+          <el-table-column label="语言" width="80">
+            <template #default="{row}">
+              <span v-if="row.lang">{{ row.lang }}</span>
+              <el-text v-else type="info">—</el-text>
+            </template>
+          </el-table-column>
+          <el-table-column label="类型" width="90">
+            <template #default="{row}">
+              <el-tag :type="row.archive ? 'warning' : 'success'" size="small">
+                {{ row.archive ? '合集包' : '单文件' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="文件数" width="90">
+            <template #default="{row}">
+              <span v-if="row.fileCount >= 0">{{ row.fileCount }}</span>
+              <el-text v-else type="info">需解析</el-text>
+            </template>
+          </el-table-column>
+        </el-table>
+      </section>
+
+      <section v-if="step === 'preview' || step === 'done'" class="import-result">
         <div class="section-title">
           <h3>{{ step === 'preview' ? '请确认导入内容' : '导入结果' }}</h3>
           <div class="result-summary">
@@ -203,12 +259,16 @@
       </section>
 
       <template #footer>
-        <el-button v-if="step === 'preview'" @click="backToForm">返回修改</el-button>
+        <el-button v-if="step === 'preview'" @click="backFromPreview">返回</el-button>
         <el-button v-else @click="dialogVisible = false">{{ step === 'done' ? '完成' : '取消' }}</el-button>
 
         <el-button v-if="step === 'form'" :disabled="!canPreview" :loading="previewing" type="primary"
-                   @click="doPreview">
-          {{ mode === 'upload' ? '预览匹配结果' : '获取字幕预览' }}
+                   @click="onPrimary">
+          {{ mode === 'upload' ? '预览匹配结果' : '搜索候选字幕' }}
+        </el-button>
+        <el-button v-else-if="step === 'select'" :disabled="selectedIndex < 0" :loading="previewing" type="primary"
+                   @click="onPrimary">
+          使用选中字幕
         </el-button>
         <el-button v-else-if="step === 'preview'" :disabled="!importableCount" :loading="importing" type="primary"
                    @click="doConfirm">
@@ -282,7 +342,7 @@ const clearAll = async () => {
 
 /* ==================== 字幕管理（手动上传 / 射手网获取） ==================== */
 
-/** 当前步骤：form 填写 → preview 二次确认 → done 结果 */
+/** 当前步骤：form 填写 → (射手网)select 选候选 → preview 二次确认 → done 结果 */
 const step = ref('form')
 const dialogVisible = ref(false)
 const mode = ref('upload')
@@ -297,6 +357,14 @@ const importing = ref(false)
 const planItems = ref([])
 /** 射手网预览计划 id，确认导入时回传给后端消费 */
 const planId = ref('')
+/** 射手网搜索结果 id（选中候选后生成计划时回传） */
+const searchId = ref('')
+/** 射手网实际使用的搜索关键词（通常是英文标题），用于向用户说明搜的是什么 */
+const searchKeyword = ref('')
+/** 射手网候选条目列表 */
+const candidates = ref([])
+/** 用户选中的候选下标，-1 表示未选 */
+const selectedIndex = ref(-1)
 const importResult = ref(null)
 
 const acceptExt = SUBTITLE_EXT.map(ext => `.${ext}`).join(',')
@@ -314,19 +382,29 @@ const openDialog = async () => {
   dialogVisible.value = true
   step.value = 'form'
   mode.value = 'upload'
-  planItems.value = []
-  planId.value = ''
+  resetSelection()
   importResult.value = null
   if (!aniOptions.value.length) {
     await loadAniOptions()
   }
 }
 
+/**
+ * 清空射手网搜索/选择相关的临时状态
+ */
+const resetSelection = () => {
+  planItems.value = []
+  planId.value = ''
+  searchId.value = ''
+  searchKeyword.value = ''
+  candidates.value = []
+  selectedIndex.value = -1
+}
+
 const resetDialog = () => {
   step.value = 'form'
   pendingFiles.value = []
-  planItems.value = []
-  planId.value = ''
+  resetSelection()
   importResult.value = null
   dragOver.value = false
 }
@@ -405,36 +483,44 @@ const buildFormData = () => {
 }
 
 /**
- * 第一步：只做匹配预览（不写盘），把「改名前 / 改名后 / 对应的视频」交给用户确认。
+ * 主按钮统一入口，按「当前模式 + 当前步骤」分发：
+ * - 上传模式：预览匹配结果
+ * - 射手网模式：form 步 → 搜索候选；select 步 → 下载选中候选并预览
  */
-const doPreview = async () => {
+const onPrimary = async () => {
+  if (mode.value === 'upload') {
+    await doPreviewUpload()
+  } else if (step.value === 'form') {
+    await doSearch()
+  } else {
+    await doFetchSelected()
+  }
+}
+
+/**
+ * 上传模式第一步：只做匹配预览（不写盘），把「改名前 / 改名后 / 对应的视频」交给用户确认。
+ */
+const doPreviewUpload = async () => {
   if (!aniId.value) {
     ElMessage.warning('请先选择字幕对应的订阅')
     return
   }
-  if (mode.value === 'upload' && !pendingFiles.value.length) {
+  if (!pendingFiles.value.length) {
     ElMessage.warning('请先选择字幕文件')
     return
   }
   previewing.value = true
-  planItems.value = []
-  planId.value = ''
+  resetSelection()
   importResult.value = null
   try {
-    if (mode.value === 'upload') {
-      const res = await http.subtitleImportPreview(buildFormData())
-      if (res?.code !== 200) {
-        ElMessage.error(res?.message || '预览失败')
-        return
-      }
-      planItems.value = res.data?.items || []
-    } else {
-      const res = await http.subtitleFetchPreview(aniId.value)
-      planItems.value = res.data?.items || []
-      planId.value = res.data?.planId || ''
+    const res = await http.subtitleImportPreview(buildFormData())
+    if (res?.code !== 200) {
+      ElMessage.error(res?.message || '预览失败')
+      return
     }
+    planItems.value = res.data?.items || []
     if (!planItems.value.length) {
-      ElMessage.warning(mode.value === 'upload' ? '没有解析出可导入的字幕' : '该订阅没有缺失字幕的视频')
+      ElMessage.warning('没有解析出可导入的字幕')
       return
     }
     step.value = 'preview'
@@ -443,6 +529,75 @@ const doPreview = async () => {
   } finally {
     previewing.value = false
   }
+}
+
+/**
+ * 射手网第一步：以英文标题<b>单次</b>搜索，返回候选供用户挑选（不下载、不写盘）。
+ */
+const doSearch = async () => {
+  if (!aniId.value) {
+    ElMessage.warning('请先选择字幕对应的订阅')
+    return
+  }
+  previewing.value = true
+  resetSelection()
+  importResult.value = null
+  try {
+    const res = await http.subtitleAssrtSearch(aniId.value)
+    if (res?.code !== 200) {
+      ElMessage.error(res?.message || '搜索失败')
+      return
+    }
+    candidates.value = res.data?.candidates || []
+    searchId.value = res.data?.searchId || ''
+    searchKeyword.value = res.data?.keyword || ''
+    if (!candidates.value.length) {
+      ElMessage.warning(`未搜索到候选字幕（关键词：${searchKeyword.value || '未知'}），可换用「手动上传字幕」`)
+      return
+    }
+    step.value = 'select'
+  } catch (e) {
+    ElMessage.error(e?.message || '搜索失败')
+  } finally {
+    previewing.value = false
+  }
+}
+
+/**
+ * 射手网第二步：下载用户选中的候选并生成写入预览（不写盘）。
+ */
+const doFetchSelected = async () => {
+  if (selectedIndex.value < 0) {
+    ElMessage.warning('请先选中一条候选字幕')
+    return
+  }
+  previewing.value = true
+  planItems.value = []
+  planId.value = ''
+  importResult.value = null
+  try {
+    const res = await http.subtitleFetchPreview(aniId.value, searchId.value, selectedIndex.value)
+    if (res?.code !== 200) {
+      ElMessage.error(res?.message || '获取字幕失败')
+      return
+    }
+    planItems.value = res.data?.items || []
+    planId.value = res.data?.planId || ''
+    if (!planItems.value.length) {
+      ElMessage.warning('该订阅没有缺失字幕的视频')
+      return
+    }
+    step.value = 'preview'
+  } catch (e) {
+    ElMessage.error(e?.message || '获取字幕失败')
+  } finally {
+    previewing.value = false
+  }
+}
+
+/** 点击候选行即选中 */
+const onRowClick = (row) => {
+  selectedIndex.value = row.index
 }
 
 /**
@@ -497,8 +652,9 @@ const doConfirm = async () => {
   }
 }
 
-const backToForm = () => {
-  step.value = 'form'
+/** 从预览返回：射手网模式回到候选选择（候选还在），上传模式回到表单 */
+const backFromPreview = () => {
+  step.value = mode.value === 'assrt' && candidates.value.length ? 'select' : 'form'
   planItems.value = []
   planId.value = ''
   importResult.value = null

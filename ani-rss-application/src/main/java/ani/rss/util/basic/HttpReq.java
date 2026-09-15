@@ -86,6 +86,25 @@ public class HttpReq {
         return req;
     }
 
+    /**
+     * GET 并<b>分别</b>指定连接超时与读取超时（毫秒）。
+     * <p>
+     * {@link #get(String, int)} 的 {@code timeout} 会同时作用于连接与读取，无法区分
+     * 「握手慢」与「响应慢」。第三方接口（如 ASSRT 字幕源）常见的情况是链路握手正常、
+     * 但服务端出数据慢，此时连接超时可以短、读取超时必须长，避免误判为网络故障。
+     *
+     * @param connectTimeoutMs 连接（TCP 握手 + TLS）超时
+     * @param readTimeoutMs    读取（等待响应体）超时
+     */
+    public static HttpRequest get(String url, int connectTimeoutMs, int readTimeoutMs) {
+        HttpRequest req = HttpRequestPlus.get(url);
+        config(req);
+        req.setConnectionTimeout(connectTimeoutMs);
+        req.setReadTimeout(readTimeoutMs);
+        setProxy(req);
+        return req;
+    }
+
     public static HttpRequest put(String url) {
         HttpRequest req = HttpRequestPlus.put(url);
         config(req);

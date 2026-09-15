@@ -697,6 +697,27 @@ public class ConfigUtil {
         String messageTemplate = config.getNotificationTemplate();
         config.setNotificationTemplate(messageTemplate.trim());
 
+        // ASSRT 字幕源参数补默认值。
+        // 这些字段在 Config 里是可空包装类型，缺失时设置页会显示空白输入框（用户无从判断该填什么）；
+        // 在此统一补齐，既让设置页可见真实默认值，也让 /config 返回的配置自洽。
+        // 运行期另有兜底（AssrtSubtitleProvider.connectTimeoutMs/readTimeoutMs/retryCount），
+        // 因此即使配置被手工改坏也不会失效。
+        if (config.getAssrtRateLimitPerMinute() == null || config.getAssrtRateLimitPerMinute() <= 0) {
+            config.setAssrtRateLimitPerMinute(5);
+        }
+        if (StrUtil.isBlank(config.getSubtitleLang())) {
+            config.setSubtitleLang("chs");
+        }
+        if (config.getAssrtConnectTimeoutMs() == null) {
+            config.setAssrtConnectTimeoutMs(15000);
+        }
+        if (config.getAssrtReadTimeoutMs() == null) {
+            config.setAssrtReadTimeoutMs(30000);
+        }
+        if (config.getAssrtRetryCount() == null) {
+            config.setAssrtRetryCount(2);
+        }
+
         NotificationConfig newNotificationConfig = NotificationConfig.createNotificationConfig();
 
         List<NotificationConfig> notificationConfigList = config.getNotificationConfigList();

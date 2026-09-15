@@ -9,6 +9,7 @@ import ani.rss.service.SubtitleService;
 import ani.rss.service.subtitle.SubtitleMatchLog;
 import ani.rss.service.subtitle.SubtitleMatchLogEntry;
 import ani.rss.util.other.AniUtil;
+import ani.rss.util.other.ConfigUtil;
 import cn.hutool.core.util.StrUtil;
 import io.swagger.v3.oas.annotations.Operation;
 import jakarta.annotation.Resource;
@@ -199,7 +200,30 @@ public class SubtitleController extends BaseController {
     }
 
     @Auth
-    @Operation(summary = "预览射手网(ASSRT)字幕获取（不写盘，供二次确认）")
+    @Operation(summary = "搜索射手网(ASSRT)字幕候选（单次搜索，返回候选供用户挑选）")
+    @PostMapping("/subtitleAssrtSearch")
+    public Result<Map<String, Object>> subtitleAssrtSearch(@RequestBody Map<String, Object> body) {
+        Result<Ani> aniResult = resolveFetchAni(body);
+        if (aniResult.getCode() != 200) {
+            return Result.error(aniResult.getMessage());
+        }
+        Ani ani = aniResult.getData();
+        try {
+            SubtitleService.AssrtSearchResult search = subtitleService.searchAssrt(ani);
+            Map<String, Object> data = new LinkedHashMap<>();
+            data.put("searchId", search.getSearchId());
+            data.put("keyword", search.getKeyword());
+            data.put("candidates", search.getCandidates());
+            data.put("total", search.getCandidates().size());
+            return Result.success(data);
+        } catch (Exception e) {
+            log.warn("射手网字幕搜索失败 {}: {}", ani.getTitle(), ExceptionUtils.getMessage(e));
+            return Result.error("搜索失败: " + ExceptionUtils.getMessage(e));
+        }
+    }
+
+    @Auth
+    @Operation(summary = "预览射手网(ASSRT)字幕获取（下载选中候选，不写盘，供二次确认）")
     @PostMapping("/subtitleFetchPreview")
     public Result<Map<String, Object>> subtitleFetchPreview(@RequestBody Map<String, Object> body) {
         Result<Ani> aniResult = resolveFetchAni(body);
@@ -207,8 +231,18 @@ public class SubtitleController extends BaseController {
             return Result.error(aniResult.getMessage());
         }
         Ani ani = aniResult.getData();
+        String searchId = body.get("searchId") == null ? null : String.valueOf(body.get("searchId"));
+        if (StrUtil.isBlank(searchId)) {
+            return Result.error("参数缺失: searchId（请先搜索候选字幕）");
+        }
+        int index;
         try {
-            SubtitleService.FetchPlan plan = subtitleService.planFetchFromAssrt(ani);
+            index = Integer.parseInt(String.valueOf(body.get("index")));
+        } catch (NumberFormatException e) {
+            return Result.error("参数缺失或非法: index（候选序号）");
+        }
+        try {
+            SubtitleService.FetchPlan plan = subtitleService.planFetchFromAssrt(ani, searchId, index);
             Map<String, Object> data = new LinkedHashMap<>();
             data.put("planId", plan.getPlanId());
             data.put("items", plan.previewItems());
@@ -252,6 +286,9 @@ public class SubtitleController extends BaseController {
         }
         if (!subtitleService.isManualFetchEnabled()) {
             return Result.error("未开启「字幕手动获取」，请先在 设置 → 其他设置 中开启");
+        }
+        if (StrUtil.isBlank(ConfigUtil.CONFIG.getAssrtToken())) {
+            return Result.error("未配置 ASSRT Token，请在 设置 → 其他设置 中填写");
         }
         Optional<Ani> aniOpt = AniUtil.getAniList().stream()
                 .filter(a -> Objects.equals(a.getId(), aniId))

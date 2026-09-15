@@ -194,9 +194,35 @@
               style="max-width: 160px"/>
           <el-text class="mx-1" size="small" type="info">与 assrt.net 后台配额一致，默认 5</el-text>
         </div>
+        <div>
+          <el-text class="mx-1" size="small">连接超时（毫秒）</el-text>
+          <el-input-number
+              v-model="props.config['assrtConnectTimeoutMs']"
+              :min="3000" :max="120000" :step="1000" controls-position="right"
+              style="max-width: 180px"/>
+          <el-text class="mx-1" size="small" type="info">默认 15000；链路差可调大</el-text>
+        </div>
+        <div>
+          <el-text class="mx-1" size="small">读取超时（毫秒）</el-text>
+          <el-input-number
+              v-model="props.config['assrtReadTimeoutMs']"
+              :min="5000" :max="300000" :step="1000" controls-position="right"
+              style="max-width: 180px"/>
+          <el-text class="mx-1" size="small" type="info">默认 30000；字幕源响应慢可调大</el-text>
+        </div>
+        <div>
+          <el-text class="mx-1" size="small">瞬时故障重试次数</el-text>
+          <el-input-number
+              v-model="props.config['assrtRetryCount']"
+              :min="0" :max="5" :step="1" controls-position="right"
+              style="max-width: 160px"/>
+          <el-text class="mx-1" size="small" type="info">
+            默认 2（最多请求 3 次）；对超时/连接失败/5xx/限流按 1s、2s、4s 退避重试
+          </el-text>
+        </div>
         <el-text class="mx-1" size="small" type="info">
           Token 获取：登录 assrt.net → 用户中心 → API Token（免费）。未填 Token 时即便开启也无法获取。
-          接口与字段说明见项目 docs/assrt-api.md。
+          搜索以番剧英文标题单次请求，候选由你自行挑选后再下载。接口与字段说明见项目 docs/assrt-api.md。
         </el-text>
       </div>
       <div class="margin-top-8">

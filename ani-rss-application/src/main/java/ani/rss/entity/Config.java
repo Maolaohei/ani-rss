@@ -781,6 +781,15 @@ public class Config implements Serializable {
     @Schema(description = "ASSRT 调用频率限制（次/分钟，token+IP）。与 assrt.net 用户后台配额保持一致；默认 5")
     private Integer assrtRateLimitPerMinute;
 
+    @Schema(description = "ASSRT 接口连接超时（毫秒）。链路较差时可调大；默认 15000")
+    private Integer assrtConnectTimeoutMs;
+
+    @Schema(description = "ASSRT 接口读取超时（毫秒）。服务端响应慢时可调大；默认 30000")
+    private Integer assrtReadTimeoutMs;
+
+    @Schema(description = "ASSRT 接口瞬时故障重试次数（不含首次）。默认 2，即最多请求 3 次")
+    private Integer assrtRetryCount;
+
     @Schema(description = "启用字幕季数元数据解析（TMDB/Bangumi）。开启后，当字幕番剧名未带 S1/S2 等季数标记时，自动查元数据推断季数，避免跨季误匹配；默认 true")
     private Boolean subtitleMetaEnabled;
 
