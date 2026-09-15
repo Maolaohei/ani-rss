@@ -77,6 +77,33 @@
 
 ---
 
+## 3.4.6 增量（2026-09）
+
+### 射手网(ASSRT) 网络层加固：超时 / 重试 / 备用域名
+此前所有请求共用 `HttpReq` 的 20s 单一超时，且**没有任何重试**——一次链路抖动或服务端慢响应就直接失败，用户看到的是 `ConnectException: Connection timed out`。
+
+- `HttpReq` 新增 `get(url, connectTimeoutMs, readTimeoutMs)` 重载：原 `timeout(ms)` 同时作用于连接与读取，无法区分「握手慢」与「响应慢」。
+- `AssrtSubtitleProvider.getWithRetry`：瞬时故障按 **1s / 2s / 4s 指数退避**重试；重试时**交替使用主/备域名**（`api.assrt.net` ↔ `api.makedie.me`）。
+- 重试判定穿透异常 `cause` 链：**可重试**——连接/读取超时、连接被重置、DNS 失败、HTTP 5xx、429，以及 ASSRT 的 `30900`（超出调用限制，文档明确要求退避重试）；**不重试**——`20001`（Token 无效）、`101`（关键词过短）等 4xx 确定性错误，避免白白消耗配额。
+- 默认**连接 15s / 读取 30s / 重试 2 次**，新增设置项「连接超时」「读取超时」「瞬时故障重试次数」，可在 设置 → 其他设置 调整。
+
+### 搜索逻辑优化：英文标题 + 单次检索 + 候选交用户选择
+旧实现按「**每个视频** × 精确(`no_muxer`) / 宽泛两档」发请求，还要逐条调 `sub/detail` 补全文件列表——一次 12 集批量匹配就是 24+ 次请求，直接打满默认 **5 次/分钟**的配额并触发 `30900`。
+
+- **单次搜索**：新增 `AssrtSubtitleItem` 承载搜索记录；`searchItems` 只发**一次** `sub/search`，不加 `no_muxer`，搜索阶段也**不调** `sub/detail`。
+- **优先英文标题**：关键词按 `themoviedbName` → 含拉丁字母的订阅标题 → 日文原名 → 订阅标题 取第一个可用者，并剔除 TMDB 附加的 `(2018)` / `{tmdb-12345}` 后缀（否则关键词过窄搜不到）。ASSRT 条目名以英文/原文为主，用中文标题常常搜不到。
+- **候选交用户选择**：新增 `/subtitleAssrtSearch` 返回候选列表，用户选中某条后才下载——后端不再自动挑选，从根上避免匹配到错误字幕。选中条目内联 `files` 时零额外请求，否则按 `id` 调一次 `detail`。
+- **前端流程**：`SubtitleMatchView` 改为 `填写 → 选择候选 → 预览 → 确认写入`，候选表展示字幕名 / 语言 / 类型（单文件 / 合集包）/ 文件数，并显示实际使用的搜索关键词。
+- **正确性**：单文件候选先过季/集门槛，避免把第 3 集的字幕挂到第 5 集；压缩包仍由解包阶段按目标集数挑选。
+
+### 其他
+- `ConfigUtil.format()` 补齐 ASSRT 参数默认值（`assrtRateLimitPerMinute` / `subtitleLang` / 三个新参数）。此前这些字段在 `Config` 里是可空包装类型且无默认值，而设置页是整体替换配置、不合并前端默认值，导致输入框显示空白。
+- `/subtitleFetchPreview` 改为接收 `{aniId, searchId, index}`；`resolveFetchAni` 增加 Token 已配置校验。
+- `docs/assrt-api.md` 重写取数策略，新增「6.1 超时与重试」「6.2 排查 `ConnectException`」（含 DNS / ICMP / TCP / IPv6 / 代理白名单 / 出网的逐层排查顺序）。
+- 新增测试 `AssrtSubtitleProviderTest`（重试判定 + 季集门槛）、`SubtitleSearchKeywordTest`（英文标题选取）；验证：全量 **557 通过 / 0 失败 / 1 跳过**，前端 `vite build` 通过。
+
+---
+
 ## 3.4.5 增量（2026-09）
 
 ### 字幕匹配重构（手动获取 + 二次确认）
