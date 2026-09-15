@@ -22,11 +22,33 @@ jobs:
           bash ./package.sh
           version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f pom.xml)
           echo "version=v$version" >> $GITHUB_ENV
+
+          # 只取 UPDATE.md 里当前版本那一节作为 Release body。
+          # 整份 UPDATE.md 有近 600 行历史（含 3.2.x fork 各版），全塞进 Release 页没法看。
+          # 用 index() 而不是正则：版本号里的点会被当元字符，"3.4.7" 能匹配到 "3x4y7"。
+          awk -v ver="$version" '
+            index($0, "## " ver " 增量") == 1 { found = 1; next }
+            found && index($0, "## ") == 1 { exit }
+            found { print }
+          ' UPDATE.md > release_body.md
+
+          # 兜底：UPDATE.md 里漏写该版本小节时退回整篇，而不是发一个空 body
+          if [ ! -s release_body.md ]; then
+            echo "::warning::UPDATE.md 中未找到 ## $version 增量 小节，Release body 退回整篇"
+            cp UPDATE.md release_body.md
+          fi
+
+          # 末尾附全量变更日志入口，方便回溯
+          printf '\n---\n\n完整变更历史见 [UPDATE.md](https://github.com/%s/blob/master/UPDATE.md)\n' \
+            "${{ github.repository }}" >> release_body.md
+
+          echo "--- release body 预览（前 20 行）---"
+          head -20 release_body.md
       - name: Release
         uses: softprops/action-gh-release@v3
         with:
           name: ${{ env.version }}
-          body_path: UPDATE.md
+          body_path: release_body.md
           tag_name: ${{ env.version }}
           append_body: false
           token: ${{ secrets.GITHUB_TOKEN }}

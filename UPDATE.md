@@ -15,67 +15,80 @@
 | 通知与体验 | Bark 通知（含 Level/Volume）；默认禁用自动检查更新；通知反压不阻塞下载 |
 | 运维 UX | 失败人话化/失败队列原子写+精确重下、列表健康分（含缓存漏集）、临时目录残留扫描优化 |
 | TMDB 匹配 | 中文标题误匹配防御 + 日文原名兜底 + 候选列表手动选择弹窗 |
+| 本地状态与缓存 | 「本地存在」三态判定（是 / 存疑 / 否，存疑不降级成"没有"）+ 订阅级快照缓存（分级 TTL / 单飞 / 版本化失效）+ 订阅级读写锁（读不阻塞在下载上） |
+| 网盘限流规避 | 令牌桶 + 请求合并 + 熔断指数冷却 + 分级 TTL + 每轮 API 预算，预算耗尽显示「未确认」而非 0 集 |
 
 ---
 
-## 功能规划落地批次（2026-09）— 17 项
 
-依据仓库内《功能规划建议报告.md》落地：P0 快赢 8 项 + P1 调度优先级与并发 + P2 增强 5 项 + P3 战略 3 项。
-**验证：后端 `mvn test` 全量 479 通过（新增 72）；前端 `vite build` 通过。**
+## 3.4.7 增量（2026-09）
 
-### P0 快赢
+### 错峰更新与本地状态同步（需求文档 F1~F7 全部落地）
 
-| 编号 | 功能 | 说明 |
-| --- | --- | --- |
-| F-01 | **系统自检（Doctor）** | `POST /api/doctor` 聚合 9 项检查（配置目录可写 / 下载路径 / 下载器登录 / 磁盘 / TMDB / BGM / Mikan 可达 / 通知渠道 / 任务线程），每项给出结论 + 证据 + 下一步建议。**不新增探测逻辑**，全部复用既有能力（`BaseDownload.login`、`HttpReq`、`DiskMonitorUtil`、`NotificationUtil.getLastSend`） |
-| F-02 | **下载历史 / 活动时间线** | 新增 `DownloadHistory`（仿 `FailedDownloadQueue` 的 temp+rename 原子写、容量 1000、解析失败改名保留现场）。埋点 3 处：qB/TR/Aria2 走 `DownloadService.notification`，失败走 `recordDownloadFailure`，OpenList 走自身完成链路（3 个完成点）。新增 `/downloadHistory`、`/downloadHistoryStats`（总览 + 按天趋势）、`/downloadHistoryRemove`、`/downloadHistoryClear` |
-| F-03 | **通知渠道扩展 6 个** | ntfy / Gotify / PushDeer / 飞书 / 钉钉（支持加签）/ 企业微信（markdown 4096 字节安全截断）。`NotificationUtil.NOTIFICATION_MAP` 从 `Map.of`（10 对上限）改为 `LinkedHashMap`，后续加渠道不再受限 |
-| F-04 | **MCP 写操作扩展** | 新增 8 个 `@McpTool`：`set_subscription_enabled`、`refresh_subscription`、`get_task_status`、`list_failed_items`、`retry_failed_item`、`cancel_rss_job`、`cancel_rss_item`、`diagnose_subscription`。破坏性操作如实标注 `destructiveHint` |
-| F-05 | **磁盘空间监控** | 新增 `DiskMonitorUtil`（路径解析规则与 `FileController` 一致）+ `DiskTask`（默认 60 分钟一轮，阈值默认 85%）。**档位去重**（阈值/+5/+10 三档，6 小时冷却，回落清态）；网络盘 / 未挂载判为「不可测」而非 0% 使用率 |
-| F-06 | **追番日历视图** | `CalendarView.vue` 周视图 + 月视图，复用 `listAni` 的 `weekLabel` 与 `healthLevel`，零新增后端 |
-| F-07 | **手动搜索补种** | `ManualSearchController` 聚合「主 RSS + 全部备用 RSS + 用户粘贴的 RSS」；底层全部复用（`ItemsUtil.getItems` 解析、`itemDownloaded` 判重、`forceDownloadItem` 下单）。`/manualSearch` + `/manualDownload` |
-| F-08 | **首页看板增强** | 新增「近 7 天下载趋势」（CSS 柱状图，不引入图表库，守住首屏体积）、健康分分布、漏集 TOP |
+依据仓库内《错峰更新与本地状态同步需求.md》实现。要解决三件事：**不要重复下载**、**不要因为查询失败就谎报"本地不存在"**、**不要把网盘打限流**。
 
-### P1 调度优先级与并发（F-10）
+#### 结果缓存（F2）
 
-- `Ani.priority`（0=高 / 1=普通 / 2=低，越界收敛到 [0,2]）；`RssTask.sortByPriority` **稳定排序**，同级保持原顺序
-- `Config.rssConcurrency`（默认仍为 3，上限 8）；非法值回落，**绝不出现 0 线程池**
-- 未改动任何锁与抢先语义（3.2.31 刚加固的全局锁与手动刷新逻辑保持不变）
+- 新增 `LocalStateCache`：订阅级本地状态快照，键为「订阅 id + 下载目录摘要」。预览 / 媒体库 / 手动搜索 / RSS 主流程共用同一份结果——此前同一订阅在一轮里会被反复列举，网盘模式下就是反复打 API。
+- **分级 TTL**：本地磁盘 60s、网盘 300s（网盘列举贵得多），可在 设置 → 其他设置 调整。
+- **失败不入缓存**：一次网盘抖动绝不能被固化成"目录里什么都没有"，否则整个 TTL 内都会谎报"本地不存在"。
+- **单飞**：同一 key 的并发构建只跑一次，其余等同一份结果；等待超时按"校验失败"处理，绝不返回空列表冒充"目录为空"。
+- **版本化失效**：订阅版本 + 路径版本 + 全局世代，三者任一在构建期间变化就丢弃这次结果——否则"失效"会被一个更早开始、更晚结束的旧构建覆盖掉。
+- 改名完成只拿得到下载目录、拿不到订阅 id，因此额外提供按路径失效；只能按订阅失效的话就会退化成"整体失效"，而一轮里每下完一集都会改名，等于缓存从未生效。
 
-### P2 增强
+#### 只处理已启用的订阅（F3）
 
-| 编号 | 功能 | 说明 |
-| --- | --- | --- |
-| F-15 | **本地媒体库浏览** | `/library`（60 秒缓存，复用 `PlayController.getPlayItem` 保证与播放侧同一套字幕/视频判定）、`/libraryDetail`、`/libraryRefresh` |
-| F-16 | **结构化事件 Webhook** | `EventWebhookUtil` + `EventTypeEnum`（9 种事件）。发 **JSON 事件体**而非渲染文本；单线程 + 有界队列 256 反压，队列满丢弃计数、**绝不上抛中断下载**（沿用 3.2.15 的保护）；支持事件类型过滤（留空=全部，`ALL`=全部） |
-| F-17 | **追番周报** | `WeeklyReportTask` 复用 `DownloadHistory.summary` + `FailedDownloadQueue` + `SubscriptionHealth.cachedOmitCount`；可选「有漏集时自动补种」，走统一刷新入口（可在任务页观察/取消） |
-| F-18 | **字幕匹配与补全** | `SubtitleService`：缺字幕扫描（复用播放侧判定）+ 就地附加字幕（原子写、覆盖前 `.bak` 备份、20MiB 上限、UTF-8 安全）。**在线抓取默认关闭**，`subtitleAutoFetch` 作为开关位由部署方接入具体源 |
-| F-19 | **订阅分享 / 一键导入** | `/shareAni` + `/importAniByCode`。采用**白名单复制**（而非黑名单剔除）：只写明确安全的字段，将来 `Ani` 新增字段默认不外泄；分享码为 gzip+base64url；导入统计新增/替换/跳过 |
+- 轮次提交前、子任务开头两处都重新读取**实时**订阅对象（此前用的是轮次开始时的副本，`enable` / `notDownload` / `season` 改了不生效）。
+- 扫到一半关掉某订阅，剩余批次不会再把它提交进线程池。
 
-### P3 战略
+#### 后处理完成后才开新一轮（F4）
 
-| 编号 | 功能 | 说明 |
-| --- | --- | --- |
-| F-20 | **AI 诊断** | `diagnose_subscription` 聚合健康分 + 漏集缓存 + 下载历史 + 失败队列，输出**可读结论 + 可执行建议**（如"已 14 天没有新下载，可能是番剧停更、RSS 源失效或字幕组更换"） |
-| F-21 | **调度状态持久化** | `RssJobStateStore` 落盘「上一轮结果 + 订阅级失败明细（上限 50）」，启动时经 `RssTask.restorePersistedState()` 恢复。**刻意不持久化运行中/排队中的活动态**——重启后那些任务客观上已不存在，恢复出"运行中"只会制造幽灵状态 |
-| F-22 | **只读访问令牌** | `Config.viewerApiKey` + `ViewerPolicy` 白名单。用只读令牌访问只能「看和播」，写操作一律 403。**未配置时行为与之前完全一致**；白名单语义保证将来新增端点默认对只读者关闭 |
+- 新增静默窗口闸门：改名 / 离线归位未收尾时不启新一轮，避免"文件已下载但还没改名落地"被按文件名匹配判成"未下载"→ 重复下载。
+- 连续确认 + 超时兜底（超时强制开轮并 WARN）；**强制开轮时剔除"后处理未收尾"的订阅**，其余照常扫描，不因个别订阅卡住让整轮停摆。
+- 等待时长从周期里扣除，不会让扫描频率凭空变慢。
 
-### 配套改动
+#### 三态判定与存疑成因（F5）
 
-- **`NotificationStatusEnum` 新增 `SYSTEM`**（系统通知）；`ConfigUtil.format` 对存量配置做**追加式迁移**（只补 `SYSTEM`，不删用户已有选择），否则磁盘预警/周报会静默不发送
-- **`NotificationUtil.sendSystem`**：系统级通知不依赖任何订阅，使用合成 `Ani`（标题/季度/发布日期给安全默认值，避免通知模板 NPE）
-- **动作类渠道过滤**：`EMBY_REFRESH` / `FILE_MOVE` / `OPEN_LIST_UPLOAD` / `SHELL` 在 `SYSTEM` 状态下跳过——否则一次磁盘预警会触发 Emby 全库刷新或执行用户的下载后脚本
-- **导航扩展**：新增「媒体库」「历史」「工具（自检/日历/补种，支持 `?tab=` 深链）」；移动端导航改为横向滚动（8 项均分会把文字挤没）
-- **设置页新增**：RSS 并发度、磁盘空间监控、追番周报、事件 Webhook、字幕自动获取、只读令牌
-- **订阅编辑新增**：优先级三档
+- 「本地存在」统一为**是 / 存疑 / 否**三态，预览、媒体库、手动搜索共用同一判定入口，不再各自写分支。
+- 口径：`rename=false` → 记录存在即"是"，**零网盘调用**；`rename=true` + 列举失败 → 记录判定但标"存疑"；`rename=true` + 列举成功 → 按真实文件判定。
+- **查询失败绝不降级成"确认没有"**。存疑原因分四类并分别透出（列举失败 / 超预算 / 索引不完整 / 等待改名），因为对策完全不同（等网盘恢复 / 调预算或减订阅 / 调 `cloudListMaxFiles` / 等一会儿）。
+- 网盘列举超过 `cloudListMaxFiles` 会截断：**截断的索引可以确认"存在"，但不得断言"不存在"**。
+- 「本地存在」筛选把"存疑"归入已下载——把"不知道"悄悄降级成"不存在"，正是重复下载与误清理的起点。
 
-### 新增测试（72 个，全绿）
+#### 订阅级读写锁（F6）
 
-`DownloadHistoryTest`(8) · `DiskMonitorUtilTest`(9) · `DiskTaskTest`(3) · `RssTaskPriorityTest`(8) ·
-`ShareControllerTest`(6) · `ViewerPolicyTest`(5) · `EventWebhookUtilTest`(8) ·
-`ExtraNotificationChannelsTest`(10) · `SubtitleServiceTest`(10) · `RssJobStateStoreTest`(5)
+- 新增 `AniLocks`：`ReadWriteLock` per 订阅。写 = RSS 更新 / `downloadAni` / 强制下载 / 重试失败项 / 改名回写 / 删除种子；读 = 预览 / 媒体库详情 / 手动搜索。
+- **读路径只等 300ms，等不到就不持锁直接读快照**——写锁在下载期间是分钟级的，让预览排队等它比读到稍旧数据糟糕得多。退化次数可在自检页观测。
+- 媒体库**批量**扫描刻意不加订阅锁（逐个 `tryLock` 在多订阅同时下载时会线性叠加成秒级延迟，而它读的只是展示计数）；单订阅的详情则加读锁。
+- 状态回写节流：运行时状态（下载进度 / 漏集数 / `lastDownloadTime` / `enable`）改走新增的 `AniUtil.syncStateOnly()`（只落盘、不失效缓存），且一轮最多写一次 `ani.v2.json`。
+- 配置联动：`downloadPathTemplate` / `ovaDownloadPathTemplate` / `rename` / `fileExist` / `downloadToolType` 变更即失效本地状态缓存与媒体库缓存。
+
+#### 网盘 API 访问策略（F7）
+
+- **令牌桶**替代固定 300ms 间隔（`openListApiPerSecond` / `openListApiBurst`，仍全局串行，因为限流是按账号算的）。
+- **请求合并**：同一目录的并发列举只发一次请求。
+- **熔断**：连续失败进入指数冷却，冷却期内直接返回"未知"而不发请求（成功一次即复位）。
+- **分级 TTL**：浏览类 30s、判定类 300s。
+- **每轮预算**：默认 = 本轮启用订阅数，硬上限 200；超出即停止真实文件校验，剩余条目保持"存疑"并 WARN。媒体库预算不足时显示为「未确认」而不是 0 集——订阅多时预算耗尽必然发生，当成"没有"会让媒体库大面积变空。
+- 「目录不存在」从「查询失败」里摘出来单独处理：它是业务结果（= 确认没有），不重试也不参与熔断——否则新订阅（下载目录尚未创建）一进预览就会触发全局熔断。
+
+#### 可观测
+
+- 任务管理器新增：批次进度「批次 N/M · Ns 后下一批」、`超时强制开轮` 标签 + 跳过订阅数、本轮 `已存在 / 无法确认 / 已下发` 三计数、「存疑原因」分布（带 tooltip 逐条解释该做什么）。
+- 自检页新增「网盘 API 限流」与「本地状态快照缓存」两项：速率/突发、本轮与累计调用数、缓存命中率、请求合并省下次数、限流累计等待、熔断次数与冷却剩余、超预算放弃次数、快照条目/容量/TTL/失效丢弃次数。
+
+#### 新增配置项（设置 → 其他设置 → 「结果缓存」）
+
+`localStateCacheTtlSeconds`(60) · `cloudStateCacheTtlSeconds`(300) · `openListApiBudgetPerRound`(留空 = 按启用订阅数自动，硬上限 200) · `cloudListMaxFiles`(5000)
+
+旧配置无需迁移：`ConfigUtil.format()` 自动补默认值。
+
+#### 验证
+
+后端 `mvn test` 全量 **715 通过 / 0 失败 / 1 跳过**（相对 3.4.6 的 557 新增 158 项：`QuiescentWindowTest` 27 · `OpenListRateLimitTest` 23 · `LocalStateCacheTest` 20 · `AniLocksTest` 20 · `StaggeredUpdateTest` 16 · `EnabledOnlyTest` 12 · `ConfigLocalStateInvalidationTest` 9 · `LocalStateResolutionTest` · `PreviewLocalExistsTest` 6 · `OpenListItemDownloadedTest` 5 · `RoundLocalStateSummaryTest` 3 · `LibraryCloudScanTest` …）；前端 `vite build` 通过。
 
 ---
+
 
 ## 3.4.6 增量（2026-09）
 
@@ -104,6 +117,7 @@
 
 ---
 
+
 ## 3.4.5 增量（2026-09）
 
 ### 字幕匹配重构（手动获取 + 二次确认）
@@ -122,12 +136,14 @@
 - **P3（前端）**：`TaskManagerView` 轮询在 KeepAlive 下 `onDeactivated` 停止；`TorrentsInfosView` `useLocalStorage` 防隐私模式白屏 + `:key=tag`；`SubscriptionView` 清筛选不再持久化用户偏好；`LogsView` 先判 `content-type` 再解析（修复把 JSON 错误当 zip）；`PlayListView`/`NotificationView` 列表 `:key` 唯一性。
 - 新增测试 `ViewerPolicyTest`、`DeleteGuardTest`；验证：后端全量 224 测试类 / 0 失败 / 1 跳过，前端 `vite build` 通过。
 
+
 ## 3.4.4 增量（2026-09）
 
 - **本地字幕批量导入**：字幕匹配页支持选择订阅、点击或拖拽多选字幕文件；后端按季集匹配已重命名视频，自动生成 `剧名 SxxExx[.语言].ass/srt` 标准文件名，并逐文件返回成功/失败原因。
 - **字幕安全与兼容性**：支持 ASS/SRT/SSA/VTT/SUB，单文件 20MiB、单次 200 个；按原始字节写盘以避免 GBK 字幕乱码；同名字幕覆盖前备份 `.bak`，临时文件原子归位。
 - **合集判定修复**：统一按不同集数而非视频文件数量判断合集；总集数为 1 的 RSS、qBittorrent、Aria2、OpenList 条目按单集处理。
 - **字幕匹配页面修复**：刷新/清空日志改用已导出的 API 方法，修复页面运行时调用未导出的 `http.post` 问题。
+
 
 ## 3.4.3 增量（2026-09）
 
@@ -146,7 +162,71 @@
 - **Artplayer `autoPlayback` 文件重命名**：已读取当前锁定版本 `artplayer@5.4.0` 源码确认：时间进度写在 `storage.times[art.option.id || art.option.url]`；当前项目已显式传 `id: playItem.name || src`，因此 URL token 变化不会影响同名文件的续播；但**文件重命名会改变 `id`，旧进度不会自动迁移**（会表现为新文件从 0 开始）。本次未实现 F-12 服务端同步，避免把半成品留在代码库；若后续做 F-12，应以订阅 id + episode/稳定内容标识做服务端主键，并在重命名时迁移旧 key。
 - **旧 `ani.v2.json` 反序列化**：已用真实 `AniUtil.load()` 路径测试旧 JSON（不含 `priority/group/tags/qualityProfile`），Gson 反序列化成功，`createAni()` + `BeanUtil.copyProperties(... ignoreNull, override=false)` 补齐：`priority=1`、`group=""`、`tags=[]`、自定义质量规则关闭且字段完整。新增 `AniLegacyFieldCompatibilityTest` 2 例全通过。
 
+### 功能规划落地批次（17 项）
 
+依据仓库内《功能规划建议报告.md》落地：P0 快赢 8 项 + P1 调度优先级与并发 + P2 增强 5 项 + P3 战略 3 项。
+**验证：后端 `mvn test` 全量 479 通过（新增 72）；前端 `vite build` 通过。**
+
+#### P0 快赢
+
+| 编号 | 功能 | 说明 |
+| --- | --- | --- |
+| F-01 | **系统自检（Doctor）** | `POST /api/doctor` 聚合 9 项检查（配置目录可写 / 下载路径 / 下载器登录 / 磁盘 / TMDB / BGM / Mikan 可达 / 通知渠道 / 任务线程），每项给出结论 + 证据 + 下一步建议。**不新增探测逻辑**，全部复用既有能力（`BaseDownload.login`、`HttpReq`、`DiskMonitorUtil`、`NotificationUtil.getLastSend`） |
+| F-02 | **下载历史 / 活动时间线** | 新增 `DownloadHistory`（仿 `FailedDownloadQueue` 的 temp+rename 原子写、容量 1000、解析失败改名保留现场）。埋点 3 处：qB/TR/Aria2 走 `DownloadService.notification`，失败走 `recordDownloadFailure`，OpenList 走自身完成链路（3 个完成点）。新增 `/downloadHistory`、`/downloadHistoryStats`（总览 + 按天趋势）、`/downloadHistoryRemove`、`/downloadHistoryClear` |
+| F-03 | **通知渠道扩展 6 个** | ntfy / Gotify / PushDeer / 飞书 / 钉钉（支持加签）/ 企业微信（markdown 4096 字节安全截断）。`NotificationUtil.NOTIFICATION_MAP` 从 `Map.of`（10 对上限）改为 `LinkedHashMap`，后续加渠道不再受限 |
+| F-04 | **MCP 写操作扩展** | 新增 8 个 `@McpTool`：`set_subscription_enabled`、`refresh_subscription`、`get_task_status`、`list_failed_items`、`retry_failed_item`、`cancel_rss_job`、`cancel_rss_item`、`diagnose_subscription`。破坏性操作如实标注 `destructiveHint` |
+| F-05 | **磁盘空间监控** | 新增 `DiskMonitorUtil`（路径解析规则与 `FileController` 一致）+ `DiskTask`（默认 60 分钟一轮，阈值默认 85%）。**档位去重**（阈值/+5/+10 三档，6 小时冷却，回落清态）；网络盘 / 未挂载判为「不可测」而非 0% 使用率 |
+| F-06 | **追番日历视图** | `CalendarView.vue` 周视图 + 月视图，复用 `listAni` 的 `weekLabel` 与 `healthLevel`，零新增后端 |
+| F-07 | **手动搜索补种** | `ManualSearchController` 聚合「主 RSS + 全部备用 RSS + 用户粘贴的 RSS」；底层全部复用（`ItemsUtil.getItems` 解析、`itemDownloaded` 判重、`forceDownloadItem` 下单）。`/manualSearch` + `/manualDownload` |
+| F-08 | **首页看板增强** | 新增「近 7 天下载趋势」（CSS 柱状图，不引入图表库，守住首屏体积）、健康分分布、漏集 TOP |
+
+#### P1 调度优先级与并发（F-10）
+
+- `Ani.priority`（0=高 / 1=普通 / 2=低，越界收敛到 [0,2]）；`RssTask.sortByPriority` **稳定排序**，同级保持原顺序
+- `Config.rssConcurrency`（默认仍为 3，上限 8）；非法值回落，**绝不出现 0 线程池**
+- 未改动任何锁与抢先语义（3.2.31 刚加固的全局锁与手动刷新逻辑保持不变）
+
+#### P2 增强
+
+| 编号 | 功能 | 说明 |
+| --- | --- | --- |
+| F-15 | **本地媒体库浏览** | `/library`（60 秒缓存，复用 `PlayController.getPlayItem` 保证与播放侧同一套字幕/视频判定）、`/libraryDetail`、`/libraryRefresh` |
+| F-16 | **结构化事件 Webhook** | `EventWebhookUtil` + `EventTypeEnum`（9 种事件）。发 **JSON 事件体**而非渲染文本；单线程 + 有界队列 256 反压，队列满丢弃计数、**绝不上抛中断下载**（沿用 3.2.15 的保护）；支持事件类型过滤（留空=全部，`ALL`=全部） |
+| F-17 | **追番周报** | `WeeklyReportTask` 复用 `DownloadHistory.summary` + `FailedDownloadQueue` + `SubscriptionHealth.cachedOmitCount`；可选「有漏集时自动补种」，走统一刷新入口（可在任务页观察/取消） |
+| F-18 | **字幕匹配与补全** | `SubtitleService`：缺字幕扫描（复用播放侧判定）+ 就地附加字幕（原子写、覆盖前 `.bak` 备份、20MiB 上限、UTF-8 安全）。**在线抓取默认关闭**，`subtitleAutoFetch` 作为开关位由部署方接入具体源 |
+| F-19 | **订阅分享 / 一键导入** | `/shareAni` + `/importAniByCode`。采用**白名单复制**（而非黑名单剔除）：只写明确安全的字段，将来 `Ani` 新增字段默认不外泄；分享码为 gzip+base64url；导入统计新增/替换/跳过 |
+
+#### P3 战略
+
+| 编号 | 功能 | 说明 |
+| --- | --- | --- |
+| F-20 | **AI 诊断** | `diagnose_subscription` 聚合健康分 + 漏集缓存 + 下载历史 + 失败队列，输出**可读结论 + 可执行建议**（如"已 14 天没有新下载，可能是番剧停更、RSS 源失效或字幕组更换"） |
+| F-21 | **调度状态持久化** | `RssJobStateStore` 落盘「上一轮结果 + 订阅级失败明细（上限 50）」，启动时经 `RssTask.restorePersistedState()` 恢复。**刻意不持久化运行中/排队中的活动态**——重启后那些任务客观上已不存在，恢复出"运行中"只会制造幽灵状态 |
+| F-22 | **只读访问令牌** | `Config.viewerApiKey` + `ViewerPolicy` 白名单。用只读令牌访问只能「看和播」，写操作一律 403。**未配置时行为与之前完全一致**；白名单语义保证将来新增端点默认对只读者关闭 |
+
+#### 配套改动
+
+- **`NotificationStatusEnum` 新增 `SYSTEM`**（系统通知）；`ConfigUtil.format` 对存量配置做**追加式迁移**（只补 `SYSTEM`，不删用户已有选择），否则磁盘预警/周报会静默不发送
+- **`NotificationUtil.sendSystem`**：系统级通知不依赖任何订阅，使用合成 `Ani`（标题/季度/发布日期给安全默认值，避免通知模板 NPE）
+- **动作类渠道过滤**：`EMBY_REFRESH` / `FILE_MOVE` / `OPEN_LIST_UPLOAD` / `SHELL` 在 `SYSTEM` 状态下跳过——否则一次磁盘预警会触发 Emby 全库刷新或执行用户的下载后脚本
+- **导航扩展**：新增「媒体库」「历史」「工具（自检/日历/补种，支持 `?tab=` 深链）」；移动端导航改为横向滚动（8 项均分会把文字挤没）
+- **设置页新增**：RSS 并发度、磁盘空间监控、追番周报、事件 Webhook、字幕自动获取、只读令牌
+- **订阅编辑新增**：优先级三档
+
+#### 新增测试（72 个，全绿）
+
+`DownloadHistoryTest`(8) · `DiskMonitorUtilTest`(9) · `DiskTaskTest`(3) · `RssTaskPriorityTest`(8) ·
+`ShareControllerTest`(6) · `ViewerPolicyTest`(5) · `EventWebhookUtilTest`(8) ·
+`ExtraNotificationChannelsTest`(10) · `SubtitleServiceTest`(10) · `RssJobStateStoreTest`(5)
+
+---
+
+---
+
+
+## 3.4.2 增量（2026-09）
+
+### 合集：OpenList 离线下载支持
 
 - 「添加合集」按下载器分流：**qBittorrent 原路径不变**；**OpenList/Alist 走离线下载全链路**（提交即受理 → 分级轮询等待 → 10008 去重/卡住重提/超时终检 → 任务管理器进度）；其他下载器给出明确提示
 - 离线完成后按「预览计划」归位：按 文件名+大小 匹配离线产物 → 重命名为预览目标名（含字幕语言段）→ 移动到下载目录顶层 → 顶层校验 → 完成通知（含归位文件数）
@@ -165,6 +245,7 @@
 验证：真实 VCB BDRip 合集种子 dry-run（36/36 归位匹配、104 附加文件清理、0 冲突）+ OpenList 既有 52 项回归测试全过。
 
 ---
+
 
 ## 3.4.1 增量（2026-09）
 
@@ -187,6 +268,7 @@
 
 ---
 
+
 ## 3.4.0 增量（2026-09）
 
 ### 合并上游 3.2.23~3.2.30（基线 3.2.22 → 3.2.30）
@@ -208,6 +290,7 @@
 验证：后端 `mvn compile` ✓ / 前端 `vite build` ✓。
 
 ---
+
 
 ## 3.3.0 增量（2026-09）
 
@@ -237,6 +320,7 @@
 - 逐项功能提交见 git log（`04a1affc`…`e72765da` 共 12 个迁移提交）。
 
 ---
+
 
 ## 3.2.35 增量（2026-09）
 
@@ -268,6 +352,7 @@
 
 ---
 
+
 ## 3.2.34 增量（2026-09）
 
 ### 卡片布局修正 + 用户体验专项（122 条）定稿
@@ -294,6 +379,8 @@
 > 完整逐条清单与证据见仓库内《用户体验专项审计报告.md》与《用户体验修复状态总览.md》。
 
 ---
+
+
 ## 3.2.32 增量（2026-09）
 
 ### RSS 解析可靠度专项：tv 99.92% / movie·ova 100%（8553 条真实标题语料）
@@ -318,6 +405,7 @@
 - 全量 28 个测试类通过；临时诊断测试清理
 
 ---
+
 
 ## 3.2.31 增量（2026-09）
 
@@ -356,6 +444,7 @@
 
 ---
 
+
 ## 3.2.30 增量（2026-09）
 
 ### UI 新版皮肤
@@ -372,6 +461,7 @@
 
 ---
 
+
 ## 3.2.28-fork 增量（2026-09）
 
 ### 版本
@@ -387,6 +477,7 @@
 - **冗余删除**：字幕过滤恒冗余的 `cloudSourceDirs` 析取、`forceRemoveTree` 死缓存失效（`fsList(refresh=true)` 不经 findFilesCache）
 
 ---
+
 
 ## 3.2.22-fork 增量（2026-08）
 
@@ -413,6 +504,7 @@
 - 上游 `9721fa7b`（日志自动刷新 onMounted→onActivated）**未搬入**：fork 的日志是 `el-dialog` 常驻挂载、`show()` 每次显式 `getLogs()` 重拉，无 keep-alive，onActivated 不生效且强搬会回归。
 
 ---
+
 
 ## 3.2.15-fork 增量（2026-08）
 
@@ -447,6 +539,7 @@
 
 ---
 
+
 ## 3.2.9-fork 增量（2026-08）
 
 ### 版本
@@ -460,6 +553,7 @@
 - TMDB 中文标题误匹配防御 + jpTitle 兜底 + tmdb-api 升级 1.0.9
 
 ---
+
 
 ## 3.2.2-fork 增量（2026-07）
 
@@ -480,6 +574,7 @@
 - 反馈请附：下载工具类型、离线超时配置、任务管理器截图与关键日志
 
 ---
+
 
 ## 历史摘录（更早）
 
