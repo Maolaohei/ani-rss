@@ -66,9 +66,37 @@ public class Item implements Serializable {
 
     /**
      * 本地已存在
+     * <p>
+     * 语义：<b>目标路径下确实存在这一集的视频文件</b>（本地磁盘或 OpenList 网盘）。
+     * 不再以"本地 .torrent 记录是否存在"为判据——记录只代表曾经推过种子，
+     * 网盘文件被删/移动/改名或种子从未落地时记录仍在，会把"不存在"谎报成"存在"。
+     * <p>
+     * 例外：<b>未开启重命名</b>时文件名不含 {@code SxxExx}，无法按季/集核对真实文件，
+     * 此时退回旧逻辑——本地有种子记录即视为"存在"（与改造前行为一致）。
+     * 需要区分"真的校验过"与"回退判定"的场景请改用
+     * {@link #hasDownloadedUnknown} 或 {@code DownloadService.LocalState}。
      */
     @Schema(description = "本地已存在")
     private Boolean hasDownloaded;
+
+    /**
+     * 本地存在存疑：<b>开启</b>了重命名、但真实文件校验本身失败（网盘列举异常）时，
+     * 回退种子记录判定得到的结果。
+     * <p>
+     * "查询失败"与"目录确实为空"必须区分开：前者不能断言文件不存在，故只标"存疑"——
+     * 既不谎报"是"，也不把原本判为存在的条目直接降级成"否"（降级会触发重复下载）。
+     */
+    @Schema(description = "本地存在存疑")
+    private Boolean hasDownloadedUnknown;
+
+    /**
+     * 本地种子记录存在（{@code configDir/torrents} 下的 .torrent/.txt 缓存）。
+     * <p>
+     * 与 {@link #hasDownloaded} 的区别：记录只代表"曾经推过这个种子"，不代表文件已落地。
+     * 「删除种子」按钮要的是本字段（有没有缓存可删），而不是"文件在不在"。
+     */
+    @Schema(description = "本地种子记录存在")
+    private Boolean hasTorrentRecord;
 
     /**
      * 正在下载中（离线提交后存在 .pending 记录 / 下载器队列中存在）

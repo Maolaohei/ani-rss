@@ -4,11 +4,14 @@ import ani.rss.annotation.Auth;
 import ani.rss.commons.ExceptionUtils;
 import ani.rss.commons.FileUtils;
 import ani.rss.download.BaseDownload;
+import ani.rss.download.OpenListApi;
 import ani.rss.entity.Config;
 import ani.rss.entity.NotificationConfig;
 import ani.rss.entity.vo.DoctorCheck;
 import ani.rss.entity.web.Result;
+import ani.rss.service.LocalStateCache;
 import ani.rss.service.TaskService;
+import ani.rss.task.RssTask;
 import ani.rss.util.basic.HttpReq;
 import ani.rss.util.other.ConfigUtil;
 import ani.rss.util.other.DiskMonitorUtil;
@@ -64,6 +67,8 @@ public class DoctorController extends BaseController {
         checks.add(checkMikan(config));
         checks.add(checkNotification(config));
         checks.add(checkTasks());
+        checks.add(checkOpenListRateLimit(config));
+        checks.add(checkLocalStateCache(config));
 
         Map<String, Integer> summary = new LinkedHashMap<>();
         summary.put("ok", count(checks, "ok"));
@@ -309,6 +314,78 @@ public class DoctorController extends BaseController {
                     "单次异常会自动退避重试，持续不恢复请查看日志"), start);
         }
         return timed(DoctorCheck.ok(key, label, StrUtil.format("{} 个任务线程存活", alive)), start);
+    }
+
+    /**
+     * 网盘 API 限流 / 熔断状态（F7-7）。
+     * <p>
+     * 限流与熔断都是"隐式生效"的机制：用户只会感觉到"怎么变慢了 / 怎么都显示存疑"，
+     * 却看不到到底是被限流拖了多久、缓存有没有省下请求、熔断被触发过几次。
+     * 这一项把这些计数摊开，让"调参"和"排查网盘慢"有据可依。
+     */
+    private DoctorCheck checkOpenListRateLimit(Config config) {
+        String key = "openListRateLimit";
+        String label = "网盘 API 限流";
+        long start = System.currentTimeMillis();
+        if (!RssTask.isOpenListTool(config)) {
+            return timed(DoctorCheck.skip(key, label, "当前下载器不是 OpenList / Alist，不限流"), start);
+        }
+        String evidence = StrUtil.format(
+                "速率 {}/s，突发 {}；累计调用 {} 次（本轮 {}/{}），目录列举缓存命中 {}/{}（{}%），"
+                        + "请求合并省下 {} 次，限流累计等待 {}ms，熔断 {} 次，超预算放弃 {} 次",
+                config.getOpenListApiPerSecond() == null ? 3 : config.getOpenListApiPerSecond(),
+                config.getOpenListApiBurst() == null ? 1 : config.getOpenListApiBurst(),
+                OpenListApi.getApiCallCount(),
+                OpenListApi.getApiCallCountRound(),
+                OpenListApi.getRoundBudget() > 0 ? OpenListApi.getRoundBudget() : "不限",
+                OpenListApi.getListingCacheHit(),
+                OpenListApi.getListingCacheHit() + OpenListApi.getListingCacheMiss(),
+                Math.round(OpenListApi.getListingCacheHitRate() * 100.0),
+                OpenListApi.getListingCoalesced(),
+                OpenListApi.getThrottleWaitMs(),
+                OpenListApi.getCooldownTriggeredCount(),
+                OpenListApi.getBudgetExhaustedCount());
+
+        long remain = OpenListApi.listingCooldownRemainingMs();
+        if (remain > 0L) {
+            return timed(DoctorCheck.warn(key, label,
+                    StrUtil.format("网盘列举处于熔断冷却中，剩余 {}s；冷却期内不再发起请求，受影响条目显示为「存疑」。{}",
+                            remain / 1000L, evidence),
+                    "稍后重试；若频繁触发，调低「网盘 API 限流」速率或调大冷却时间"), start);
+        }
+        if (OpenListApi.getCooldownTriggeredCount() > 0L) {
+            return timed(DoctorCheck.warn(key, label,
+                    "曾触发熔断，当前已恢复。" + evidence,
+                    "若反复触发，检查网盘是否在限流、token 是否有效"), start);
+        }
+        return timed(DoctorCheck.ok(key, label, evidence), start);
+    }
+
+    /**
+     * F2：订阅级本地状态快照缓存自检。
+     * <p>
+     * 这个缓存的作用是"同一轮内同一订阅只列举一次网盘"。命中率低不一定有病
+     * （刚重启、订阅刚改过都会导致冷启动），但如果长期接近 0，
+     * 说明失效钩子在频繁触发，缓存实际没起到作用。
+     */
+    private DoctorCheck checkLocalStateCache(Config config) {
+        String key = "localStateCache";
+        String label = "本地状态快照缓存";
+        long start = System.currentTimeMillis();
+        long hit = LocalStateCache.getHit();
+        long miss = LocalStateCache.getMiss();
+        String evidence = StrUtil.format(
+                "条目 {}（上限 {}），命中 {}/{}（{}%），实际构建 {} 次，请求合并 {} 次，过期 {} 次，"
+                        + "构建中被失效丢弃 {} 次；本地 TTL {}s / 网盘 TTL {}s",
+                LocalStateCache.size(), LocalStateCache.resolveCapacity(),
+                hit, hit + miss, Math.round(LocalStateCache.getHitRate() * 100.0),
+                LocalStateCache.getBuildCount(),
+                LocalStateCache.getCoalesced(),
+                LocalStateCache.getExpiredCount(),
+                LocalStateCache.getInvalidatedDropCount(),
+                LocalStateCache.resolveTtlMs(LocalStateCache.Source.LOCAL_DISK) / 1000L,
+                LocalStateCache.resolveTtlMs(LocalStateCache.Source.CLOUD_API) / 1000L);
+        return timed(DoctorCheck.ok(key, label, evidence), start);
     }
 
     private static DoctorCheck timed(DoctorCheck check, long start) {

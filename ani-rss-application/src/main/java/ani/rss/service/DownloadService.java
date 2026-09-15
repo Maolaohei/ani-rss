@@ -6,6 +6,7 @@ import ani.rss.commons.GsonStatic;
 import ani.rss.commons.PinyinUtils;
 import ani.rss.download.OfflineDownloader;
 import ani.rss.download.OpenList;
+import ani.rss.download.OpenListApi;
 import ani.rss.entity.*;
 import ani.rss.enums.EventTypeEnum;
 import ani.rss.enums.NotificationStatusEnum;
@@ -43,34 +44,22 @@ import java.util.stream.Collectors;
 @Slf4j
 @Service
 public class DownloadService {
-    /**
-     * 按订阅 id 细粒度锁：同一订阅串行，不同订阅可并行
-     */
-    private static final ConcurrentHashMap<String, Object> ANI_LOCKS = new ConcurrentHashMap<>();
     /** 非 OpenList 下载器推送串行；OpenList 不持此锁，避免长等待全局串行 */
     private static final Object DOWNLOAD_TOOL_LOCK = new Object();
 
     @Resource
     private ScrapeService scrapeService;
 
-    private static Object lockForAni(Ani ani) {
-        String id = Optional.ofNullable(ani)
-                .map(Ani::getId)
-                .filter(StrUtil::isNotBlank)
-                .orElse("unknown");
-        return ANI_LOCKS.computeIfAbsent(id, k -> new Object());
-    }
-
     /**
-     * 下载动漫（按 ani.id 加锁）
+     * 下载动漫（按 ani.id 取<b>写锁</b>，同一订阅串行、不同订阅并行）
+     * <p>
+     * F6-1：锁从普通互斥对象升级为读写锁，读路径（预览/媒体库/手动搜索）因此可以
+     * 在下载进行中继续读缓存而不必排队。见 {@link AniLocks}。
      *
      * @param ani
      */
     public void downloadAni(Ani ani) {
-        Object lock = lockForAni(ani);
-        synchronized (lock) {
-            downloadAniLocked(ani);
-        }
+        AniLocks.runWithWrite(ani, () -> downloadAniLocked(ani));
     }
 
     /**
@@ -379,6 +368,7 @@ public class DownloadService {
                             // hash 相同
                             torrentsInfo.getHash().equals(hash))) {
                 log.info("已有下载任务 hash:{} name:{}", hash, reName);
+                RssTask.countRoundLocalState(LocalState.EXISTS);
                 if (master && !is5) {
                     currentDownloadCount++;
                 }
@@ -405,6 +395,7 @@ public class DownloadService {
                     log.info("备用RSS占位待清除, 由主RSS替换下载 {}", reName);
                 } else {
                     log.info("本地文件已存在 {}", reName);
+                    RssTask.countRoundLocalState(LocalState.EXISTS);
                     if (master && !is5) {
                         currentDownloadCount++;
                     }
@@ -426,6 +417,7 @@ public class DownloadService {
             // OpenList: pending 标记存在表示离线进行中, 本轮跳过, 避免重复提交与通知轰炸
             if (openListTool && TorrentUtil.getPendingTorrent(ani, item).exists()) {
                 log.debug("离线任务进行中, 跳过本轮 {}", reName);
+                RssTask.countRoundLocalState(LocalState.UNKNOWN);
                 continue;
             }
             // (E9) 失败队列闸门: 仅非 OpenList 路径(qB/TR/Aria2)。近 24h 内失败过的本集
@@ -439,6 +431,7 @@ public class DownloadService {
                                 && System.currentTimeMillis() - f.getFailedAt() < TimeUnit.HOURS.toMillis(24));
                 if (recentFailed) {
                     log.warn("本集 24h 内下载失败(已保留在失败队列), 跳过本轮推送 {} hash={}", reName, hash);
+                    RssTask.countRoundLocalState(LocalState.UNKNOWN);
                     continue;
                 }
             }
@@ -477,6 +470,7 @@ public class DownloadService {
             EventWebhookUtil.emit(EventTypeEnum.DOWNLOAD_START, ani, startEvent);
 
             download(ani, item, savePath, saveTorrent);
+            RssTask.countRoundLocalState(LocalState.ABSENT);
 
             if (master && !is5) {
                 currentDownloadCount++;
@@ -493,27 +487,35 @@ public class DownloadService {
         }
 
         // 有新下载，或漏集数量变化时落盘（避免每轮无意义写 ani.v2.json）
+        // 走 syncStateOnly：只回写运行时状态，不该顺带清空下载路径索引与本地状态快照——
+        // 那是"订阅增删改"才需要的动作，而这里每下完一集都会触发。
+        //
+        // F6-3：每轮每订阅最多落盘一次。原先"进度回写"与"自动停用"各写一次，
+        // 下完最后一集的那一轮会连写两次 ani.v2.json（整表序列化 + fsync）。
+        // 改为打标记、方法末尾统一 flush，语义不变而写盘次数收敛为 1。
+        boolean stateDirty = false;
         if (sync || omitChanged) {
             if (sync) {
                 int size = ItemsUtil.currentEpisodeNumber(ani, items);
                 ani.setCurrentEpisodeNumber(size);
                 ani.setLastDownloadTime(System.currentTimeMillis());
             }
-            AniUtil.sync();
+            stateDirty = true;
         }
 
-        if (!autoDisabled) {
-            return;
+        if (autoDisabled) {
+            Integer totalEpisodeNumber = ani.getTotalEpisodeNumber();
+            if (totalEpisodeNumber != null && totalEpisodeNumber >= 1
+                    && currentDownloadCount >= totalEpisodeNumber) {
+                log.info("{} 第 {} 季 共 {} 集 已全部下载完成, 自动停止订阅", title, season, totalEpisodeNumber);
+                NotificationUtil.send(config, ani, StrFormatter.format("{} 订阅已完结", title), NotificationStatusEnum.COMPLETED);
+                ani.setEnable(false);
+                stateDirty = true;
+            }
         }
-        Integer totalEpisodeNumber = ani.getTotalEpisodeNumber();
-        if (totalEpisodeNumber < 1) {
-            return;
-        }
-        if (currentDownloadCount >= totalEpisodeNumber) {
-            log.info("{} 第 {} 季 共 {} 集 已全部下载完成, 自动停止订阅", title, season, totalEpisodeNumber);
-            NotificationUtil.send(config, ani, StrFormatter.format("{} 订阅已完结", title), NotificationStatusEnum.COMPLETED);
-            ani.setEnable(false);
-            AniUtil.sync();
+
+        if (stateDirty) {
+            AniUtil.syncStateOnly();
         }
     }
 
@@ -964,8 +966,8 @@ public class DownloadService {
                 .findFirst()
                 .orElseThrow(() -> new IllegalArgumentException("关联订阅不存在"));
 
-        Object lock = lockForAni(ani);
-        synchronized (lock) {
+        // F6-1：与 downloadAni 抢同一把订阅写锁，避免"重下"和"整订刷新"并发改同一份状态
+        return AniLocks.callWithWrite(ani, () -> {
             List<Item> items = ItemsUtil.getItems(ani);
             Item match = matchFailedItem(items, failed);
             if (match == null) {
@@ -1019,7 +1021,7 @@ public class DownloadService {
             FailedDownloadQueue.remove(failed.getId());
             FailedDownloadQueue.remove(key);
             return "已精确重下：" + StrUtil.blankToDefault(match.getReName(), failed.getReName());
-        }
+        });
     }
 
     /**
@@ -1032,8 +1034,8 @@ public class DownloadService {
         if (ani == null || item == null) {
             throw new IllegalArgumentException("参数无效");
         }
-        Object lock = lockForAni(ani);
-        synchronized (lock) {
+        // F6-1：强制下载要删文件 + 重建种子记录，属结构性变更，必须独占该订阅
+        return AniLocks.callWithWrite(ani, () -> {
             // 1. 清种子记录(正式 + pending)
             File marker = TorrentUtil.getTorrent(ani, item);
             if (marker != null && marker.exists()) {
@@ -1063,6 +1065,8 @@ public class DownloadService {
             } else {
                 deleteLocalFilesByReName(downloadPath, item.getReName());
             }
+            // 刚删掉了文件：目录内容已变，快照立即失效（F2-6）
+            LocalStateCache.invalidateByDownloadPath(downloadPath);
 
             // 3. 走正常下载流程(提交/离线等待/重命名等)
             File saved = isOpenListTool()
@@ -1073,7 +1077,7 @@ public class DownloadService {
             }
             download(ani, item, downloadPath, saved);
             return "已强制下载：" + item.getReName();
-        }
+        });
     }
 
     /**
@@ -1401,7 +1405,49 @@ public class DownloadService {
      * OpenList/Alist: 下载目录为网盘虚拟路径, 通过 OpenList API 列出文件构建索引。
      */
     private Set<String> buildLocalEpisodeIndex(Ani ani, String downloadPath) {
+        return buildEpisodeIndexResult(ani, downloadPath, false).index();
+    }
+
+    /**
+     * 严格版集数索引：网盘列举失败时抛出，而非静默返回空集。
+     * <p>
+     * 供预览区分"目录确实为空"（→ 确实不存在）与"查询失败"（→ 只能标"存疑"）。
+     * 非严格版会把网盘抖动当成"目录无文件"，用于下载去重是安全的（保守重下），
+     * 用于展示则会谎报"本地不存在"，故展示场景必须走本方法。
+     */
+    public Set<String> buildEpisodeIndexStrict(Ani ani, String downloadPath) {
+        return buildEpisodeIndexResult(ani, downloadPath, true).index();
+    }
+
+    /**
+     * 集数索引 + 完整性标记。
+     * <p>
+     * 为什么需要 {@code complete}：网盘目录文件数超过 {@code cloudListMaxFiles} 时会截断。
+     * 截断后的索引仍然<b>能确认"存在"</b>（找到了就是找到了），但<b>不能断言"不存在"</b>
+     * （要找的那一集可能正好在被截掉的部分里）。把这两种能力区分开，
+     * 才能既守住性能上限、又不谎报"本地没有"。
+     */
+    public static final class EpisodeIndex {
+        private final Set<String> index;
+        private final boolean complete;
+
+        private EpisodeIndex(Set<String> index, boolean complete) {
+            this.index = index == null ? Set.of() : index;
+            this.complete = complete;
+        }
+
+        public Set<String> index() {
+            return index;
+        }
+
+        public boolean complete() {
+            return complete;
+        }
+    }
+
+    private EpisodeIndex buildEpisodeIndexResult(Ani ani, String downloadPath, boolean strict) {
         Set<String> index = new HashSet<>();
+        boolean complete = true;
         boolean ovaLegacy = Boolean.TRUE.equals(ani.getOva()) && !RenameUtil.isNamingV2(ani);
         // 剧场版(电影式)/旧版 OVA: 文件名不含 SxxExx, 按文件名主名索引
         boolean movieStyle = RenameUtil.isMovie(ani) || ovaLegacy;
@@ -1410,14 +1456,24 @@ public class DownloadService {
             // 网盘虚拟路径, 本地文件系统不可见, 用离线网盘 API 列出文件。
             // 只认视频文件: 空目录/临时目录(如「标题 SxxExx」文件夹壳)/字幕或其它杂文件
             // 不能证明本集已下载, 否则种子太新长时间无视频时会误判已存在而永远不重下
-            for (String name : offline.listFileNames(downloadPath)) {
+            List<String> names = strict
+                    ? offline.listFileNamesStrict(downloadPath)
+                    : offline.listFileNames(downloadPath);
+            int maxFiles = resolveCloudListMaxFiles();
+            if (names.size() > maxFiles) {
+                log.warn("网盘目录文件数 {} 超过上限 {}，已截断；本次仅能确认「存在」，不能断言「不存在」: {}",
+                        names.size(), maxFiles, downloadPath);
+                names = names.subList(0, maxFiles);
+                complete = false;
+            }
+            for (String name : names) {
                 String extName = FileUtil.extName(name);
                 if (StrUtil.isBlank(extName) || !FileUtils.isVideoFormat(extName)) {
                     continue;
                 }
                 addFileToIndex(index, name, movieStyle);
             }
-            return index;
+            return new EpisodeIndex(index, complete);
         }
 
         List<File> files = FileUtils.listFileList(downloadPath);
@@ -1434,8 +1490,19 @@ public class DownloadService {
             }
             addFileToIndex(index, file.getPath(), movieStyle);
         }
-        return index;
+        return new EpisodeIndex(index, complete);
     }
+
+    /**
+     * 网盘列举文件数上限（默认 5000，范围 100–50000）
+     */
+    static int resolveCloudListMaxFiles() {
+        Integer configured = ConfigUtil.CONFIG == null ? null : ConfigUtil.CONFIG.getCloudListMaxFiles();
+        int value = configured == null ? DEFAULT_CLOUD_LIST_MAX_FILES : configured;
+        return Math.max(100, Math.min(value, 50_000));
+    }
+
+    static final int DEFAULT_CLOUD_LIST_MAX_FILES = 5000;
 
     /**
      * 将文件名加入本地索引: movieStyle 用 M: 主名, 普通番剧用 season:episode
@@ -1506,10 +1573,7 @@ public class DownloadService {
             return false;
         }
 
-        Integer season = ani.getSeason();
-        Boolean ova = ani.getOva();
         String reName = item.getReName();
-        Double episode = item.getEpisode();
 
         String downloadPath = getDownloadPath(ani);
 
@@ -1531,17 +1595,503 @@ public class DownloadService {
         }
 
         if (localEpisodeIndex == null) {
-            localEpisodeIndex = buildLocalEpisodeIndex(ani, downloadPath);
+            // F2-7：索引改走订阅级快照缓存，与预览/媒体库/手动搜索共用同一份结果。
+            // OpenList 模式下本方法会为"没有种子记录"的条目逐个调用，不共享缓存时
+            // 同一订阅在一轮里会被重复列举 N 次。
+            // 注意（F5-1）：判定逻辑本身<b>不改</b>——查询失败时仍按旧的非严格版语义
+            // 返回"未下载"（保守重下），绝不因为"查不到"就跳过下载。
+            try {
+                localEpisodeIndex = cachedEpisodeIndex(ani, downloadPath).index();
+            } catch (Exception e) {
+                log.warn("构建集数索引失败，按未下载处理（保守重下） {}: {}",
+                        reName, ExceptionUtils.getMessage(e));
+                localEpisodeIndex = Set.of();
+            }
         }
+
+        boolean exists = matchesEpisodeIndex(ani, item, localEpisodeIndex);
+
+        if (exists) {
+            // 保存 torrent 下次只校验 torrent 是否存在，可以把config设置到固态硬盘，防止一直硬盘机机械硬盘
+            TorrentUtil.saveTorrent(ani, item);
+            log.info("本地已存在 {}", reName);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 预览用：目标路径下是否<b>确实存在</b>这一集的视频文件（本地磁盘 / OpenList 网盘）。
+     * <p>
+     * 与 {@link #itemDownloaded} 的区别：不受「重命名」「文件存在时不下载」两个<b>策略开关</b>影响。
+     * 那两个开关回答的是"要不要跳过下载"，而预览的「本地存在」列表达的是"文件到底在不在"这一事实，
+     * 不该被策略开关改写。
+     * <p>
+     * 前提：调用方需确认已开启重命名——未开启时文件名不含 SxxExx，按集数匹配无从谈起。
+     *
+     * @param episodeIndex 预构建的集数索引（{@link #buildEpisodeIndexStrict}），避免逐条重建；
+     *                     传 null 时按需构建（非严格版）
+     */
+    public boolean itemFileExists(Ani ani, Item item, Set<String> episodeIndex) {
+        if (ani == null || item == null) {
+            return false;
+        }
+        Set<String> index = episodeIndex == null
+                ? buildLocalEpisodeIndex(ani, getDownloadPath(ani))
+                : episodeIndex;
+        return matchesEpisodeIndex(ani, item, index);
+    }
+
+    /**
+     * 文件确实存在但种子记录缺失时补回记录（预览的既有行为）。
+     * 记录缺失会让 RSS 主流程把这集当成未下载而重下，故展示时顺手补回；失败只告警，不影响展示。
+     */
+    public void restoreTorrentRecord(Ani ani, Item item) {
+        if (ani == null || item == null) {
+            return;
+        }
+        try {
+            TorrentUtil.saveTorrent(ani, item);
+            // 记录补回不改变目录内容，但"记录存在"会影响下一次判定，保守失效
+            LocalStateCache.invalidate(ani);
+        } catch (Exception e) {
+            log.warn("补回种子记录失败 {}: {}", item.getReName(), ExceptionUtils.getMessage(e));
+        }
+    }
+
+    /**
+     * 「本地存在」三态。
+     * <p>
+     * 与 {@link #itemDownloaded} 的布尔语义分开：那个回答的是"要不要跳过下载"（受
+     * {@code rename} / {@code fileExist} 两个策略开关影响），本枚举回答的是"文件到底在不在"。
+     */
+    public enum LocalState {
+        /**
+         * 目标路径下确实有这一集的视频文件（本地磁盘 / OpenList 网盘）
+         */
+        EXISTS,
+        /**
+         * 无法确认，本地有种子记录但不敢断言文件在。两个成因：
+         * <ul>
+         *   <li>网盘列举失败（查询失败 != 目录为空）；</li>
+         *   <li>已提交下载但文件尚未改名落地（下载器里有同名任务，文件名还不含 SxxExx）。</li>
+         * </ul>
+         * 注意：未开启重命名时<b>不产生</b> UNKNOWN —— 那种情况下直接按种子记录判定。
+         */
+        UNKNOWN,
+        /**
+         * 确认没有
+         */
+        ABSENT;
+
+        /**
+         * 是否算作「本地已有」（<b>含存疑</b>）。
+         * <p>
+         * 存疑归入"已有"：无法校验时不能断言用户没有，否则「只看未下载」会把一批
+         * 很可能已存在的条目推出来，用户一不留神就重复下单（强制下载会先删已有文件）。
+         * 前端 {@code hasDownloaded || hasDownloadedUnknown} 是本策略的 JS 版本。
+         */
+        public boolean present() {
+            return this != ABSENT;
+        }
+    }
+
+    /**
+     * 「无法确认」的成因。
+     * <p>
+     * 分开记不是为了好看：三种成因的对策完全不同——列举失败要等网盘恢复、
+     * 超预算要调大预算或减少订阅、索引不完整要调大 {@code cloudListMaxFiles}。
+     * 混成一句"存疑"，用户只能猜。
+     */
+    public enum UnknownReason {
+        /**
+         * 不是存疑（判定出了确定结果）
+         */
+        NONE,
+        /**
+         * 网盘列举失败 / 熔断冷却中（查询失败 ≠ 目录为空）
+         */
+        VERIFY_FAILED,
+        /**
+         * 本轮网盘 API 预算已耗尽，主动放弃校验
+         */
+        BUDGET_EXHAUSTED,
+        /**
+         * 索引被截断，无法断言"不存在"
+         */
+        INDEX_INCOMPLETE,
+        /**
+         * 下载器里已有同名任务，文件尚未改名落地
+         */
+        DOWNLOADING
+    }
+
+    /**
+     * 「本地存在」判定上下文：一次构建、整批复用。
+     * <p>
+     * 存在的意义是<b>把索引构建从"每条 item 一次"降到"每订阅一次"</b>——旧写法逐条调用
+     * {@code itemDownloaded(ani, item, false)}，内部 {@code localEpisodeIndex == null}
+     * 会为每条 item 重建索引，本地模式是 N 次目录遍历，网盘模式下就是 N 次 API 调用
+     * （300 条结果 × 300ms 限流 ≈ 90 秒）。
+     * <p>
+     * 预览与手动搜索共用本上下文，避免两处口径再次漂移。
+     */
+    public static final class LocalStateContext {
+        /**
+         * 是否具备真实文件校验能力（需开启重命名：文件名含 SxxExx 才能按季/集匹配）
+         */
+        private final boolean canVerify;
+        /**
+         * 校验过程本身失败（网盘列举异常）——与"目录确实为空"必须区分开
+         */
+        private final boolean verifyFailed;
+        private final Set<String> episodeIndex;
+        /**
+         * 本订阅的下载目录（真实文件校验用）
+         */
+        private final String downloadPath;
+        /**
+         * 下载器中已存在的任务键（{@code downloadDir|任务名小写}）。
+         * <p>
+         * 用于识别"<b>已提交下载但文件尚未改名落地</b>"的窗口：这段时间里文件名还不含
+         * {@code SxxExx}，真实文件校验必然失败。若不额外判断就会被判成"否"，
+         * 用户在预览里会以为没在下而点强制下载——而强制下载会先删掉正在下的文件。
+         */
+        private final Set<String> activeTaskKeys;
+        /**
+         * 索引是否完整。false（列举被截断 / 校验失败 / 超预算）时只能确认"存在"，
+         * <b>不得</b>据此断言"不存在"。
+         */
+        private final boolean indexComplete;
+        /**
+         * 本上下文为何无法给出确定结论（供展示与诊断）
+         */
+        private final UnknownReason reason;
+
+        private LocalStateContext(boolean canVerify, boolean verifyFailed, Set<String> episodeIndex,
+                                 String downloadPath, Set<String> activeTaskKeys,
+                                 boolean indexComplete, UnknownReason reason) {
+            this.canVerify = canVerify;
+            this.verifyFailed = verifyFailed;
+            this.episodeIndex = episodeIndex;
+            this.downloadPath = downloadPath;
+            this.activeTaskKeys = activeTaskKeys;
+            this.indexComplete = indexComplete;
+            this.reason = reason == null ? UnknownReason.NONE : reason;
+        }
+
+        /**
+         * 无法做真实文件校验（未开启重命名）——<b>不是</b>校验失败，按记录判定且不产生存疑
+         */
+        static LocalStateContext unverifiable() {
+            return new LocalStateContext(false, false, null, null, Set.of(),
+                    false, UnknownReason.NONE);
+        }
+
+        /**
+         * 校验不可靠（列举失败 / 超预算 / 索引不完整）
+         */
+        static LocalStateContext unreliable(String downloadPath, Set<String> activeTaskKeys,
+                                           UnknownReason reason) {
+            return new LocalStateContext(true, true, null, downloadPath, activeTaskKeys,
+                    false, reason);
+        }
+
+        static LocalStateContext verified(Set<String> episodeIndex, String downloadPath,
+                                          Set<String> activeTaskKeys, boolean indexComplete) {
+            return new LocalStateContext(true, false, episodeIndex, downloadPath, activeTaskKeys,
+                    indexComplete,
+                    indexComplete ? UnknownReason.NONE : UnknownReason.INDEX_INCOMPLETE);
+        }
+
+        public boolean canVerify() {
+            return canVerify;
+        }
+
+        public boolean verifyFailed() {
+            return verifyFailed;
+        }
+
+        public Set<String> episodeIndex() {
+            return episodeIndex;
+        }
+
+        public String downloadPath() {
+            return downloadPath;
+        }
+
+        public Set<String> activeTaskKeys() {
+            return activeTaskKeys;
+        }
+
+        public boolean indexComplete() {
+            return indexComplete;
+        }
+
+        public UnknownReason reason() {
+            return reason;
+        }
+    }
+
+    /**
+     * 下载器中已有任务的任务键集合（{@code downloadDir|任务名小写}）。
+     * <p>
+     * 离线网盘（OpenList）不适用：它的在途任务用 {@code .pending} 标记，{@code getTorrentsInfos()} 返回空。
+     * 本地下载器的任务列表有 5 秒缓存，故整批只调用一次的成本可忽略。
+     */
+    private static Set<String> buildActiveTaskKeys() {
+        Set<String> keys = new HashSet<>();
+        try {
+            for (TorrentsInfo ti : TorrentUtil.getTorrentsInfos()) {
+                if (ti == null || StrUtil.isBlank(ti.getName())) {
+                    continue;
+                }
+                keys.add(taskKey(ti.getDownloadDir(), ti.getName()));
+            }
+        } catch (Exception e) {
+            // 下载器未登录/未配置等：拿不到任务列表就退化成"没有在途任务"，不阻断展示
+            log.debug("读取下载器任务列表失败: {}", ExceptionUtils.getMessage(e));
+        }
+        return keys;
+    }
+
+    private static String taskKey(String downloadDir, String name) {
+        return (downloadDir == null ? "" : downloadDir) + "|" + (name == null ? "" : name.toLowerCase());
+    }
+
+    /**
+     * 构建「本地存在」判定上下文（每订阅只建一次集数索引）。
+     * <p>
+     * 三种情形：
+     * <ul>
+     *   <li>未开启重命名 → 文件名不可预测，按集数匹配无从谈起，退回种子记录判定（即旧逻辑）</li>
+     *   <li>开启重命名但列举失败 / 超预算 → 回退记录判定，但结果只能标"存疑"</li>
+     *   <li>开启重命名且列举成功 → 可按真实文件判定</li>
+     * </ul>
+     * <p>
+     * F2：索引构建走 {@link LocalStateCache}（订阅级快照 + 单飞）。预览、媒体库、
+     * RSS 主流程、手动搜索因此共用同一份结果，同一轮内同一订阅的网盘列举次数 ≤ 1。
+     */
+    public LocalStateContext prepareLocalState(Ani ani) {
+        if (ani == null) {
+            return LocalStateContext.unverifiable();
+        }
+        if (!Boolean.TRUE.equals(ConfigUtil.CONFIG.getRename())) {
+            return LocalStateContext.unverifiable();
+        }
+        String downloadPath = getDownloadPath(ani);
+        Set<String> activeTaskKeys = buildActiveTaskKeys();
+        boolean cloud = TorrentUtil.DOWNLOAD instanceof OfflineDownloader;
+
+        // F7-5：本轮预算已耗尽 → 停止 Phase B，本订阅一律"存疑"（不发任何请求）。
+        // 这是主动放弃，不是查询失败：继续打只会更快撞上限流，代价比"显示存疑"大得多。
+        if (cloud && OpenListApi.isRoundBudgetExhausted()) {
+            OpenListApi.markBudgetExhausted();
+            log.warn("本轮网盘 API 预算已耗尽（{}/{}），停止真实文件校验，剩余条目保持「存疑」: {}",
+                    OpenListApi.getApiCallCountRound(), OpenListApi.getRoundBudget(), ani.getTitle());
+            return LocalStateContext.unreliable(downloadPath, activeTaskKeys,
+                    UnknownReason.BUDGET_EXHAUSTED);
+        }
+
+        try {
+            EpisodeIndex built = cachedEpisodeIndex(ani, downloadPath);
+            return LocalStateContext.verified(built.index(), downloadPath,
+                    activeTaskKeys, built.complete());
+        } catch (Exception e) {
+            // 网盘列举失败：与"目录确实为空"区分开，本轮回退记录判定并标"存疑"
+            log.warn("构建集数索引失败，回退种子记录判定 {}: {}",
+                    ani.getTitle(), ExceptionUtils.getMessage(e));
+            return LocalStateContext.unreliable(downloadPath, activeTaskKeys,
+                    UnknownReason.VERIFY_FAILED);
+        }
+    }
+
+    /**
+     * 走订阅级快照缓存构建集数索引（F2）。
+     * <p>
+     * 严格版列举：失败<b>抛出</b>而不是返回空集。缓存只存成功结果，
+     * 一次网盘抖动不会被固化成"目录里什么都没有"。
+     */
+    private EpisodeIndex cachedEpisodeIndex(Ani ani, String downloadPath) throws Exception {
+        boolean cloud = TorrentUtil.DOWNLOAD instanceof OfflineDownloader;
+        LocalStateCache.Snapshot snapshot = LocalStateCache.getOrBuild(ani, downloadPath,
+                cloud ? LocalStateCache.Source.CLOUD_API : LocalStateCache.Source.LOCAL_DISK,
+                () -> {
+                    EpisodeIndex built = buildEpisodeIndexResult(ani, downloadPath, true);
+                    return LocalStateCache.Loaded.of(built.index(), built.complete());
+                });
+        return new EpisodeIndex(snapshot.episodeIndex(), snapshot.complete());
+    }
+
+    /**
+     * 判定单条 item 的「本地存在」状态，不产生任何写动作。
+     *
+     * @see #applyLocalStates(Ani, List)
+     */
+    public LocalState resolveLocalState(Ani ani, Item item, LocalStateContext ctx) {
+        if (ani == null || item == null) {
+            return LocalState.ABSENT;
+        }
+        LocalStateContext context = ctx == null ? prepareLocalState(ani) : ctx;
+        if (!context.canVerify()) {
+            // 未开启重命名：文件名不含 SxxExx，无法按集数核对真实文件 → 沿用旧逻辑
+            return TorrentUtil.getTorrent(ani, item).exists() ? LocalState.EXISTS : LocalState.ABSENT;
+        }
+        if (context.verifyFailed()) {
+            // 查询失败 ≠ 目录为空：有记录则标"存疑"，不谎报"是"也不降级成"否"
+            return TorrentUtil.getTorrent(ani, item).exists() ? LocalState.UNKNOWN : LocalState.ABSENT;
+        }
+        if (itemFileExists(ani, item, context.episodeIndex())) {
+            return LocalState.EXISTS;
+        }
+        // 索引被截断：找到了才算"存在"，没找到不能算"不存在"（要找的那集可能在被截掉的部分里）
+        if (!context.indexComplete()) {
+            return LocalState.UNKNOWN;
+        }
+        // 真实文件里没有这一集，但下载器里已有同名任务 → 只是"已提交、还没改名落地"。
+        // 这段窗口内文件名不含 SxxExx，文件校验必然失败；判「否」会让用户以为没在下
+        // 而点强制下载，而强制下载会先删掉正在下的文件。故只能标"存疑"。
+        if (context.activeTaskKeys().contains(taskKey(context.downloadPath(), item.getReName()))) {
+            return LocalState.UNKNOWN;
+        }
+        return LocalState.ABSENT;
+    }
+
+    /**
+     * 单条 item 的「存疑」成因（F5-6 可观测）。确定结果返回 {@link UnknownReason#NONE}。
+     */
+    public UnknownReason resolveUnknownReason(Ani ani, Item item, LocalStateContext ctx) {
+        if (ani == null || item == null || ctx == null) {
+            return UnknownReason.NONE;
+        }
+        if (!ctx.canVerify() || ctx.verifyFailed()) {
+            return ctx.reason();
+        }
+        if (itemFileExists(ani, item, ctx.episodeIndex())) {
+            return UnknownReason.NONE;
+        }
+        if (!ctx.indexComplete()) {
+            return UnknownReason.INDEX_INCOMPLETE;
+        }
+        if (ctx.activeTaskKeys().contains(taskKey(ctx.downloadPath(), item.getReName()))) {
+            return UnknownReason.DOWNLOADING;
+        }
+        return UnknownReason.NONE;
+    }
+
+    /**
+     * 解析整批 item 的「本地存在」状态并写回展示字段（预览 / 手动搜索共用）。
+     * <p>
+     * 写回：{@code hasDownloaded} / {@code hasDownloadedUnknown} / {@code hasTorrentRecord} /
+     * {@code downloading} / {@code downloadingState}。
+     * <p>
+     * 副作用：文件确实存在但种子记录缺失时补回记录（与旧预览行为一致，避免 RSS 主流程重下）。
+     *
+     * @return 与 items 一一对应的状态列表，供调用方统计
+     */
+    public List<LocalState> applyLocalStates(Ani ani, List<? extends Item> items) {
+        List<LocalState> states = new ArrayList<>();
+        if (ani == null || items == null || items.isEmpty()) {
+            return states;
+        }
+        LocalStateContext ctx = prepareLocalState(ani);
+        for (Item item : items) {
+            if (item == null) {
+                states.add(LocalState.ABSENT);
+                continue;
+            }
+            item.setHasDownloaded(false);
+            item.setHasDownloadedUnknown(false);
+            item.setDownloading(false);
+            item.setDownloadingState(null);
+            boolean recordExists = TorrentUtil.getTorrent(ani, item).exists();
+            // 「删除种子」按钮要的是"有没有缓存可删"，与"文件在不在"是两件事
+            item.setHasTorrentRecord(recordExists);
+
+            LocalState state = resolveLocalState(ani, item, ctx);
+            states.add(state);
+
+            if (state == LocalState.EXISTS) {
+                item.setHasDownloaded(true);
+                if (!recordExists) {
+                    restoreTorrentRecord(ani, item);
+                }
+                continue;
+            }
+            if (state == LocalState.UNKNOWN) {
+                item.setHasDownloadedUnknown(true);
+                // 记下"为什么存疑"：三种成因的对策完全不同，混成一句用户只能猜
+                RssTask.countRoundUnknownReason(resolveUnknownReason(ani, item, ctx));
+            }
+            // 未能确认"确实存在"的条目都可能已提交离线任务但尚未落地，
+            // 需标"下载中"：否则同一时刻任务管理器显示"离线处理中 45%"、
+            // 列表却显示"本地存在：否"，用户会误判为没在下而重复点强制下载
+            markPending(ani, item);
+        }
+        return states;
+    }
+
+    /**
+     * 统计"有种子记录、但目标路径已确认没有对应文件"的条目数（F5-2）。
+     * <p>
+     * 这类条目是<b>记录与文件不一致</b>：用户曾经下过、后来把文件删了（或迁移走了）。
+     * 处理方式是<b>只提示、不删除</b>——种子记录是"这集曾经下过"的唯一线索，
+     * 自动清掉会让用户彻底失去判断依据；界面给出"可清理"提示，把决定权留给用户。
+     * <p>
+     * 正在下载中（有 pending 标记）的条目不算不一致：那只是"还没落地"。
+     */
+    public static int countStaleTorrentRecords(List<? extends Item> items) {
+        if (items == null || items.isEmpty()) {
+            return 0;
+        }
+        int count = 0;
+        for (Item item : items) {
+            if (item == null) {
+                continue;
+            }
+            if (Boolean.TRUE.equals(item.getHasTorrentRecord())
+                    && !Boolean.TRUE.equals(item.getHasDownloaded())
+                    && !Boolean.TRUE.equals(item.getHasDownloadedUnknown())
+                    && !Boolean.TRUE.equals(item.getDownloading())) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * 已提交离线任务但尚未落地 → 标记"下载中"。
+     * 只读本地 {@code .pending} 标记，不触发网盘 API。
+     */
+    private void markPending(Ani ani, Item item) {
+        try {
+            File pending = TorrentUtil.getPendingTorrent(ani, item);
+            if (pending != null && pending.exists()) {
+                item.setDownloading(true);
+                item.setDownloadingState("已提交离线任务，等待完成");
+            }
+        } catch (Exception e) {
+            log.debug("检查 pending 记录失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 集数索引匹配：索引里是否有这一集。
+     * 剧场版/旧版 OVA 按 M:主名 匹配，OVA 特典式按 0:集数，普通番剧按 season:episode。
+     */
+    private boolean matchesEpisodeIndex(Ani ani, Item item, Set<String> localEpisodeIndex) {
+        Integer season = ani.getSeason();
+        Boolean ova = ani.getOva();
+        String reName = item.getReName();
+        Double episode = item.getEpisode();
 
         boolean ovaLegacy = Boolean.TRUE.equals(ova) && !RenameUtil.isNamingV2(ani);
         // 剧场版(电影式)/旧版 OVA: 按文件名主名匹配(M: 前缀)
         boolean movieStyle = RenameUtil.isMovie(ani) || ovaLegacy;
         // OVA 特典式(v2): 落盘为 S00Exx(season=0), 用 0 参与匹配
         boolean ovaSpecial = Boolean.TRUE.equals(ova) && RenameUtil.isNamingV2(ani) && !RenameUtil.isMovie(ani);
-        boolean exists;
         if (movieStyle) {
-            exists = StrUtil.isNotBlank(reName)
+            boolean exists = StrUtil.isNotBlank(reName)
                     && localEpisodeIndex.contains("M:" + reName.trim().toUpperCase());
             if (!exists && StrUtil.isNotBlank(ani.getTitle())) {
                 // qB 等对无 SxxExx 的任务不重命名文件, 文件名可能是种子原始名,
@@ -1553,33 +2103,27 @@ public class DownloadService {
                             .anyMatch(k -> k.startsWith("M:") && k.contains(t));
                 }
             }
-        } else if (ovaSpecial) {
-            exists = episode != null && localEpisodeIndex.contains("0:" + episode);
-        } else if (episode == null) {
-            exists = false;
-        } else {
-            // 季号优先取 reName 中的 Sxx(编号特典落 S00, 与正片集数不碰撞);
-            // reName 无 SxxExx 时退回订阅季号(旧行为)
-            int querySeason = season;
-            if (StrUtil.isNotBlank(reName)) {
-                Matcher sm = Pattern.compile(StringEnum.SEASON_REG).matcher(reName.trim());
-                if (sm.find()) {
-                    try {
-                        querySeason = Integer.parseInt(sm.group(1));
-                    } catch (NumberFormatException ignored) {
-                    }
+            return exists;
+        }
+        if (ovaSpecial) {
+            return episode != null && localEpisodeIndex.contains("0:" + episode);
+        }
+        if (episode == null) {
+            return false;
+        }
+        // 季号优先取 reName 中的 Sxx(编号特典落 S00, 与正片集数不碰撞);
+        // reName 无 SxxExx 时退回订阅季号(旧行为)
+        int querySeason = season == null ? 1 : season;
+        if (StrUtil.isNotBlank(reName)) {
+            Matcher sm = Pattern.compile(StringEnum.SEASON_REG).matcher(reName.trim());
+            if (sm.find()) {
+                try {
+                    querySeason = Integer.parseInt(sm.group(1));
+                } catch (NumberFormatException ignored) {
                 }
             }
-            exists = localEpisodeIndex.contains(querySeason + ":" + episode);
         }
-
-        if (exists) {
-            // 保存 torrent 下次只校验 torrent 是否存在，可以把config设置到固态硬盘，防止一直硬盘机机械硬盘
-            TorrentUtil.saveTorrent(ani, item);
-            log.info("本地已存在 {}", reName);
-            return true;
-        }
-        return false;
+        return localEpisodeIndex.contains(querySeason + ":" + episode);
     }
 
     /**
@@ -1601,6 +2145,8 @@ public class DownloadService {
     public static void invalidateDownloadPathIndex() {
         DOWNLOAD_PATH_INDEX = null;
         DOWNLOAD_PATH_INDEX_BUILT_AT = 0L;
+        // 订阅增删 / 下载路径模板变更会同时影响所有订阅的快照：整体失效
+        LocalStateCache.invalidateAll();
     }
 
     private Map<String, Ani> buildDownloadPathIndex() {

@@ -109,7 +109,8 @@ public class ConfigController extends BaseController {
     @PostMapping("/setConfig")
     public Result<Void> setConfig(@RequestBody Config newConfig) {
         // 保存旧值用于变更对比(此后 CONFIG 会被整体原子替换, 旧引用不再被修改)
-        Config config = ConfigUtil.CONFIG;
+        Config oldConfig = ConfigUtil.CONFIG;
+        Config config = oldConfig;
         Integer renameSleepSeconds = config.getRenameSleepSeconds();
         Integer sleep = config.getRssSleepMinutes();
         String download = config.getDownloadToolType();
@@ -144,6 +145,19 @@ public class ConfigController extends BaseController {
         // 下载工具发生改变
         if (!download.equals(config.getDownloadToolType())) {
             TorrentUtil.load();
+        }
+
+        // F6-4 配置变更联动：downloadPathTemplate / ovaDownloadPathTemplate / rename /
+        // fileExist / downloadToolType 决定"本地状态判定"的输入或口径，改了必须让缓存作废，
+        // 否则用户改完设置仍会看到旧结果（最长 cloudStateCacheTtlSeconds = 300s 才自然过期）。
+        //
+        // 注意这里只补媒体库缓存：DownloadService.invalidateDownloadPathIndex()
+        // （内部含 LocalStateCache.invalidateAll()）已由 ConfigUtil.syncChecked() 在每次保存时
+        // 无条件执行，重复调用没有意义；而媒体库缓存只认 LibraryController.invalidate()，
+        // 不跟着配置走——它才是真正会"改了设置却还显示旧内容"的那一处。
+        if (ConfigUtil.localStateInputChanged(oldConfig, config)) {
+            LibraryController.invalidate();
+            log.info("配置变更影响本地状态判定，已失效媒体库缓存");
         }
         // 网络协议发生改变，更新 systemd 服务配置并重启
         String newNetworkPrefer = config.getNetworkPrefer();

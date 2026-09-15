@@ -7,6 +7,7 @@ import ani.rss.entity.Ani;
 import ani.rss.entity.Item;
 import ani.rss.entity.StandbyRss;
 import ani.rss.entity.web.Result;
+import ani.rss.service.AniLocks;
 import ani.rss.service.DownloadService;
 import ani.rss.util.other.AniUtil;
 import ani.rss.util.other.ItemsUtil;
@@ -32,8 +33,9 @@ import java.util.Optional;
  * 本控制器把「主 RSS + 全部备用 RSS + 用户临时粘贴的 RSS」聚合成一次搜索，
  * 返回可下单的条目列表，下单直接复用 {@link DownloadService#forceDownloadItem}。
  * <p>
- * 底层件全部是既有的（{@code ItemsUtil.getItems} 解析、{@code itemDownloaded} 判重、
- * {@code forceDownloadItem} 下单），这里只做聚合与透出。
+ * 底层件全部是既有的（{@code ItemsUtil.getItems} 解析、
+ * {@link DownloadService#applyLocalStates} 本地状态判定、{@code forceDownloadItem} 下单），
+ * 这里只做聚合与透出。本地状态与预览页<b>共用同一判定</b>，避免两处口径漂移。
  */
 @Slf4j
 @RestController
@@ -138,7 +140,12 @@ public class ManualSearchController extends BaseController {
     @PostMapping("/manualSearch")
     public Result<Map<String, Object>> manualSearch(@RequestBody ManualSearchDTO dto) {
         Optional<Ani> aniOpt = resolveAni(dto == null ? null : dto.getAniId());
+        // F6-1：搜索要读该订阅的本地状态，属读路径。尽力取读锁，取不到就用快照继续，
+        // 不让「下载中」把搜索框卡住。
+        return AniLocks.callWithTryRead(aniOpt.orElse(null), () -> manualSearchLocked(dto, aniOpt));
+    }
 
+    private Result<Map<String, Object>> manualSearchLocked(ManualSearchDTO dto, Optional<Ani> aniOpt) {
         // 解析条目需要一个"解析上下文"订阅（提供标题/偏移等）；只贴 RSS 时用临时上下文
         Ani context = aniOpt.orElseGet(() -> buildContext(dto == null ? null : dto.getRssUrl()));
         if (StrUtil.isBlank(context.getUrl()) && StrUtil.isBlank(dto == null ? null : dto.getRssUrl())) {
@@ -151,10 +158,17 @@ public class ManualSearchController extends BaseController {
                 : Math.max(1, Math.min(dto.getLimit(), MAX_ITEMS));
         boolean onlyMissing = dto != null && Boolean.TRUE.equals(dto.getOnlyMissing());
 
+        // 本地状态判定上下文：每个订阅只构建一次集数索引，整批复用。
+        // 旧写法逐条调用 itemDownloaded(ani, item, false)，内部 localEpisodeIndex == null
+        // 会为每条结果重建索引——网盘模式下 300 条结果就是 300 次 API 调用
+        // （OpenListApi 全局限流 300ms/次 ≈ 90 秒），首屏会被拖死。
+        Ani localAni = aniOpt.orElse(null);
+        DownloadService.LocalStateContext localState = downloadService.prepareLocalState(localAni);
+
         List<Map<String, Object>> sources = new ArrayList<>();
         List<SearchItem> items = new ArrayList<>();
 
-        for (Source source : collectSources(aniOpt.orElse(null), dto)) {
+        for (Source source : collectSources(localAni, dto)) {
             Map<String, Object> sourceStat = new LinkedHashMap<>();
             sourceStat.put("label", source.label());
             sourceStat.put("url", source.url());
@@ -169,11 +183,8 @@ public class ManualSearchController extends BaseController {
                         continue;
                     }
                     SearchItem si = toSearchItem(item, source);
-                    if (onlyMissing) {
-                        boolean downloaded = isDownloaded(aniOpt.orElse(null), si);
-                        if (downloaded) {
-                            continue;
-                        }
+                    if (onlyMissing && isLocalPresent(localAni, si, localState)) {
+                        continue;
                     }
                     items.add(si);
                     hit++;
@@ -195,10 +206,8 @@ public class ManualSearchController extends BaseController {
             }
         }
 
-        // 标注本地状态（已下载/下载中），与预览页口径一致
-        for (SearchItem item : items) {
-            markLocalState(aniOpt.orElse(null), item);
-        }
+        // 标注本地状态（是 / 存疑 / 下载中 / 否），与预览页共用同一判定，避免两处口径漂移
+        downloadService.applyLocalStates(localAni, items);
 
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("sources", sources);
@@ -328,29 +337,20 @@ public class ManualSearchController extends BaseController {
         return si;
     }
 
-    private void markLocalState(Ani ani, SearchItem item) {
-        if (ani == null) {
-            return;
-        }
-        try {
-            if (downloadService.itemDownloaded(ani, item, false)) {
-                item.setHasDownloaded(true);
-                return;
-            }
-            item.setHasDownloaded(false);
-            item.setDownloading(false);
-        } catch (Exception e) {
-            log.debug("标记本地状态失败 {}: {}", item.getReName(), e.getMessage());
-        }
-    }
-
-    private boolean isDownloaded(Ani ani, SearchItem item) {
-        if (ani == null) {
+    /**
+     * 本地是否"已有"（含<b>存疑</b>）：状态列与「只看未下载」共用同一判定。
+     * <p>
+     * "存疑算已有"这条策略定义在 {@link DownloadService.LocalState#present()}，不在这里复制一份，
+     * 避免后端两处、前端一处三份口径各自漂移。
+     */
+    private boolean isLocalPresent(Ani ani, SearchItem item, DownloadService.LocalStateContext ctx) {
+        if (ani == null || item == null) {
             return false;
         }
         try {
-            return Boolean.TRUE.equals(downloadService.itemDownloaded(ani, item, false));
+            return downloadService.resolveLocalState(ani, item, ctx).present();
         } catch (Exception e) {
+            log.debug("判定本地状态失败 {}: {}", item.getReName(), e.getMessage());
             return false;
         }
     }

@@ -42,6 +42,51 @@
             已处理 {{ status.subscriptionCompleted }}/{{ status.subscriptionTotal }}
             <span>运行中 {{ status.subscriptionActive }}</span>
             <span v-if="status.subscriptionFailed > 0" class="progress-failed">失败 {{ status.subscriptionFailed }}</span>
+            <span v-if="status.totalBatch > 1" class="progress-batch">
+              批次 {{ status.currentBatch || 1 }}/{{ status.totalBatch }}
+              <template v-if="nextBatchCountdownText">· {{ nextBatchCountdownText }}</template>
+            </span>
+          </span>
+        </div>
+        <!-- 静默超时强制开轮：必须明示，否则用户会把"跳过订阅/结果偏差"当成 bug -->
+        <div v-if="status.running && status.quiescentForced" class="job-row">
+          <span class="job-label">静默窗口</span>
+          <span class="job-value">
+            <el-tooltip content="等待后处理（改名/上传/离线归位）收尾超时，本轮为强制开启。结果可信度低于平时，建议查看是否有订阅长期卡在收尾阶段。"
+                        placement="top">
+              <el-tag type="warning" size="small">超时强制开轮</el-tag>
+            </el-tooltip>
+            <span v-if="status.quiescentSkipped > 0" class="progress-batch">
+              · 跳过未收尾订阅 {{ status.quiescentSkipped }}
+            </span>
+          </span>
+        </div>
+        <!-- 本轮本地状态分布：回答"这一轮为什么什么都没下" -->
+        <div v-if="status.running && status.roundLocalState" class="job-row">
+          <span class="job-label">本地状态</span>
+          <span class="job-value progress-summary">
+            <span>已存在 {{ status.roundLocalState.exists }}</span>
+            <span>无法确认 {{ status.roundLocalState.unknown }}</span>
+            <span>已下发 {{ status.roundLocalState.absent }}</span>
+          </span>
+        </div>
+        <!-- 存疑成因：只说"有 N 条无法确认"用户不知道该做什么，分开列才有行动价值 -->
+        <div v-if="status.running && unknownReasonText" class="job-row">
+          <span class="job-label">存疑原因</span>
+          <span class="job-value progress-summary">
+            <el-tooltip placement="top" :show-after="300">
+              <template #content>
+                <div>列举失败：网盘查询失败或熔断冷却中，等网盘恢复即可</div>
+                <div>超预算：本轮网盘 API 预算用尽，可调大「单轮预算」或减少订阅</div>
+                <div>索引不完整：网盘目录文件数超过「列举上限」被截断，可调大该上限</div>
+                <div>等待改名：下载器里已有任务但尚未改名落地，稍后会自行收敛</div>
+              </template>
+              <span class="muted">为什么无法确认？</span>
+            </el-tooltip>
+            <span v-if="status.unknownReasons.verifyFailed">列举失败 {{ status.unknownReasons.verifyFailed }}</span>
+            <span v-if="status.unknownReasons.budgetExhausted">超预算 {{ status.unknownReasons.budgetExhausted }}</span>
+            <span v-if="status.unknownReasons.indexIncomplete">索引不完整 {{ status.unknownReasons.indexIncomplete }}</span>
+            <span v-if="status.unknownReasons.downloading">等待改名 {{ status.unknownReasons.downloading }}</span>
           </span>
         </div>
         <div class="job-row">
@@ -299,6 +344,13 @@ function emptyStatus() {
     subscriptionActive: 0,
     subscriptionCompleted: 0,
     subscriptionFailed: 0,
+    currentBatch: null,
+    totalBatch: null,
+    nextBatchAt: null,
+    quiescentForced: null,
+    quiescentSkipped: null,
+    roundLocalState: null,
+    unknownReasons: null,
     lastFinishedAt: null,
     lastDurationMs: null,
     lastResultMessage: null,
@@ -508,6 +560,24 @@ const lastProcessedText = computed(() => {
     return `${t}${d}${msg}`
   }
   return '-'
+})
+
+// 错峰更新的批间等待倒计时。轮询本身 2s 一次，此处按当前时刻重算即可；
+// 已经过期的 nextBatchAt（提交瞬间的竞态）不显示，避免出现 "0s 后下一批"。
+const nextBatchCountdownText = computed(() => {
+  const at = status.value.nextBatchAt
+  if (!at) return ''
+  const remain = at - Date.now()
+  if (remain <= 0) return ''
+  return `${Math.max(1, Math.ceil(remain / 1000))}s 后下一批`
+})
+
+// 存疑成因：全部为 0 时不显示这一行（"本地状态"那行已经说了总数）
+const unknownReasonText = computed(() => {
+  const r = status.value.unknownReasons
+  if (!r) return ''
+  return [r.verifyFailed, r.budgetExhausted, r.indexIncomplete, r.downloading]
+    .some((n) => n > 0) ? 'has' : ''
 })
 
 const scopeText = (scope) => {
@@ -988,6 +1058,10 @@ onUnmounted(stopPolling)
 
 .progress-failed {
   color: var(--el-color-danger);
+}
+
+.progress-batch {
+  color: var(--el-color-info);
 }
 
 .job-divider {

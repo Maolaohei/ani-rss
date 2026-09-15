@@ -32,6 +32,23 @@ export let configData = {
     "delayedDownload": 0,
     "newTorrentWaitHours": 2,
     "rssSleepMinutes": 15,
+    // 错峰更新：把一轮全量扫描分片提交，批间留间隔（后端默认开启）
+    "staggeredUpdateEnable": true,
+    "staggerBatchIntervalMs": 2000,
+    // 网盘 API 限流（令牌桶）与熔断：后端默认 3/s、突发 1、连续失败 3 次冷却 60s
+    "openListApiPerSecond": 3,
+    "openListApiBurst": 1,
+    "openListFailThreshold": 3,
+    "openListCooldownSeconds": 60,
+    // 静默窗口：等改名/上传等后处理收尾后再开新一轮（后端默认 2 次确认、超时 2×轮询周期）
+    "quiescentConfirmTimes": 2,
+    "quiescentTimeoutMinutes": 30,
+    // 结果缓存：订阅级本地状态快照 TTL（本地磁盘便宜、网盘贵）
+    "localStateCacheTtlSeconds": 60,
+    "cloudStateCacheTtlSeconds": 300,
+    // 每轮网盘 API 预算（留空 = 启用订阅数 × 1，硬上限 200）与列举文件数上限
+    "openListApiBudgetPerRound": null,
+    "cloudListMaxFiles": 5000,
     "renameSleepSeconds": 10,
     "rename": true,
     "rss": true,

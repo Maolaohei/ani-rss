@@ -94,6 +94,122 @@
       </div>
     </div>
   </SettingsItem>
+  <SettingsItem label="错峰更新">
+    <div class="full-width">
+      <div class="flex flex-wrap gap-8">
+        <el-switch v-model="props.config['staggeredUpdateEnable']"/>
+        <el-input-number v-model="props.config['staggerBatchIntervalMs']"
+                         :min="0" :max="60000" :step="500" :disabled="props.config['staggeredUpdateEnable'] === false">
+          <template #prefix>间隔</template>
+          <template #suffix><span>毫秒</span></template>
+        </el-input-number>
+      </div>
+      <div class="margin-top-4">
+        <el-text class="mx-1" size="small">
+          把一轮全量扫描按「RSS 并发度」分成多批提交，批与批之间等待上面的间隔，避免同一瞬间把源站、
+          下载器、网盘一起打爆。等待总时长有上限（轮询周期的 1/4），超出后剩余批次连续提交，不会把整轮拖长。
+          关闭后行为与旧版本一致。
+        </el-text>
+      </div>
+    </div>
+  </SettingsItem>
+  <SettingsItem label="网盘 API 限流">
+    <div class="full-width">
+      <div class="flex flex-wrap gap-8">
+        <el-input-number v-model="props.config['openListApiPerSecond']" :min="1" :max="20">
+          <template #prefix>速率</template>
+          <template #suffix><span>次/秒</span></template>
+        </el-input-number>
+        <el-input-number v-model="props.config['openListApiBurst']" :min="1" :max="5">
+          <template #prefix>突发</template>
+        </el-input-number>
+      </div>
+      <div class="flex flex-wrap gap-8 margin-top-4">
+        <el-input-number v-model="props.config['openListFailThreshold']" :min="1" :max="10">
+          <template #prefix>连续失败</template>
+          <template #suffix><span>次后熔断</span></template>
+        </el-input-number>
+        <el-input-number v-model="props.config['openListCooldownSeconds']" :min="10" :max="600">
+          <template #prefix>冷却</template>
+          <template #suffix><span>秒</span></template>
+        </el-input-number>
+      </div>
+      <div class="margin-top-4">
+        <el-text class="mx-1" size="small">
+          仅对 OpenList / Alist 生效。网盘按账号限流，请求全部串行发送：速率控制每秒最多几次，
+          突发是允许瞬时连续发出的次数。连续失败达到阈值后进入冷却（逐级加倍，上限 10 分钟），
+          冷却期内不再发起请求，受影响的条目一律显示为「存疑」而不是「不存在」。
+          目录不存在属于正常结果，不会触发熔断。
+        </el-text>
+      </div>
+    </div>
+  </SettingsItem>
+  <SettingsItem label="静默窗口">
+    <div class="full-width">
+      <div class="flex flex-wrap gap-8">
+        <el-input-number v-model="props.config['quiescentConfirmTimes']" :min="1" :max="10">
+          <template #prefix>连续确认</template>
+          <template #suffix><span>次</span></template>
+        </el-input-number>
+        <el-input-number v-model="props.config['quiescentTimeoutMinutes']" :min="1" :max="1440">
+          <template #prefix>超时</template>
+          <template #suffix><span>分钟</span></template>
+        </el-input-number>
+      </div>
+      <div class="margin-top-4">
+        <el-text class="mx-1" size="small">
+          开启新一轮扫描前，先等改名 / 上传 / 离线归位这些后处理收尾，避免在「文件已下载但还没改名落地」
+          的窗口里判定本地不存在而重复下载。连续确认多次是为了躲开瞬时空窗；等待超过超时时间则强制开轮
+          （会在任务管理器标注「超时强制开轮」，并跳过尚未收尾的订阅）。
+        </el-text>
+      </div>
+      <div class="margin-top-4">
+        <el-text class="mx-1" size="small" type="info">
+          注意：只要还有下载任务在跑（或做种但未改名），本轮就会一直等到超时。若你有长期挂着的慢速/停滞任务，
+          扫描频率会因此变慢——把超时时间调小即可缓解（等待时间会从轮询间隔里扣除，不会额外叠加）。
+        </el-text>
+      </div>
+    </div>
+  </SettingsItem>
+  <SettingsItem label="结果缓存">
+    <div class="full-width">
+      <div class="flex flex-wrap gap-8">
+        <el-input-number v-model="props.config['localStateCacheTtlSeconds']" :min="10" :max="3600" :step="10">
+          <template #prefix>本地缓存</template>
+          <template #suffix><span>秒</span></template>
+        </el-input-number>
+        <el-input-number v-model="props.config['cloudStateCacheTtlSeconds']" :min="30" :max="3600" :step="30">
+          <template #prefix>网盘缓存</template>
+          <template #suffix><span>秒</span></template>
+        </el-input-number>
+      </div>
+      <div class="flex flex-wrap gap-8 margin-top-4">
+        <el-input-number v-model="props.config['openListApiBudgetPerRound']" :min="1" :max="200" :step="10"
+                         placeholder="留空 = 启用订阅数">
+          <template #prefix>单轮预算</template>
+          <template #suffix><span>次</span></template>
+        </el-input-number>
+        <el-input-number v-model="props.config['cloudListMaxFiles']" :min="100" :max="50000" :step="500">
+          <template #prefix>列举上限</template>
+          <template #suffix><span>个文件</span></template>
+        </el-input-number>
+      </div>
+      <div class="margin-top-4">
+        <el-text class="mx-1" size="small">
+          「本地存在」的判定结果会按订阅缓存：预览、媒体库、RSS 扫描、手动搜索共用同一份快照，
+          同一轮内同一订阅的网盘列举次数不超过 1 次。本地磁盘遍历便宜、缓存可以短一些；
+          网盘列举是真金白银的 API 调用，缓存应显著更长。缓存只在内存中，重启后从空开始重建。
+        </el-text>
+      </div>
+      <div class="margin-top-4">
+        <el-text class="mx-1" size="small">
+          单轮预算留空时等于「本轮启用订阅数 × 1」，硬上限 200 次；预算用完后停止真实文件校验，
+          剩余条目保持「存疑」并在任务管理器标注原因。列举文件数超过上限时会截断——
+          截断后仍能确认「存在」，但不能断言「不存在」，相关条目同样显示为「存疑」。
+        </el-text>
+      </div>
+    </div>
+  </SettingsItem>
   <SettingsItem label="磁盘空间监控">
     <div class="full-width">
       <div>

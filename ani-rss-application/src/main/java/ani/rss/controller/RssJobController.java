@@ -1,6 +1,7 @@
 package ani.rss.controller;
 
 import ani.rss.annotation.Auth;
+import ani.rss.commons.ExceptionUtils;
 import ani.rss.download.OpenList;
 import ani.rss.entity.Ani;
 import ani.rss.entity.Item;
@@ -9,6 +10,7 @@ import ani.rss.entity.web.Result;
 import ani.rss.service.DownloadService;
 import ani.rss.task.RssTask;
 import ani.rss.util.other.AniUtil;
+import ani.rss.util.other.ConfigUtil;
 import ani.rss.util.other.FailedDownloadQueue;
 import ani.rss.util.other.ItemsUtil;
 import ani.rss.util.other.TorrentUtil;
@@ -24,6 +26,7 @@ import org.springframework.web.bind.annotation.RestController;
 import java.io.File;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * RSS 任务管理器
@@ -86,12 +89,28 @@ public class RssJobController extends BaseController {
         int checked = 0;
         int downloaded = 0;
         int restored = 0;
+        boolean rename = Boolean.TRUE.equals(ConfigUtil.CONFIG.getRename());
         for (Ani ani : AniUtil.getAniList()) {
             try {
                 List<Item> items = ItemsUtil.getItems(ani);
+                // 每订阅只建一次集数索引并整批复用。
+                // 逐条调用 itemDownloaded(ani, item, false) 会因 localEpisodeIndex == null
+                // 为每条 item 重建索引：80 订阅 × 30 条 = 2400 次列举，
+                // 网盘模式下就是 2400 次 API 调用（全局限流 300ms/次 ≈ 12 分钟），按钮按下去就没反应。
+                // 构建失败时保持空集 —— 与非严格版"列举失败退化成空列表"的既有行为一致。
+                Set<String> localEpisodeIndex = Set.of();
+                if (rename) {
+                    try {
+                        localEpisodeIndex = downloadService.buildEpisodeIndexStrict(
+                                ani, downloadService.getDownloadPath(ani));
+                    } catch (Exception e) {
+                        log.debug("构建集数索引失败, 本轮按未下载处理 {}: {}",
+                                ani.getTitle(), ExceptionUtils.getMessage(e));
+                    }
+                }
                 for (Item item : items) {
                     checked++;
-                    if (!downloadService.itemDownloaded(ani, item, false)) {
+                    if (!downloadService.itemDownloaded(ani, item, false, localEpisodeIndex)) {
                         continue;
                     }
                     downloaded++;

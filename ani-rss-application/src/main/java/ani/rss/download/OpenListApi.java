@@ -7,6 +7,7 @@ import ani.rss.entity.OpenListFileInfo;
 import ani.rss.entity.OpenListTaskInfo;
 import ani.rss.util.basic.HttpReq;
 import ani.rss.util.basic.HttpRequestPlus;
+import ani.rss.util.other.ConfigUtil;
 import cn.hutool.core.collection.ListUtil;
 import cn.hutool.core.lang.Assert;
 import cn.hutool.core.thread.ThreadUtil;
@@ -51,19 +52,83 @@ public class OpenListApi {
         this.config = config;
     }
 
-    // API 最小间隔限流（替代每次固定 sleep 2s）
-    private static final long API_MIN_INTERVAL_MS = 300L;
+    // ---- 网盘 API 限流：令牌桶（替代原先的固定最小间隔）----
     private static final Object API_RATE_LOCK = new Object();
-    private static volatile long lastApiCallAt = 0L;
+    private static final double DEFAULT_API_PER_SECOND = 3.0;
+    private static final double DEFAULT_API_BURST = 1.0;
+    private static final double MAX_API_PER_SECOND = 20.0;
+    private static final double MAX_API_BURST = 5.0;
+    /**
+     * 单次限流最长等待。配置过小（如 1 次/秒）时等待会很长，
+     * 但绝不能变成"无上限挂起"——那会让整个轮次静默卡死。
+     */
+    private static final long MAX_THROTTLE_WAIT_MS = 5000L;
+    /** 上次补充令牌的时间（nanoTime：不受系统时钟回拨影响） */
+    private static long lastTokenAtNanos = 0L;
+    /** 当前可用令牌（浮点累积，避免小速率下取整归零） */
+    private static double availableTokens = 0.0;
+    /** 限流累计等待毫秒数（可观测：到底被限流拖了多少时间） */
+    private static final java.util.concurrent.atomic.AtomicLong throttleWaitMs =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+
+    // ---- 熔断：连续失败到阈值后进入冷却，冷却期内不再发起网盘请求 ----
+    private static final java.util.concurrent.atomic.AtomicInteger consecutiveListingFailures =
+            new java.util.concurrent.atomic.AtomicInteger(0);
+    private static final java.util.concurrent.atomic.AtomicInteger cooldownLevel =
+            new java.util.concurrent.atomic.AtomicInteger(0);
+    private static volatile long cooldownUntilMs = 0L;
+    private static final long MAX_COOLDOWN_MS = java.util.concurrent.TimeUnit.MINUTES.toMillis(10);
+    /** 熔断触发次数（可观测） */
+    private static final java.util.concurrent.atomic.AtomicLong cooldownTriggered =
+            new java.util.concurrent.atomic.AtomicLong(0L);
 
     // findFiles 短缓存，轮询期间减少递归 list
-    private static final long FIND_FILES_TTL_MS = 3000L;
+    private static final long FIND_FILES_TTL_MS = java.util.concurrent.TimeUnit.SECONDS.toMillis(30);
     private static final Map<String, CachedFileList> findFilesCache = new ConcurrentHashMap<>();
 
     // listFileNames 长缓存: "本地已下载"判断用, 文件列表变化不频繁
-    private static final long LIST_NAMES_TTL_MS = java.util.concurrent.TimeUnit.SECONDS.toMillis(60);
+    private static final long LIST_NAMES_TTL_MS = java.util.concurrent.TimeUnit.SECONDS.toMillis(300);
     private static final Map<String, List<String>> listNamesCache = new ConcurrentHashMap<>();
     private static final Map<String, Long> listNamesExpire = new ConcurrentHashMap<>();
+
+    // ---- 可观测计数（F7-7）----
+    // 目的：限流是否生效、缓存是否真的省下了请求、熔断何时被触发，必须能被看见。
+    // 否则"网盘慢"只能靠猜，调参也无从验证。
+    /** 累计 API 调用次数（不清零，看长期趋势） */
+    private static final java.util.concurrent.atomic.AtomicLong apiCallCount =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+    /** 本轮 API 调用次数（每轮 RSS 扫描开始时复位） */
+    private static final java.util.concurrent.atomic.AtomicLong apiCallCountRound =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+    /** 目录列举缓存命中次数 */
+    private static final java.util.concurrent.atomic.AtomicLong listingCacheHit =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+    /** 目录列举缓存未命中次数（= 真的发了请求） */
+    private static final java.util.concurrent.atomic.AtomicLong listingCacheMiss =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+
+    // ---- F7-2 请求合并（coalescing）----
+    // 缓存只能挡住"已经算过"的请求，挡不住"正在算"的请求：两个线程同时问同一个目录，
+    // 缓存都未命中，于是同一份列举被做两遍。请求合并让后来者等第一个人的结果。
+    /** 同一 path 正在构建中的列举结果 */
+    private static final Map<String, java.util.concurrent.CompletableFuture<List<String>>> listNamesInFlight =
+            new ConcurrentHashMap<>();
+    /** 等待上限：等待方绝不无限期挂起，超时按"查询失败"处理（→ 存疑） */
+    private static final long MAX_COALESCE_WAIT_MS = 60_000L;
+    /** 被合并掉（省下）的列举次数 */
+    private static final java.util.concurrent.atomic.AtomicLong listingCoalesced =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+
+    // ---- F7-5 每轮 API 预算 ----
+    // 预算 = 0 表示不限制（非轮次场景，如用户手动预览）。由 RssTask 在轮次开始时设置、结束时清除。
+    /** 本轮预算（0 = 不限制） */
+    private static final java.util.concurrent.atomic.AtomicInteger roundBudget =
+            new java.util.concurrent.atomic.AtomicInteger(0);
+    /** 因预算耗尽而放弃校验的次数（可观测） */
+    private static final java.util.concurrent.atomic.AtomicLong budgetExhausted =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+    /** 本轮预算上限的硬顶：无论订阅多少，单轮最多 200 次，防止"订阅 500 个就允许打 500 次" */
+    public static final int MAX_API_BUDGET_PER_ROUND = 200;
 
     private static final int IDEMPOTENT_API_MAX_ATTEMPTS = 3;
     private static final long[] IDEMPOTENT_API_RETRY_DELAYS_MS = {500L, 1500L};
@@ -81,33 +146,113 @@ public class OpenListApi {
     /**
      * 列出网盘目录下文件路径(递归, 60s 缓存), 供"本地已下载"判断使用。
      * 下载目录是网盘虚拟路径(本地文件系统不可见), 需通过 API 检查文件真实存在。
+     * <p>
+     * 查询失败时返回空列表(保持旧行为)。调用方若需要区分"目录确实为空"与"查询失败"
+     * (例如预览要显示"存疑"), 请改用 {@link #listFileNamesStrict(String)}。
      */
     public List<String> listFileNames(String dirPath) {
-        Long expire = listNamesExpire.get(dirPath);
-        if (expire != null && expire > System.currentTimeMillis()) {
-            List<String> cached = listNamesCache.get(dirPath);
-            if (cached != null) {
-                return cached;
-            }
-        }
-        List<String> names;
         try {
-            names = findFiles(dirPath).stream()
-                    .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
-                    .map(f -> {
-                        String dir = f.getPath();
-                        String name = f.getName();
-                        return StrUtil.isBlank(dir) ? name : dir + "/" + name;
-                    })
-                    .collect(Collectors.toList());
+            return listFileNamesStrict(dirPath);
         } catch (Exception e) {
             // API 故障: 不缓存, 下次重试; 记日志避免静默误判"目录无文件"
             log.warn("列出网盘目录失败 {}: {}", dirPath, ExceptionUtils.getMessage(e));
             return List.of();
         }
+    }
+
+    /**
+     * 严格版列举：查询失败时抛出而非返回空列表, 且失败结果不写缓存。
+     * 用于必须区分"目录确实为空"与"查询失败"的场景, 避免网盘抖动被误判成"文件都不存在"。
+     * <p>
+     * F7-2 请求合并：同一 path 的并发列举只发一次请求，其余调用等待同一份结果。
+     */
+    public List<String> listFileNamesStrict(String dirPath) {
+        Long expire = listNamesExpire.get(dirPath);
+        if (expire != null && expire > System.currentTimeMillis()) {
+            List<String> cached = listNamesCache.get(dirPath);
+            if (cached != null) {
+                listingCacheHit.incrementAndGet();
+                return cached;
+            }
+        }
+
+        // 缓存未命中：先看有没有人正在算同一个目录
+        java.util.concurrent.CompletableFuture<List<String>> mine = new java.util.concurrent.CompletableFuture<>();
+        java.util.concurrent.CompletableFuture<List<String>> existing = listNamesInFlight.putIfAbsent(dirPath, mine);
+        if (existing != null) {
+            listingCoalesced.incrementAndGet();
+            return awaitCoalesced(dirPath, existing);
+        }
+        try {
+            List<String> names = buildFileNames(dirPath);
+            mine.complete(names);
+            return names;
+        } catch (RuntimeException e) {
+            mine.completeExceptionally(e);
+            throw e;
+        } finally {
+            listNamesInFlight.remove(dirPath, mine);
+        }
+    }
+
+    /**
+     * 等待同一 path 的列举结果。
+     * <p>
+     * 超时/被中断一律抛异常而不是返回空列表——空列表会被下游当成"目录里没有文件"，
+     * 从而把"查不到"说成"不存在"，正是本需求要消灭的误判。
+     */
+    private static List<String> awaitCoalesced(String dirPath,
+                                               java.util.concurrent.CompletableFuture<List<String>> future) {
+        try {
+            return future.get(MAX_COALESCE_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (java.util.concurrent.ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof RuntimeException re) {
+                throw re;
+            }
+            throw new IllegalStateException("等待同一目录列举结果失败 path=" + dirPath, cause);
+        } catch (java.util.concurrent.TimeoutException e) {
+            throw new IllegalStateException("等待同一目录列举结果超时（" + MAX_COALESCE_WAIT_MS
+                    + "ms） path=" + dirPath, e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("等待同一目录列举结果被中断 path=" + dirPath, e);
+        }
+    }
+
+    /**
+     * 真正执行列举（含 300s 长缓存写入）。只在缓存未命中且无同 path 在途请求时进入。
+     */
+    private List<String> buildFileNames(String dirPath) {
+        List<OpenListFileInfo> files;
+        try {
+            files = findFilesStrict(dirPath);
+        } catch (OpenListDirNotFoundException e) {
+            // 目录不存在 = 确认没有文件。这是正常结果而非查询失败，
+            // 否则新订阅（下载目录还没被创建）一进预览就会被标成"存疑"。
+            // 不写缓存：目录随时可能因首个下载落地而被创建。
+            log.debug("网盘目录不存在，视为空目录 {}", dirPath);
+            return List.of();
+        }
+        List<String> names = files.stream()
+                .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
+                .map(f -> {
+                    String dir = f.getPath();
+                    String name = f.getName();
+                    return StrUtil.isBlank(dir) ? name : dir + "/" + name;
+                })
+                .collect(Collectors.toList());
         listNamesCache.put(dirPath, names);
         listNamesExpire.put(dirPath, System.currentTimeMillis() + LIST_NAMES_TTL_MS);
         return names;
+    }
+
+    /**
+     * 列出网盘目录下文件信息(递归, 3s 缓存), 供媒体库等需要大小/修改时间的场景使用。
+     * 查询失败时抛出, 调用方可据此保守处理(不把"查不到"当成"没有")。
+     */
+    public List<OpenListFileInfo> listFilesStrict(String dirPath) {
+        return findFilesStrict(dirPath);
     }
 
     /**
@@ -303,7 +448,29 @@ public class OpenListApi {
      */
     public List<OpenListFileInfo> fsList(String path, Boolean refresh) {
         try {
-            return retryIdempotent("fs/list " + path, () -> postApi("fs/list")
+            return fsListStrict(path, refresh);
+        } catch (Exception e) {
+            log.warn("OpenList fs/list 调用失败 path={}: {}", path, ExceptionUtils.getMessage(e));
+            return List.of();
+        }
+    }
+
+    /**
+     * 严格版文件列表：HTTP 或业务错误码失败时抛出，而非静默返回空列表。
+     * <p>
+     * 供必须区分"目录确实为空"与"查询失败"的场景使用（预览的「本地存在」列、媒体库），
+     * 否则网盘抖动会被当成"文件都不存在"，误导用户重新下载。
+     */
+    public List<OpenListFileInfo> fsListStrict(String path, Boolean refresh) {
+        // 熔断冷却期内直接拒绝，不再发请求：网盘已明确在限流/故障，
+        // 继续打只会加重限流并拖长整轮时间。调用方据此把条目标为"存疑"。
+        long cooldownRemaining = listingCooldownRemainingMs();
+        if (cooldownRemaining > 0L) {
+            throw new IllegalStateException("网盘接口冷却中（剩余 " + ((cooldownRemaining + 999L) / 1000L)
+                    + "s），本次不发起请求 path=" + path);
+        }
+        try {
+            List<OpenListFileInfo> result = retryIdempotent("fs/list " + path, () -> postApi("fs/list")
                     .body(GsonStatic.toJson(Map.of(
                             "path", path,
                             "page", 1,
@@ -315,7 +482,14 @@ public class OpenListApi {
                         JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
                         int code = jsonObject.get("code").getAsInt();
                         if (code != 200) {
-                            return List.of();
+                            String message = jsonObject.has("message") ? jsonObject.get("message").getAsString() : "";
+                            // 目录不存在是"确认没有"，不是故障：既不该重试，也不该计入熔断
+                            if (isDirNotFoundMessage(message)) {
+                                throw new OpenListDirNotFoundException(
+                                        "fs/list 目录不存在 path=" + path + " message=" + message);
+                            }
+                            throw new IllegalStateException(
+                                    "fs/list 失败 code=" + code + " path=" + path + " message=" + message);
                         }
                         JsonElement data = jsonObject.get("data");
                         if (Objects.isNull(data) || data.isJsonNull()) {
@@ -334,9 +508,11 @@ public class OpenListApi {
                             return Long.MAX_VALUE - ObjectUtil.defaultIfNull(size, 0L);
                         }));
                     }));
-        } catch (Exception e) {
-            log.warn("OpenList fs/list 调用失败 path={}: {}", path, ExceptionUtils.getMessage(e));
-            return List.of();
+            onListingSuccess();
+            return result;
+        } catch (RuntimeException e) {
+            onListingFailure(e);
+            throw e;
         }
     }
 
@@ -347,16 +523,37 @@ public class OpenListApi {
      * @return 文件列表
      */
     public synchronized List<OpenListFileInfo> findFiles(String path) {
+        try {
+            return findFilesStrict(path);
+        } catch (Exception e) {
+            log.warn("递归列出网盘目录失败 {}: {}", path, ExceptionUtils.getMessage(e));
+            return List.of();
+        }
+    }
+
+    /**
+     * 严格版递归列举：查询失败时抛出，供必须区分"目录确实为空"与"查询失败"的调用方使用。
+     */
+    public synchronized List<OpenListFileInfo> findFilesStrict(String path) {
         CachedFileList cached = findFilesCache.get(path);
         if (cached != null && cached.expireAt > System.currentTimeMillis()) {
+            listingCacheHit.incrementAndGet();
             return cached.files;
         }
+        listingCacheMiss.incrementAndGet();
 
-        List<OpenListFileInfo> openListFileInfos = fsList(path, true);
+        List<OpenListFileInfo> openListFileInfos = fsListStrict(path, true);
         List<OpenListFileInfo> list = openListFileInfos.stream()
                 .flatMap(openListFileInfo -> {
-                    if (openListFileInfo.getIsDir()) {
-                        return findFiles(path + "/" + openListFileInfo.getName()).stream();
+                    if (Boolean.TRUE.equals(openListFileInfo.getIsDir())) {
+                        // 子目录可能在列举与递归之间被删/改名：那只是"这个子目录没有文件"，
+                        // 不该让整个目录的列举失败（否则一次并发删除就会把整订阅判成"存疑"）
+                        try {
+                            return findFilesStrict(path + "/" + openListFileInfo.getName()).stream();
+                        } catch (OpenListDirNotFoundException e) {
+                            log.debug("子目录已不存在，跳过 {}/{}", path, openListFileInfo.getName());
+                            return Stream.empty();
+                        }
                     }
                     return Stream.of(openListFileInfo);
                 }).toList();
@@ -666,16 +863,261 @@ public class OpenListApi {
     }
 
     /**
-     * API 最小间隔限流，避免固定 sleep 2s 拖慢轮询
+     * 目录不存在（业务错误码，不是故障）。
+     * <p>
+     * 与"查询失败"必须区分开：
+     * <ul>
+     *   <li>语义上：目录不存在 = <b>确认没有</b>；查询失败 = <b>不知道</b>；</li>
+     *   <li>熔断上：一个不存在的目录绝不能把整个网盘接口判为故障，
+     *       否则新订阅（下载目录还没被创建）一进预览就会触发熔断。</li>
+     * </ul>
      */
-    private static void throttleApi() {
+    public static class OpenListDirNotFoundException extends IllegalStateException {
+        public OpenListDirNotFoundException(String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * 业务错误文案是否表示"目录不存在"。不同网盘/版本的文案不一致，故做包含匹配。
+     */
+    static boolean isDirNotFoundMessage(String message) {
+        if (StrUtil.isBlank(message)) {
+            return false;
+        }
+        String lower = message.toLowerCase(Locale.ROOT);
+        return lower.contains("not found")
+                || lower.contains("failed to get dir")
+                || lower.contains("object not exist")
+                || lower.contains("no such file")
+                || lower.contains("dir not exist");
+    }
+
+    /**
+     * 网盘列举是否处于熔断冷却期。剩余毫秒数，0 表示可用。
+     */
+    public static long listingCooldownRemainingMs() {
+        long until = cooldownUntilMs;
+        long now = System.currentTimeMillis();
+        return until > now ? until - now : 0L;
+    }
+
+    public static boolean isListingCoolingDown() {
+        return listingCooldownRemainingMs() > 0L;
+    }
+
+    /**
+     * 限流累计等待毫秒数（诊断用）
+     */
+    public static long getThrottleWaitMs() {
+        return throttleWaitMs.get();
+    }
+
+    /**
+     * 熔断触发次数（诊断用）
+     */
+    public static long getCooldownTriggeredCount() {
+        return cooldownTriggered.get();
+    }
+
+    /**
+     * 累计 API 调用次数（诊断用）
+     */
+    public static long getApiCallCount() {
+        return apiCallCount.get();
+    }
+
+    /**
+     * 本轮 API 调用次数（诊断用）
+     */
+    public static long getApiCallCountRound() {
+        return apiCallCountRound.get();
+    }
+
+    /**
+     * 目录列举缓存命中次数（诊断用）
+     */
+    public static long getListingCacheHit() {
+        return listingCacheHit.get();
+    }
+
+    /**
+     * 目录列举缓存未命中次数（诊断用，= 真正发出去的列举请求数）
+     */
+    public static long getListingCacheMiss() {
+        return listingCacheMiss.get();
+    }
+
+    /**
+     * 目录列举缓存命中率，[0,1]；样本为 0 时返回 0。
+     */
+    public static double getListingCacheHitRate() {
+        long hit = listingCacheHit.get();
+        long total = hit + listingCacheMiss.get();
+        return total == 0L ? 0.0 : (double) hit / (double) total;
+    }
+
+    /**
+     * 复位本轮调用计数（每轮 RSS 扫描开始时调用）。累计值与缓存命中率不清零。
+     */
+    public static void resetRoundApiStats() {
+        apiCallCountRound.set(0L);
+    }
+
+    // ---- F7-5 每轮 API 预算 ----
+
+    /**
+     * 开启本轮预算限制（由 {@code RssTask} 在轮次开始时调用）。
+     * <p>
+     * 预算 = 0 表示不限制；负值按 0 处理。
+     */
+    public static void startRoundBudget(int budget) {
+        roundBudget.set(Math.max(0, Math.min(budget, MAX_API_BUDGET_PER_ROUND)));
+    }
+
+    /**
+     * 关闭预算限制（轮次结束时调用）。不关闭的话，轮次结束后用户手动预览会被上一轮的预算卡住。
+     */
+    public static void clearRoundBudget() {
+        roundBudget.set(0);
+    }
+
+    public static int getRoundBudget() {
+        return roundBudget.get();
+    }
+
+    /**
+     * 本轮预算是否已耗尽。
+     * <p>
+     * 语义是"<b>还能不能再为确认本地文件而列举</b>"：耗尽后应停止 Phase B，
+     * 剩余条目保持「存疑」。注意这里只看调用次数，不看成功与否——
+     * 失败的调用同样消耗了配额，继续打只会更快触发限流。
+     */
+    public static boolean isRoundBudgetExhausted() {
+        int budget = roundBudget.get();
+        return budget > 0 && apiCallCountRound.get() >= budget;
+    }
+
+    /**
+     * 记录一次"因预算耗尽而放弃校验"，供诊断页展示
+     */
+    public static void markBudgetExhausted() {
+        budgetExhausted.incrementAndGet();
+    }
+
+    public static long getBudgetExhaustedCount() {
+        return budgetExhausted.get();
+    }
+
+    /**
+     * 被请求合并省下的列举次数（可观测 F7-2 的实际收益）
+     */
+    public static long getListingCoalesced() {
+        return listingCoalesced.get();
+    }
+
+    /**
+     * 列举成功 → 复位熔断计数与退避级别。
+     */
+    static void onListingSuccess() {        if (consecutiveListingFailures.get() != 0 || cooldownLevel.get() != 0) {
+            consecutiveListingFailures.set(0);
+            cooldownLevel.set(0);
+            cooldownUntilMs = 0L;
+        }
+    }
+
+    /**
+     * 列举失败 → 累计；达到阈值进入冷却（指数退避，上限 10 分钟）。
+     * <p>
+     * 冷却期内所有列举直接抛错、<b>不发请求</b>：网盘已明确在限流或故障，
+     * 继续打只会加重限流并拖长整轮时间。调用方据此把条目标为"存疑"而不是"不存在"。
+     */
+    static void onListingFailure(Exception e) {
+        if (e instanceof OpenListDirNotFoundException) {
+            // 目录不存在不是故障，不参与熔断
+            return;
+        }
+        int threshold = intConfig(ConfigUtil.CONFIG == null ? null : ConfigUtil.CONFIG.getOpenListFailThreshold(),
+                3, 1, 10);
+        int failures = consecutiveListingFailures.incrementAndGet();
+        if (failures < threshold) {
+            return;
+        }
+        int level = Math.min(cooldownLevel.incrementAndGet(), 6);
+        long baseMs = intConfig(ConfigUtil.CONFIG == null ? null : ConfigUtil.CONFIG.getOpenListCooldownSeconds(),
+                60, 10, 600) * 1000L;
+        long cooldownMs = Math.min(baseMs * (1L << (level - 1)), MAX_COOLDOWN_MS);
+        cooldownUntilMs = System.currentTimeMillis() + cooldownMs;
+        consecutiveListingFailures.set(0);
+        cooldownTriggered.incrementAndGet();
+        log.warn("网盘列举连续失败 {} 次，进入冷却 {}s（第 {} 级）。冷却期内不再发起网盘请求，"
+                        + "本地状态一律标记为「存疑」。原因: {}",
+                threshold, cooldownMs / 1000L, level, ExceptionUtils.getMessage(e));
+    }
+
+    /**
+     * 仅供测试/诊断：复位熔断、令牌桶与全部可观测计数
+     */
+    public static void resetRateLimitState() {
         synchronized (API_RATE_LOCK) {
-            long now = System.currentTimeMillis();
-            long wait = API_MIN_INTERVAL_MS - (now - lastApiCallAt);
-            if (wait > 0) {
-                ThreadUtil.sleep(wait);
+            lastTokenAtNanos = 0L;
+            availableTokens = 0.0;
+        }
+        consecutiveListingFailures.set(0);
+        cooldownLevel.set(0);
+        cooldownUntilMs = 0L;
+        throttleWaitMs.set(0L);
+        cooldownTriggered.set(0L);
+        apiCallCount.set(0L);
+        apiCallCountRound.set(0L);
+        listingCacheHit.set(0L);
+        listingCacheMiss.set(0L);
+        listingCoalesced.set(0L);
+        budgetExhausted.set(0L);
+        roundBudget.set(0);
+    }
+
+    private static int intConfig(Integer value, int fallback, int min, int max) {
+        int v = value == null ? fallback : value;
+        return Math.max(min, Math.min(v, max));
+    }
+
+    /**
+     * 令牌桶限流（仍<b>全局串行</b>）。
+     * <p>
+     * 网盘按账号限流，并发发请求只会更容易被拒；串行 + 令牌桶既能削峰又不会像固定
+     * 300ms 那样在订阅多时把整轮拖成线性等待（速率可配、可突发）。
+     */
+    static void throttleApi() {
+        apiCallCount.incrementAndGet();
+        apiCallCountRound.incrementAndGet();
+        synchronized (API_RATE_LOCK) {
+            double perSecond = intConfig(ConfigUtil.CONFIG == null ? null : ConfigUtil.CONFIG.getOpenListApiPerSecond(),
+                    (int) DEFAULT_API_PER_SECOND, 1, (int) MAX_API_PER_SECOND);
+            double burst = intConfig(ConfigUtil.CONFIG == null ? null : ConfigUtil.CONFIG.getOpenListApiBurst(),
+                    (int) DEFAULT_API_BURST, 1, (int) MAX_API_BURST);
+
+            long now = System.nanoTime();
+            if (lastTokenAtNanos == 0L) {
+                availableTokens = burst;
+            } else {
+                double elapsedSec = (now - lastTokenAtNanos) / 1_000_000_000.0;
+                availableTokens = Math.min(burst, availableTokens + elapsedSec * perSecond);
             }
-            lastApiCallAt = System.currentTimeMillis();
+            lastTokenAtNanos = now;
+
+            if (availableTokens < 1.0) {
+                long waitMs = (long) Math.ceil((1.0 - availableTokens) / perSecond * 1000.0);
+                waitMs = Math.max(1L, Math.min(waitMs, MAX_THROTTLE_WAIT_MS));
+                ThreadUtil.sleep(waitMs);
+                throttleWaitMs.addAndGet(waitMs);
+
+                long after = System.nanoTime();
+                double sleptSec = (after - lastTokenAtNanos) / 1_000_000_000.0;
+                availableTokens = Math.min(burst, availableTokens + sleptSec * perSecond);
+                lastTokenAtNanos = after;
+            }
+            availableTokens -= 1.0;
         }
     }
 

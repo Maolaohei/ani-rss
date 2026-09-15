@@ -28,7 +28,7 @@
             <div class="toolbar">
               <el-input v-model="keyword" clearable placeholder="搜索标题 / 字幕组 / 路径"
                         class="library-search" @keyup.enter="load"/>
-              <el-checkbox v-model="onlyExisting" label="只看本地已有" @change="load"/>
+              <el-checkbox v-model="onlyExisting" label="只看已有（本地/网盘）" @change="load"/>
               <el-button :loading="loading" type="primary" icon="Search" @click="load">搜索</el-button>
             </div>
 
@@ -48,6 +48,7 @@
                 <template #default="{row}">
                   <div class="lib-title">{{ row.title }}</div>
                   <div class="lib-meta">
+                    <el-tag v-if="row.cloud" size="small" type="warning" effect="plain">网盘</el-tag>
                     <span v-if="row.season">第 {{ row.season }} 季</span>
                     <span v-if="row.subgroup">{{ row.subgroup }}</span>
                   </div>
@@ -55,7 +56,13 @@
               </el-table-column>
               <el-table-column label="集数" width="90">
                 <template #default="{row}">
-                  <el-tag :type="row.videoCount > 0 ? 'success' : 'info'" size="small">
+                  <!-- 未确认：网盘列举失败或超出扫描预算，"不知道"而不是"确实没有" -->
+                  <el-tooltip v-if="row.unknown"
+                              content="本轮未能确认（网盘列举失败或超出扫描时间预算），点「重新扫描」可再试"
+                              placement="top">
+                    <el-tag type="warning" effect="plain" size="small">未确认</el-tag>
+                  </el-tooltip>
+                  <el-tag v-else :type="row.videoCount > 0 ? 'success' : 'info'" size="small">
                     {{ row.videoCount }}
                   </el-tag>
                 </template>
@@ -166,7 +173,7 @@ const rescan = async () => {
 }
 
 const openDetail = async row => {
-  detailTitle.value = `${row.title} · 本地剧集`
+  detailTitle.value = `${row.title} · ${row.cloud ? '网盘剧集' : '本地剧集'}`
   detailItems.value = []
   detailVisible.value = true
   try {

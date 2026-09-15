@@ -176,11 +176,33 @@ public class AniUtil {
     }
 
     /**
-     * 将订阅配置保存到磁盘
+     * 将订阅配置保存到磁盘（<b>结构性变更</b>：订阅增删、标题/季/下载路径模板等）。
+     * <p>
+     * 会连带失效下载路径反向索引与订阅级本地状态快照——这些缓存都以"订阅 → 下载路径"为键，
+     * 路径一变旧数据就全是错的。
+     * <p>
+     * 只回写运行时状态（漏集数 / 当前集数 / 最近下载时间 / enable）请用
+     * {@link #syncStateOnly()}：那些字段不影响下载路径，走本方法会把全局缓存清空，
+     * 而预览、每下完一集都会触发回写，等于把缓存废掉。
      */
     public static synchronized void sync() {
-        // 订阅已变更：下载路径反向索引失效
+        // 订阅已变更：下载路径反向索引 + 本地状态快照失效
         DownloadService.invalidateDownloadPathIndex();
+        doSync();
+    }
+
+    /**
+     * 仅落盘，<b>不做任何缓存失效</b>。
+     * <p>
+     * 适用场景：回写 {@code omitCount} / {@code currentEpisodeNumber} / {@code lastDownloadTime}
+     * / {@code enable} 这类运行时状态。它们不影响下载路径，也不影响"目录里有哪些文件"，
+     * 因此失效缓存既无必要、代价又极大（预览是最常用入口，每次都清空等于没有缓存）。
+     */
+    public static synchronized void syncStateOnly() {
+        doSync();
+    }
+
+    private static void doSync() {
         File configFile = getAniFile();
         log.debug("保存订阅 {}", configFile);
         try {

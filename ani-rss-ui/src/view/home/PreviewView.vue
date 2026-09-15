@@ -16,10 +16,10 @@
         </el-button>
         <el-button bg text :disabled="!selectViews.length" @click="notDownload" icon="Close">禁止下载</el-button>
         <PopconfirmView @confirm="delTorrent"
-                        :title="`删除${selectViews.filter(it => it['hasDownloaded']).length}个种子缓存?`">
+                        :title="`删除${selectViews.filter(it => it['hasTorrentRecord']).length}个种子缓存?`">
           <template #reference>
             <el-button icon="Remove" bg text type="danger"
-                       :disabled="!selectViews.filter(it => it['hasDownloaded']).length">
+                       :disabled="!selectViews.filter(it => it['hasTorrentRecord']).length">
               删除种子
             </el-button>
           </template>
@@ -56,10 +56,15 @@
           </el-table-column>
           <el-table-column label="本地存在" min-width="140">
             <template #default="it">
-              <!-- 三态：已下载 / 下载中（离线已提交）/ 未下载；避免与任务管理器状态矛盾 -->
+              <!-- 四态：已下载 / 下载中（离线已提交）/ 存疑（无法校验）/ 未下载 -->
               <el-tooltip v-if="it.row['downloading']"
                           :content="it.row['downloadingState'] || '下载中'" placement="top">
                 <el-tag type="warning">下载中</el-tag>
+              </el-tooltip>
+              <el-tooltip v-else-if="it.row['hasDownloadedUnknown']"
+                          content="目标路径暂未确认（网盘列举失败，或已提交下载但尚未改名落地），已回退为种子记录判定"
+                          placement="top">
+                <el-tag type="warning" effect="plain">存疑</el-tag>
               </el-tooltip>
               <el-tag v-else-if="!it.row['hasDownloaded']" type="info">否</el-tag>
               <el-tag v-else>是</el-tag>
@@ -136,13 +141,26 @@
     </div>
     <div class="flex items-footer">
       <span>共 {{ showItems.length }} 项</span>
+      <!-- 三态计数：整列都是「存疑」时用户需要知道规模与原因，而不是逐行悬停看 tooltip -->
+      <el-text v-if="localStateSummary" size="small" type="info">
+        本地：是 {{ localStateSummary.exists }} · 存疑 {{ localStateSummary.unknown }} · 否
+        {{ localStateSummary.absent }}
+      </el-text>
+      <!-- 记录与文件不一致：只提示不自动清理，记录是「曾经下过」的唯一线索（F5-2） -->
+      <el-tooltip v-if="localStateSummary && localStateSummary.inconsistent > 0"
+                  content="这些集有种子记录，但目标路径下已确认没有对应文件——通常是下载后手动删过或迁移过。不会自动清理，可按需自行删除种子记录。"
+                  placement="top">
+        <el-text size="small" type="warning">
+          记录与文件不一致 {{ localStateSummary.inconsistent }} 项
+        </el-text>
+      </el-tooltip>
       <el-button bg text @click="dialogVisible = false" icon="Close">关闭</el-button>
     </div>
   </el-dialog>
 </template>
 
 <script setup>
-import {ref} from "vue";
+import {computed, ref} from "vue";
 import {ElMessage} from "element-plus";
 import PopconfirmView from "@/view/custom/PopconfirmView.vue";
 import * as http from "@/js/http.js";
@@ -154,11 +172,12 @@ let handleSelectionChange = (selectViewsValue) => {
 
 const select = ref('全部')
 // 合集父行自身字段可能与子集不一致，筛选按 children 聚合判定
+// 「存疑」归入已下载：无法校验时保持旧视图，不把原本存在的条目突然挪进"未下载"
 const isDownloaded = it => {
   if (it.children?.length) {
-    return it.children.every(child => child.hasDownloaded)
+    return it.children.every(child => child.hasDownloaded || child.hasDownloadedUnknown)
   }
-  return !!it.hasDownloaded
+  return !!(it.hasDownloaded || it.hasDownloadedUnknown)
 }
 const selectItems = ref([
   {
@@ -240,6 +259,9 @@ let selectChange = () => {
 
 let showItems = ref([])
 
+// 三态计数（后端 localStateSummary）：是 / 存疑 / 否
+const localStateSummary = computed(() => data.value.localStateSummary)
+
 let load = () => {
   // port upstream 3.2.30: 竞态守卫，旧请求返回不再覆盖新数据/重置 loading
   const currentVersion = ++loadVersion
@@ -260,7 +282,7 @@ let load = () => {
 }
 
 let delTorrent = () => {
-  let infoHash = selectViews.value.filter(it => it['hasDownloaded']).map(it => it['infoHash']).join(",")
+  let infoHash = selectViews.value.filter(it => it['hasTorrentRecord']).map(it => it['infoHash']).join(",")
   http.deleteTorrent(props.ani.id, infoHash)
       .then(res => {
         ElMessage.success(res.message)

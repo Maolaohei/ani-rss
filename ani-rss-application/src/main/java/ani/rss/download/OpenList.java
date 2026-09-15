@@ -120,6 +120,22 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         return api.listFileNames(dirPath);
     }
 
+    /**
+     * 严格版列举：查询失败时抛出，供预览区分"目录确实为空"与"查询失败"
+     */
+    @Override
+    public List<String> listFileNamesStrict(String dirPath) {
+        return api.listFileNamesStrict(dirPath);
+    }
+
+    /**
+     * 严格版文件列举（含大小/修改时间），供媒体库展示网盘内容
+     */
+    @Override
+    public List<OpenListFileInfo> listFilesStrict(String dirPath) {
+        return api.listFilesStrict(dirPath);
+    }
+
     private static final long TIMEOUT_FILE_STABILITY_WAIT_MS = 2000L;
 
     /**

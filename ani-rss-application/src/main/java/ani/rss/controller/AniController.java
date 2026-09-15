@@ -14,6 +14,7 @@ import ani.rss.entity.dto.RssToAniDTO;
 import ani.rss.entity.web.Result;
 import ani.rss.enums.EventTypeEnum;
 import ani.rss.enums.SortTypeEnum;
+import ani.rss.service.AniLocks;
 import ani.rss.service.AniService;
 import ani.rss.service.ClearService;
 import ani.rss.service.DownloadService;
@@ -566,38 +567,34 @@ public class AniController extends BaseController {
     @Operation(summary = "预览订阅")
     @PostMapping("/previewAni")
     public Result<Map<String, Object>> previewAni(@RequestBody Ani ani) {
+        // F6-1：预览是读路径，走"尽力取读锁"。下载正持有写锁（分钟级）时不等它，
+        // 直接读 LocalStateCache 的快照——点开预览被下载阻塞，比读到稍旧的数据糟糕得多。
+        return AniLocks.callWithTryRead(ani, () -> previewAniLocked(ani));
+    }
+
+    /**
+     * 预览订阅（调用方已持有该订阅读锁，或已明确接受"不持锁读快照"）
+     */
+    private Result<Map<String, Object>> previewAniLocked(Ani ani) {
         List<Item> items = ItemsUtil.getItems(ani);
 
         String downloadPath = downloadService.getDownloadPath(ani);
 
-        for (Item item : items) {
-            item.setHasDownloaded(false);
-            item.setDownloading(false);
-            File torrent = TorrentUtil.getTorrent(ani, item);
-            if (torrent.exists()) {
-                item.setHasDownloaded(true);
-                continue;
-            }
-            if (downloadService.itemDownloaded(ani, item, false)) {
-                item.setHasDownloaded(true);
-                continue;
-            }
-            // 已提交离线任务但尚未落地：标记为"下载中"，
-            // 否则同一时刻任务管理器显示"离线处理中 45%"、预览却显示"本地存在：否"，
-            // 用户会误判为没在下而重复点强制下载。
-            try {
-                File pending = TorrentUtil.getPendingTorrent(ani, item);
-                if (pending != null && pending.exists()) {
-                    item.setDownloading(true);
-                    item.setDownloadingState("已提交离线任务，等待完成");
-                }
-            } catch (Exception e) {
-                log.debug("检查 pending 记录失败: {}", e.getMessage());
-            }
-        }
+        // 「本地存在」的判定统一收敛到 DownloadService.applyLocalStates：
+        // 目标路径下确实有这一集的视频文件（本地磁盘 / OpenList 网盘）才算"是"，
+        // 而不是"本地有 .torrent 记录"——记录只代表曾经推过种子，网盘文件被删/移动/改名
+        // 或种子从未落地时记录仍在，旧实现会把"不存在"谎报成"存在"。
+        //
+        // 判定分三种情形（详见 LocalState）：
+        //   开启重命名 + 列举成功 → 按真实文件判定（是 / 否）
+        //   开启重命名 + 列举失败 → 回退记录判定，标"存疑"（查询失败 ≠ 目录为空）
+        //   未开启重命名         → 文件名不含 SxxExx 无从匹配，沿用旧逻辑（有记录即"是"）
+        List<DownloadService.LocalState> states = downloadService.applyLocalStates(ani, items);
 
         List<Integer> omitList = ItemsUtil.omitList(ani, items);
-        // 预览已拉 RSS：回写漏集缓存，供列表健康分使用
+        // 预览已拉 RSS：回写漏集缓存，供列表健康分使用。
+        // 只落盘、不失效缓存：这里每预览一次就会走到，走 syncAniList() 会把下载路径索引、
+        // 本地状态快照、媒体库缓存全部清空——预览恰恰是最需要缓存命中的入口。
         try {
             Optional<Ani> live = AniUtil.getAniList().stream()
                     .filter(a -> Objects.equals(a.getId(), ani.getId()))
@@ -605,7 +602,7 @@ public class AniController extends BaseController {
             Ani target = live.orElse(ani);
             SubscriptionHealth.rememberOmit(target, omitList == null ? 0 : omitList.size(), System.currentTimeMillis());
             if (live.isPresent()) {
-                syncAniList();
+                AniUtil.syncStateOnly();
             }
         } catch (Exception e) {
             log.debug("回写漏集缓存失败: {}", e.getMessage());
@@ -614,15 +611,17 @@ public class AniController extends BaseController {
         // 预览专用：合集折叠聚合
         items = ItemsUtil.groupCollectionForPreview(items);
 
-        // 洗版预览：取首个未下载主 RSS 条目估算将删除内容
+        // 洗版预览：取首个"确认未下载"的主 RSS 条目估算将删除内容。
+        // 存疑（无法校验）与下载中的条目都必须排除——它们的文件很可能已经在盘上，
+        // 拿它们去估算"将删除内容"会误导用户。
         List<Map<String, String>> washPreview = new ArrayList<>();
         try {
             Optional<Item> washItem = items.stream()
-                    .filter(it -> it != null && !Boolean.TRUE.equals(it.getHasDownloaded()))
+                    .filter(AniController::definitelyAbsent)
                     .filter(it -> Boolean.TRUE.equals(it.getMaster()) || it.getMaster() == null)
                     .findFirst();
             if (washItem.isEmpty()) {
-                washItem = items.stream().filter(it -> it != null && !Boolean.TRUE.equals(it.getHasDownloaded())).findFirst();
+                washItem = items.stream().filter(AniController::definitelyAbsent).findFirst();
             }
             if (washItem.isPresent()) {
                 for (WashPreview.Candidate c : downloadService.previewStandbyDeletes(ani, washItem.get())) {
@@ -644,11 +643,56 @@ public class AniController extends BaseController {
         map.put("downloadPath", downloadPath);
         map.put("items", items);
         map.put("omitList", omitList);
+        map.put("localStateSummary", summarizeLocalStates(items, states));
         map.put("washPreview", washPreview);
         map.put("healthScore", health.score());
         map.put("healthLevel", health.level());
         map.put("healthReasons", health.reasons());
         return Result.success(map);
+    }
+
+    /**
+     * 是否"确认不存在"：既没有真实文件，也没有存疑，且不在下载中。
+     * <p>
+     * 预览的「洗版估算」只应拿确认缺失的条目去算，存疑/下载中的条目文件很可能已在盘上。
+     */
+    private static boolean definitelyAbsent(Item item) {
+        if (item == null) {
+            return false;
+        }
+        return !Boolean.TRUE.equals(item.getHasDownloaded())
+                && !Boolean.TRUE.equals(item.getHasDownloadedUnknown())
+                && !Boolean.TRUE.equals(item.getDownloading());
+    }
+
+    /**
+     * 「本地存在」三态计数，供前端诊断与验收断言（EXISTS + UNKNOWN + ABSENT = 条目总数）。
+     * <p>
+     * 额外给出 {@code inconsistent}：有种子记录但目标路径已确认没有文件。
+     * 这类条目<b>只提示不自动清理</b>（F5-2）——记录是"曾经下过"的唯一线索。
+     */
+    private static Map<String, Integer> summarizeLocalStates(List<? extends Item> items,
+                                                             List<DownloadService.LocalState> states) {
+        int exists = 0;
+        int unknown = 0;
+        int absent = 0;
+        if (states != null) {
+            for (DownloadService.LocalState state : states) {
+                if (state == DownloadService.LocalState.EXISTS) {
+                    exists++;
+                } else if (state == DownloadService.LocalState.UNKNOWN) {
+                    unknown++;
+                } else {
+                    absent++;
+                }
+            }
+        }
+        Map<String, Integer> summary = new LinkedHashMap<>();
+        summary.put("exists", exists);
+        summary.put("unknown", unknown);
+        summary.put("absent", absent);
+        summary.put("inconsistent", DownloadService.countStaleTorrentRecords(items));
+        return summary;
     }
 
     @Auth

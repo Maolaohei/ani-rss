@@ -857,6 +857,8 @@ public class ItemsUtil {
                 .setLength(item.getLength())
                 .setSeeders(item.getSeeders())
                 .setHasDownloaded(item.getHasDownloaded())
+                .setHasDownloadedUnknown(item.getHasDownloadedUnknown())
+                .setHasTorrentRecord(item.getHasTorrentRecord())
                 .setMaster(item.getMaster())
                 .setSubgroup(item.getSubgroup())
                 .setPubDate(item.getPubDate())
@@ -1057,6 +1059,13 @@ public class ItemsUtil {
                 parent.setLength(item.getLength());
                 parent.setSeeders(item.getSeeders());
                 parent.setHasDownloaded(item.getHasDownloaded());
+                // 父行是合成节点：取首个子集的值，与 hasDownloaded 的既有处理保持一致。
+                // 不带上这两个字段的话，「删除种子」会拿不到 hasTorrentRecord，
+                // 合集行的种子缓存就永远删不掉。
+                parent.setHasDownloadedUnknown(item.getHasDownloadedUnknown());
+                parent.setHasTorrentRecord(item.getHasTorrentRecord());
+                parent.setDownloading(item.getDownloading());
+                parent.setDownloadingState(item.getDownloadingState());
                 parent.setMaster(item.getMaster());
                 parent.setSubgroup(item.getSubgroup());
                 parent.setPubDate(item.getPubDate());

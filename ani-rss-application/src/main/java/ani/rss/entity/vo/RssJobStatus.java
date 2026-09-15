@@ -6,6 +6,7 @@ import lombok.experimental.Accessors;
 
 import java.io.Serializable;
 import java.util.List;
+import java.util.Map;
 
 /**
  * RSS 全局任务快照（任务管理器）
@@ -49,6 +50,27 @@ public class RssJobStatus implements Serializable {
 
     @Schema(description = "本轮处理失败的订阅数")
     private Integer subscriptionFailed;
+
+    @Schema(description = "错峰更新：当前批次号（从 1 开始，0 表示尚未开始分批）")
+    private Integer currentBatch;
+
+    @Schema(description = "错峰更新：本轮总批次数（未启用错峰时为 1）")
+    private Integer totalBatch;
+
+    @Schema(description = "错峰更新：下一批的预计提交时间戳 ms（null 表示当前不在等待）")
+    private Long nextBatchAt;
+
+    @Schema(description = "本轮是否为等待静默超时后强制开启（结果可信度降低）")
+    private Boolean quiescentForced;
+
+    @Schema(description = "本轮因后处理未收尾而被跳过的订阅数")
+    private Integer quiescentSkipped;
+
+    @Schema(description = "本轮本地状态分布 {exists, unknown, absent}（处置结果，非展示三态）")
+    private Map<String, Integer> roundLocalState;
+
+    @Schema(description = "本轮「存疑」成因分布 {verifyFailed, budgetExhausted, indexIncomplete, downloading}")
+    private Map<String, Integer> unknownReasons;
 
     @Schema(description = "最近一次任务完成时间戳 ms")
     private Long lastFinishedAt;

@@ -11,6 +11,7 @@ import ani.rss.entity.TorrentsInfo;
 import ani.rss.enums.StringEnum;
 import ani.rss.enums.TorrentsTags;
 import ani.rss.service.ClearService;
+import ani.rss.service.LocalStateCache;
 import ani.rss.util.basic.HttpReq;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.text.StrFormatter;
@@ -218,6 +219,8 @@ public class TorrentUtil {
         }
         FileUtil.move(pending, target, true);
         log.info("离线任务完成, 种子记录落盘 {}", item.getReName());
+        // 离线文件已归位到下载目录：该订阅的本地状态快照立即失效（F2-6）
+        LocalStateCache.invalidate(ani);
     }
 
     /**
@@ -453,6 +456,9 @@ public class TorrentUtil {
         if (Boolean.TRUE.equals(renamed)) {
             addTags(torrentsInfo, TorrentsTags.RENAME.getValue());
             refreshTorrentsCache();
+            // 改名后文件名才含 SxxExx、才进入集数索引：不失效的话用户改完名刷新仍看到旧结果。
+            // 按下载目录失效而非整体失效——一轮里每下完一集都会走这里，整体失效等于把缓存清空。
+            LocalStateCache.invalidateByDownloadPath(torrentsInfo.getDownloadDir());
         }
     }
 

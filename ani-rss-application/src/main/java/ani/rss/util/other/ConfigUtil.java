@@ -39,6 +39,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 
 @Slf4j
@@ -435,6 +436,38 @@ public class ConfigUtil {
     }
 
     /**
+     * F6-4 配置变更联动：这些字段决定「本地状态判定」的<b>输入或口径</b>，任一变化都必须
+     * 让已缓存的判定结果作废，否则用户改完设置仍会看到旧结果（最长
+     * {@code cloudStateCacheTtlSeconds} = 300s 才自然过期）。
+     * <ul>
+     *   <li>{@code downloadPathTemplate} / {@code ovaDownloadPathTemplate}：下载目录整体位移，
+     *       旧快照指向的路径已不是这个订阅的目录；</li>
+     *   <li>{@code rename}：决定「能否按文件名匹配集数」，直接切换判定口径
+     *       （真实文件列举 ↔ 种子记录回退），是本组里影响最大的一项；</li>
+     *   <li>{@code fileExist}：决定「是否检查文件是否存在」，关掉后判定退化为记录口径；</li>
+     *   <li>{@code downloadToolType}：本地磁盘 ↔ 网盘，快照的 Source 与构建代价都不同。</li>
+     * </ul>
+     * 与"订阅增删改"一样属全局口径变化，因此调用方应做整体失效而非按订阅失效。
+     * <p>
+     * 抽成纯函数是为了能被单测直接覆盖：{@code setConfig} 依赖 Spring 上下文，
+     * 而"哪些字段算口径变化"恰恰是最容易在后续迭代里被漏掉的一条。
+     *
+     * @param oldConfig 保存前的配置（可能为 null）
+     * @param newConfig 保存后的配置（可能为 null）
+     * @return 是否需要失效本地状态相关缓存
+     */
+    public static boolean localStateInputChanged(Config oldConfig, Config newConfig) {
+        if (oldConfig == null || newConfig == null) {
+            return false;
+        }
+        return !Objects.equals(oldConfig.getDownloadPathTemplate(), newConfig.getDownloadPathTemplate())
+                || !Objects.equals(oldConfig.getOvaDownloadPathTemplate(), newConfig.getOvaDownloadPathTemplate())
+                || !Objects.equals(oldConfig.getRename(), newConfig.getRename())
+                || !Objects.equals(oldConfig.getFileExist(), newConfig.getFileExist())
+                || !Objects.equals(oldConfig.getDownloadToolType(), newConfig.getDownloadToolType());
+    }
+
+    /**
      * 接口更新配置（copy-on-write）：锁内合并出新快照后原子交换 CONFIG，
      * 避免 RSS/下载线程读到「半新半旧」的撕裂配置。
      *
@@ -716,6 +749,49 @@ public class ConfigUtil {
         }
         if (config.getAssrtRetryCount() == null) {
             config.setAssrtRetryCount(2);
+        }
+
+        // 错峰更新与网盘限流参数补默认值（同上：缺省会让设置页渲染出空白输入框）。
+        // 运行期另有兜底（RssTask.resolveStaggerBatchIntervalMs / OpenListApi 的令牌桶），
+        // 因此即使配置被手工改坏也不会失效。
+        if (config.getStaggeredUpdateEnable() == null) {
+            config.setStaggeredUpdateEnable(true);
+        }
+        if (config.getStaggerBatchIntervalMs() == null) {
+            config.setStaggerBatchIntervalMs(2000);
+        }
+        if (config.getOpenListApiPerSecond() == null) {
+            config.setOpenListApiPerSecond(3);
+        }
+        if (config.getOpenListApiBurst() == null) {
+            config.setOpenListApiBurst(1);
+        }
+        if (config.getOpenListFailThreshold() == null) {
+            config.setOpenListFailThreshold(3);
+        }
+        if (config.getOpenListCooldownSeconds() == null) {
+            config.setOpenListCooldownSeconds(60);
+        }
+        if (config.getQuiescentConfirmTimes() == null) {
+            config.setQuiescentConfirmTimes(2);
+        }
+        if (config.getQuiescentTimeoutMinutes() == null) {
+            // 默认 = 2 × 轮询周期（与需求文档 F4-7 一致）；rssSleepMinutes 缺失时按 15 分钟算
+            int sleepMinutes = config.getRssSleepMinutes() == null ? 15 : Math.max(1, config.getRssSleepMinutes());
+            config.setQuiescentTimeoutMinutes(Math.max(5, sleepMinutes * 2));
+        }
+        // ---- F2 结果缓存 ----
+        if (config.getLocalStateCacheTtlSeconds() == null) {
+            config.setLocalStateCacheTtlSeconds(60);
+        }
+        if (config.getCloudStateCacheTtlSeconds() == null) {
+            config.setCloudStateCacheTtlSeconds(300);
+        }
+        // ---- F7-5 每轮预算 ----
+        // 默认 = 启用订阅数 × 1（每个订阅至少一次列举）。这里拿不到订阅数，
+        // 故留 null，由 RssTask.resolveApiBudgetPerRound 在轮次开始时按实际订阅数计算。
+        if (config.getCloudListMaxFiles() == null) {
+            config.setCloudListMaxFiles(5000);
         }
 
         NotificationConfig newNotificationConfig = NotificationConfig.createNotificationConfig();

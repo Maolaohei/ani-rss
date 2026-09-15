@@ -11,12 +11,17 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Date;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * OpenList 网盘"本地已下载"判断测试 — 用 mock OpenList 模拟 AList API 返回的文件列表
  * 场景来自实机验证: /115/动漫/转存/追番/乡下大叔成了剑圣/Season 2 的 S02E01-03.mkv
+ * <p>
+ * 注：F2 之后下载去重的索引改为经 {@code LocalStateCache} 走<b>严格版</b>列举
+ * （严格版才能区分"目录为空"与"查询失败"），故 mock 需要覆写
+ * {@code listFileNamesStrict}；同时每个用例前后清空缓存，避免用例之间互相串数据。
  */
 class OpenListItemDownloadedTest {
 
@@ -24,6 +29,11 @@ class OpenListItemDownloadedTest {
 
     private OpenList mockOpenList(List<String> fileNames) {
         return new OpenList() {
+            @Override
+            public List<String> listFileNamesStrict(String dirPath) {
+                return fileNames;
+            }
+
             @Override
             public List<String> listFileNames(String dirPath) {
                 return fileNames;
@@ -33,6 +43,7 @@ class OpenListItemDownloadedTest {
 
     @BeforeEach
     void setUp() {
+        LocalStateCache.clear();
         ConfigUtil.CONFIG.setRenameTemplate(null)
                 .setOvaRenameTemplate(null)
                 .setDownloadPathTemplate("/115/动漫/转存/追番/${title}/Season ${seasonFormat}")
@@ -47,6 +58,7 @@ class OpenListItemDownloadedTest {
         ConfigUtil.CONFIG.setDownloadToolType(null).setRename(null).setFileExist(null)
                 .setDownloadPathTemplate(null).setOvaDownloadPathTemplate(null);
         TorrentUtil.DOWNLOAD = null;
+        LocalStateCache.clear();
     }
 
     private Ani ani(boolean ova, String mediaType, String title, int season) {
@@ -110,5 +122,39 @@ class OpenListItemDownloadedTest {
         Ani ani = ani(false, null, "未下载番剧 (2026) [tmdbid=1]", 1);
         assertFalse(downloadService.itemDownloaded(ani, item("未下载番剧 S01E01", 1.0), false),
                 "空目录不应判定已下载");
+    }
+
+    /**
+     * A2 验收：同一订阅在一轮里被反复查询，网盘列举只能发生一次。
+     * <p>
+     * OpenList 模式下 `downloadAniLocked` 故意不预构建索引（信任种子记录），
+     * 于是"没有记录"的条目会各自触发一次列举。没有共享缓存时，订阅有 5 个新集
+     * 就是 5 次 {@code fs/list}，订阅一多直接把网盘打到限流。
+     */
+    @Test
+    void repeated_lookups_share_a_single_listing() {
+        AtomicInteger listings = new AtomicInteger();
+        TorrentUtil.DOWNLOAD = new OpenList() {
+            @Override
+            public List<String> listFileNamesStrict(String dirPath) {
+                listings.incrementAndGet();
+                return List.of(
+                        "共享缓存 S01E01.mkv",
+                        "共享缓存 S01E02.mkv",
+                        "共享缓存 S01E03.mkv",
+                        "共享缓存 S01E04.mkv",
+                        "共享缓存 S01E05.mkv");
+            }
+        };
+        Ani ani = ani(false, null, "共享缓存 (2026) [tmdbid=2]", 1);
+
+        for (int episode = 1; episode <= 5; episode++) {
+            assertTrue(downloadService.itemDownloaded(ani,
+                            item("共享缓存 S01E0" + episode, (double) episode), false),
+                    "S01E0" + episode + " 应判定已下载");
+        }
+
+        assertEquals(1, listings.get(),
+                "同一订阅的多次去重查询必须共用同一份快照，实际列举 " + listings.get() + " 次");
     }
 }

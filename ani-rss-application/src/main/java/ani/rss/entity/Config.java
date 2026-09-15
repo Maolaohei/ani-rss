@@ -865,6 +865,106 @@ public class Config implements Serializable {
     private Integer rssConcurrency;
 
     /**
+     * 错峰更新总开关。
+     * <p>
+     * 关闭时行为与引入错峰之前<b>完全一致</b>（一次性全量提交、批间不等待），用于出问题时的回滚。
+     */
+    @Schema(description = "错峰更新")
+    private Boolean staggeredUpdateEnable;
+
+    /**
+     * 错峰批次之间的间隔毫秒数。
+     * <p>
+     * 订阅多时若一次性把全部订阅提交进线程池，会在极短时间内产生 N 次 RSS 拉取 + N 次网盘列举，
+     * 既容易被源站/网盘限流，也会让下载器瞬间承压。按并发度分片、批间留间隔可显著削峰。
+     * <p>
+     * 注意：错峰总时长会被封顶（不超过轮询周期的 1/4），不会因为分片把整轮拖长。
+     */
+    @Schema(description = "错峰批次间隔(毫秒)")
+    private Integer staggerBatchIntervalMs;
+
+    /**
+     * 网盘 API 令牌桶速率（次/秒）。
+     * <p>
+     * 网盘按账号限流，请求过密会直接触发服务端限流导致大面积失败。
+     */
+    @Schema(description = "网盘API每秒请求数")
+    private Integer openListApiPerSecond;
+
+    /**
+     * 网盘 API 令牌桶突发容量
+     */
+    @Schema(description = "网盘API突发容量")
+    private Integer openListApiBurst;
+
+    /**
+     * 网盘 API 连续失败多少次后熔断（进入冷却期，期间不再发请求）
+     */
+    @Schema(description = "网盘API熔断阈值")
+    private Integer openListFailThreshold;
+
+    /**
+     * 网盘 API 熔断初始冷却秒数（连续失败时指数增长，有上限）
+     */
+    @Schema(description = "网盘API熔断冷却(秒)")
+    private Integer openListCooldownSeconds;
+
+    /**
+     * 静默窗口的连续确认次数。
+     * <p>
+     * 开启新一轮 RSS 前，必须连续 N 次判定"后处理已收尾"才放行。
+     * 单次判定可能撞上瞬时空窗（例如改名任务恰好刚把文件移走、标签还没写回），
+     * 连续确认可避免把这种瞬时状态当成"已收尾"从而开出重复下载。
+     */
+    @Schema(description = "静默窗口连续确认次数")
+    private Integer quiescentConfirmTimes;
+
+    /**
+     * 等待静默的最长分钟数，超时后<b>强制开轮</b>（该轮一律按 Phase A 处理，不得判定为"不存在"）。
+     * <p>
+     * 没有这个兜底，一次卡住的改名/上传会让 RSS 永久停摆——比偶尔重复下载更糟。
+     */
+    @Schema(description = "静默等待超时(分钟)")
+    private Integer quiescentTimeoutMinutes;
+
+    /**
+     * 本地磁盘「本地状态快照」缓存时长（秒）。
+     * <p>
+     * 本地目录遍历很便宜，TTL 可以短一些，保证用户手动改完文件名后刷新即可看到变化。
+     */
+    @Schema(description = "本地状态缓存时长(秒)")
+    private Integer localStateCacheTtlSeconds;
+
+    /**
+     * 网盘「本地状态快照」缓存时长（秒）。
+     * <p>
+     * 网盘列举是<b>真金白银</b>的 API 调用，TTL 应显著长于本地磁盘：
+     * 同一轮里预览、媒体库、RSS 主流程会反复问同一个订阅"这一集到底在不在"，
+     * 没有这层缓存就会变成同一份数据被列举 N 次。
+     */
+    @Schema(description = "网盘状态缓存时长(秒)")
+    private Integer cloudStateCacheTtlSeconds;
+
+    /**
+     * 单轮网盘 API 调用预算上限。
+     * <p>
+     * 默认 = 本轮启用订阅数 × 1（每个订阅至少需要一次列举来确认本地文件），硬上限 200。
+     * 预算耗尽后<b>停止 Phase B 真实文件校验</b>，剩余条目保持「存疑」并 WARN——
+     * 宁可显示"无法确认"，也不能为了跑完而把网盘打到限流。
+     */
+    @Schema(description = "单轮网盘API预算")
+    private Integer openListApiBudgetPerRound;
+
+    /**
+     * 网盘目录列举的文件数上限，超出即截断。
+     * <p>
+     * 截断后索引不再完整：仍然可以确认"文件存在"（找到即存在），
+     * 但<b>不能</b>据此断言"文件不存在"，故该快照会被标记为不完整，相关条目一律判「存疑」。
+     */
+    @Schema(description = "网盘列举文件数上限")
+    private Integer cloudListMaxFiles;
+
+    /**
      * 结构化事件 Webhook 地址（留空不发送）。发送 JSON 事件体而非渲染文本。
      */
     @Schema(description = "事件 Webhook 地址")

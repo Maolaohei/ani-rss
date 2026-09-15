@@ -53,8 +53,17 @@
               <el-table-column label="大小" width="100" prop="formatSize"/>
               <el-table-column label="状态" width="90">
                 <template #default="{row}">
-                  <el-tag v-if="row.hasDownloaded" type="success" size="small">已下载</el-tag>
-                  <el-tag v-else type="warning" size="small">未下载</el-tag>
+                  <!-- 四态，与预览页口径一致：下载中 > 存疑 > 已下载 > 未下载 -->
+                  <el-tooltip v-if="row.downloading" :content="row.downloadingState || '下载中'" placement="top">
+                    <el-tag type="warning" size="small">下载中</el-tag>
+                  </el-tooltip>
+                  <el-tooltip v-else-if="row.hasDownloadedUnknown"
+                              content="目标路径暂未确认（网盘列举失败，或已提交下载但尚未改名落地），已回退为种子记录判定"
+                              placement="top">
+                    <el-tag type="warning" effect="plain" size="small">存疑</el-tag>
+                  </el-tooltip>
+                  <el-tag v-else-if="row.hasDownloaded" type="success" size="small">已下载</el-tag>
+                  <el-tag v-else type="info" size="small">未下载</el-tag>
                 </template>
               </el-table-column>
               <el-table-column label="操作" width="90" fixed="right">
@@ -132,11 +141,15 @@ const download = async row => {
     ElMessage.warning('请先选择订阅（下单需要知道下到哪个目录）')
     return
   }
-  if (row.hasDownloaded) {
+  // 存疑也必须确认：forceDownloadItem 会先删除已有文件再重下，
+  // 而"存疑"恰恰意味着文件可能就在盘上，不提示就点等于静默删档。
+  if (row.hasDownloaded || row.hasDownloadedUnknown) {
     try {
       await ElMessageBox.confirm(
-          '该条目本地已存在。强制下载会先删除已有文件再重新下载，确定继续？',
-          '强制重下',
+          row.hasDownloaded
+              ? '该条目本地已存在。强制下载会先删除已有文件再重新下载，确定继续？'
+              : '该条目本地状态存疑（目标路径无法确认）。若文件确实存在，强制下载会先删除它再重新下载，确定继续？',
+          row.hasDownloaded ? '强制重下' : '状态存疑，仍要下载？',
           {type: 'warning', confirmButtonText: '强制下载', cancelButtonText: '取消'})
     } catch (e) {
       return

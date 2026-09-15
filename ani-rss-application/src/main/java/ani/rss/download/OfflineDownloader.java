@@ -2,6 +2,7 @@ package ani.rss.download;
 
 import ani.rss.entity.Ani;
 import ani.rss.entity.Item;
+import ani.rss.entity.OpenListFileInfo;
 
 import java.util.List;
 
@@ -43,6 +44,25 @@ public interface OfflineDownloader {
      * 列出网盘目录下文件路径(递归, 带缓存), 供"本地已下载"判断使用。
      */
     List<String> listFileNames(String dirPath);
+
+    /**
+     * 严格版列举：网盘 API 查询失败时抛出，而非静默返回空列表。
+     * <p>
+     * 用于必须区分"目录确实为空"与"查询失败"的场景（如预览的「本地存在」列，
+     * 查不到时应显示"存疑"而不是谎报"不存在"）。
+     * 默认委托 {@link #listFileNames}（无法区分失败）——实现类应覆盖以真正支持该语义。
+     */
+    default List<String> listFileNamesStrict(String dirPath) {
+        return listFileNames(dirPath);
+    }
+
+    /**
+     * 严格版文件列举（含大小/修改时间），供媒体库等需要文件属性的场景使用。
+     * 查询失败时抛出；默认不支持（抛异常而非返回空列表，避免把"查不到"静默当成"没有"）。
+     */
+    default List<OpenListFileInfo> listFilesStrict(String dirPath) {
+        throw new UnsupportedOperationException("当前下载器不支持列出网盘文件信息");
+    }
 
     /**
      * 归位对账：downloadPath 子目录（临时目录/115 云下载残留）中存在本集文件而顶层缺失时，
