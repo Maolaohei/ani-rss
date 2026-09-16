@@ -23,13 +23,16 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -86,6 +89,14 @@ public class OpenListApi {
     private static final long FIND_FILES_TTL_MS = java.util.concurrent.TimeUnit.SECONDS.toMillis(30);
     private static final Map<String, CachedFileList> findFilesCache = new ConcurrentHashMap<>();
 
+    /**
+     * 缓存世代号：每次失效自增。构建开始时快照，写缓存前比对，防止"失效后旧结果回填"。
+     * <p>
+     * 场景：线程 A 正在递归列举（HTTP 慢），期间目录发生 rename/move 触发失效；
+     * 若 A 回来后仍把变更前的旧结果写进缓存，失效就白做了，调用方会读到过期数据。
+     */
+    private static final AtomicLong cacheEpoch = new AtomicLong(0L);
+
     // listFileNames 长缓存: "本地已下载"判断用, 文件列表变化不频繁
     private static final long LIST_NAMES_TTL_MS = java.util.concurrent.TimeUnit.SECONDS.toMillis(300);
     private static final Map<String, List<String>> listNamesCache = new ConcurrentHashMap<>();
@@ -106,6 +117,14 @@ public class OpenListApi {
     /** 目录列举缓存未命中次数（= 真的发了请求） */
     private static final java.util.concurrent.atomic.AtomicLong listingCacheMiss =
             new java.util.concurrent.atomic.AtomicLong(0L);
+    /**
+     * 本轮真正发出的「目录列举」请求数（每轮 RSS 扫描开始时复位）。
+     * <p>
+     * 与 {@link #apiCallCountRound} 的区别：只有列举才计入——fs/mkdir、fs/move、上传、
+     * 下载器查询等都不算。这样"每轮列举预算"才真的等于"还能为确认本地文件列举多少次"。
+     * 缓存命中与被合并的等待方不计入（它们没有发请求）。
+     */
+    private static final AtomicLong listingCallCountRound = new AtomicLong(0L);
 
     // ---- F7-2 请求合并（coalescing）----
     // 缓存只能挡住"已经算过"的请求，挡不住"正在算"的请求：两个线程同时问同一个目录，
@@ -113,8 +132,30 @@ public class OpenListApi {
     /** 同一 path 正在构建中的列举结果 */
     private static final Map<String, java.util.concurrent.CompletableFuture<List<String>>> listNamesInFlight =
             new ConcurrentHashMap<>();
+    /**
+     * findFilesStrict 的在途请求：同一 path 的并发递归列举只做一次。
+     * <p>
+     * 去实例锁（P1-5）之前，这份"去重"是靠 synchronized 顺带实现的；去掉锁之后必须显式做，
+     * 否则两个线程会对同一目录各做一遍递归列举（请求数翻倍，正是限流最怕的）。
+     * <p>
+     * 不会自死锁：递归时 key 只会变长（{@code path + "/" + name}），
+     * 线程不可能等待一个需要自己结果才能完成的 future。
+     */
+    private static final Map<String, CompletableFuture<List<OpenListFileInfo>>> findFilesInFlight =
+            new ConcurrentHashMap<>();
     /** 等待上限：等待方绝不无限期挂起，超时按"查询失败"处理（→ 存疑） */
     private static final long MAX_COALESCE_WAIT_MS = 60_000L;
+    /**
+     * 递归列举（findFilesStrict）专用的合并等待上限，比单目录列举宽松得多。
+     * <p>
+     * 一次递归列举天然是"1 + 子目录数"次往返（默认 3 次/秒限流），大目录树超过 60s 很正常；
+     * 沿用 60s 会让等待方无谓超时，而超时会向上抛（buildFileList 只吞 OpenListDirNotFoundException），
+     * 整个父目录列举失败、findFiles 再把"查不到"报成"目录是空的"。
+     * <p>
+     * 3 分钟的依据：去掉实例锁之前，等待方是<b>无超时地</b>阻塞在实例监视器上的——
+     * 一个有界等待严格优于它所取代的行为。超时仍抛异常：真正的"无法确定"绝不能变成"目录为空"。
+     */
+    private static final long MAX_FIND_FILES_COALESCE_WAIT_MS = 180_000L;
     /** 被合并掉（省下）的列举次数 */
     private static final java.util.concurrent.atomic.AtomicLong listingCoalesced =
             new java.util.concurrent.atomic.AtomicLong(0L);
@@ -221,9 +262,38 @@ public class OpenListApi {
     }
 
     /**
+     * 等待同一 path 的递归列举结果（findFilesStrict 的请求合并）。
+     * <p>
+     * 超时/被中断/上游失败一律抛异常，<b>绝不返回空列表</b>——空列表会被下游读成
+     * "这个目录里没有文件"，从而把"查不到"说成"不存在"，直接导致重复下载。
+     * <p>
+     * 等待上限用 {@link #MAX_FIND_FILES_COALESCE_WAIT_MS}（递归列举往返次数多，比单目录宽松）。
+     */
+    private static List<OpenListFileInfo> awaitCoalescedFiles(
+            String path, CompletableFuture<List<OpenListFileInfo>> future) {
+        try {
+            return future.get(MAX_FIND_FILES_COALESCE_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (java.util.concurrent.ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof RuntimeException re) {
+                throw re;
+            }
+            throw new IllegalStateException("等待同一目录列举结果失败 path=" + path, cause);
+        } catch (java.util.concurrent.TimeoutException e) {
+            throw new IllegalStateException("等待同一目录列举结果超时（" + MAX_FIND_FILES_COALESCE_WAIT_MS
+                    + "ms） path=" + path, e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("等待同一目录列举结果被中断 path=" + path, e);
+        }
+    }
+
+    /**
      * 真正执行列举（含 300s 长缓存写入）。只在缓存未命中且无同 path 在途请求时进入。
      */
     private List<String> buildFileNames(String dirPath) {
+        // 构建开始时快照世代号：期间若有目录变更触发失效，本次结果不得回填缓存
+        long epoch = cacheEpoch.get();
         List<OpenListFileInfo> files;
         try {
             files = findFilesStrict(dirPath);
@@ -242,13 +312,27 @@ public class OpenListApi {
                     return StrUtil.isBlank(dir) ? name : dir + "/" + name;
                 })
                 .collect(Collectors.toList());
+        if (cacheEpoch.get() != epoch) {
+            // 构建期间目录已变更：这次拿到的是变更前的旧数据，丢弃不缓存
+            log.debug("列举期间缓存已失效，跳过回填 {}", dirPath);
+            return names;
+        }
         listNamesCache.put(dirPath, names);
-        listNamesExpire.put(dirPath, System.currentTimeMillis() + LIST_NAMES_TTL_MS);
+        long expireAt = System.currentTimeMillis() + LIST_NAMES_TTL_MS;
+        listNamesExpire.put(dirPath, expireAt);
+        if (cacheEpoch.get() != epoch) {
+            // 上面"检查→写入"之间仍可能被抢占：失效线程的 removeIf 先跑完，我们再写进去，
+            // 旧数据就会存活整整 300s。写后复核并精确回滚自己刚写的条目。
+            // remove(key, value) 只删自己写的那个值，绝不会误删新构建者的结果。
+            log.debug("回填后检测到缓存已失效，回滚 {}", dirPath);
+            listNamesCache.remove(dirPath, names);
+            listNamesExpire.remove(dirPath, expireAt);
+        }
         return names;
     }
 
     /**
-     * 列出网盘目录下文件信息(递归, 3s 缓存), 供媒体库等需要大小/修改时间的场景使用。
+     * 列出网盘目录下文件信息(递归, 30s 缓存), 供媒体库等需要大小/修改时间的场景使用。
      * 查询失败时抛出, 调用方可据此保守处理(不把"查不到"当成"没有")。
      */
     public List<OpenListFileInfo> listFilesStrict(String dirPath) {
@@ -261,7 +345,7 @@ public class OpenListApi {
      * @param path 路径
      */
     public void mkdir(String path) {
-        invalidateFindFilesCache();
+        invalidateFindFilesCache(path);
         retryIdempotent("fs/mkdir " + path, () -> {
             postApi("fs/mkdir")
                     .body(GsonStatic.toJson(Map.of(
@@ -305,7 +389,7 @@ public class OpenListApi {
      * @param names  文件名
      */
     public void fsMove(String srcDir, String dstDir, List<String> names) {
-        invalidateFindFilesCache();
+        invalidateFindFilesCache(srcDir, dstDir);
         retryIdempotent("fs/move " + srcDir + " -> " + dstDir, () -> {
             postApi("fs/move")
                     .body(GsonStatic.toJson(Map.of(
@@ -327,7 +411,7 @@ public class OpenListApi {
      * @param names 文件名
      */
     public void fsRemove(String dir, List<String> names) {
-        invalidateFindFilesCache();
+        invalidateFindFilesCache(dir);
         retryIdempotent("fs/remove " + dir, () -> {
             postApi("fs/remove")
                     .body(GsonStatic.toJson(Map.of(
@@ -347,7 +431,7 @@ public class OpenListApi {
      * @param content  文件内容
      */
     public void fsPut(String dir, String fileName, byte[] content) {
-        invalidateFindFilesCache();
+        invalidateFindFilesCache(dir);
         retryIdempotent("fs/put " + dir + "/" + fileName, () -> {
             String url = config.getDownloadToolHost() + "/api/fs/put";
             java.net.http.HttpRequest request = java.net.http.HttpRequest.newBuilder()
@@ -392,7 +476,7 @@ public class OpenListApi {
      * @param srcDir  目录
      */
     public void fsBatchRename(List<Map<String, String>> mapList, String srcDir) {
-        invalidateFindFilesCache();
+        invalidateFindFilesCache(srcDir);
         retryIdempotent("fs/batch_rename " + srcDir, () -> {
             postApi("fs/batch_rename")
                     .body(GsonStatic.toJson(Map.of(
@@ -414,7 +498,7 @@ public class OpenListApi {
      * @return tid
      */
     public String fsAddOfflineDownload(String magnet, String path) {
-        invalidateFindFilesCache();
+        invalidateFindFilesCache(path);
         return postApi("fs/add_offline_download")
                 .body(GsonStatic.toJson(Map.of(
                         "path", path,
@@ -517,12 +601,16 @@ public class OpenListApi {
     }
 
     /**
-     * 递归列出目录下所有文件（3s 短缓存）
+     * 递归列出目录下所有文件（30s 短缓存）
+     * <p>
+     * 不再持有实例锁（P1-5）：原先 synchronized 会把整个网盘客户端串行化，
+     * 一次慢目录（60s 超时 + 重试退避）会阻塞其它订阅的列举与前端 5s 一次的轮询。
+     * 限流顺序仍由 {@link #throttleApi()} 的静态锁保证，语义不变。
      *
      * @param path 目录
      * @return 文件列表
      */
-    public synchronized List<OpenListFileInfo> findFiles(String path) {
+    public List<OpenListFileInfo> findFiles(String path) {
         try {
             return findFilesStrict(path);
         } catch (Exception e) {
@@ -533,14 +621,47 @@ public class OpenListApi {
 
     /**
      * 严格版递归列举：查询失败时抛出，供必须区分"目录确实为空"与"查询失败"的调用方使用。
+     * <p>
+     * 请求合并（原先是靠实例锁顺带实现的）：同一 path 的并发递归列举只发一次请求，
+     * 后来者等待同一份结果。等待超时/失败一律抛异常，不会把"查不到"变成"没有文件"。
      */
-    public synchronized List<OpenListFileInfo> findFilesStrict(String path) {
+    public List<OpenListFileInfo> findFilesStrict(String path) {
         CachedFileList cached = findFilesCache.get(path);
         if (cached != null && cached.expireAt > System.currentTimeMillis()) {
             listingCacheHit.incrementAndGet();
             return cached.files;
         }
+        CompletableFuture<List<OpenListFileInfo>> mine = new CompletableFuture<>();
+        CompletableFuture<List<OpenListFileInfo>> existing = findFilesInFlight.putIfAbsent(path, mine);
+        if (existing != null) {
+            listingCoalesced.incrementAndGet();
+            return awaitCoalescedFiles(path, existing);
+        }
+        try {
+            List<OpenListFileInfo> files = buildFileList(path);
+            mine.complete(files);
+            return files;
+        } catch (RuntimeException e) {
+            mine.completeExceptionally(e);
+            throw e;
+        } finally {
+            findFilesInFlight.remove(path, mine);
+        }
+    }
+
+    /**
+     * 真正执行一次递归列举（缓存未命中且无同 path 在途请求时进入）。
+     * <p>
+     * 递归子目录仍走 {@link #findFilesStrict(String)}：子目录的列举同样要进缓存、同样要合并，
+     * 因此 findFilesCache 里既有订阅的下载根目录，也有递归访问到的每个子目录。
+     * key 只会变长，不会出现"等自己"的死锁。
+     */
+    private List<OpenListFileInfo> buildFileList(String path) {
         listingCacheMiss.incrementAndGet();
+        // 只有真的要发列举请求时才消耗"每轮列举预算"（缓存命中/被合并的等待方不消耗）
+        listingCallCountRound.incrementAndGet();
+        // 构建开始时快照世代号：期间若有目录变更触发失效，本次结果不得回填缓存
+        long epoch = cacheEpoch.get();
 
         List<OpenListFileInfo> openListFileInfos = fsListStrict(path, true);
         List<OpenListFileInfo> list = openListFileInfos.stream()
@@ -562,7 +683,20 @@ public class OpenListApi {
             Long size = fileInfo.getSize();
             return Long.MAX_VALUE - ObjectUtil.defaultIfNull(size, 0L);
         }));
-        findFilesCache.put(path, new CachedFileList(sorted, FIND_FILES_TTL_MS));
+        if (cacheEpoch.get() != epoch) {
+            // 构建期间目录已变更：这次拿到的是变更前的旧数据，丢弃不缓存
+            log.debug("递归列举期间缓存已失效，跳过回填 {}", path);
+            return sorted;
+        }
+        CachedFileList published = new CachedFileList(sorted, FIND_FILES_TTL_MS);
+        findFilesCache.put(path, published);
+        if (cacheEpoch.get() != epoch) {
+            // 上面"检查→写入"之间仍可能被抢占：失效线程的 removeIf 先跑完，我们再写进去，
+            // 旧数据就会存活整整 30s。写后复核并精确回滚自己刚写的条目。
+            // remove(key, value) 只删自己写的那个值，绝不会误删新构建者的结果。
+            log.debug("回填后检测到缓存已失效，回滚 {}", path);
+            findFilesCache.remove(path, published);
+        }
         return sorted;
     }
 
@@ -935,6 +1069,16 @@ public class OpenListApi {
     }
 
     /**
+     * 本轮真正发出的「目录列举」请求数（诊断用）。
+     * <p>
+     * 每轮预算看的就是这个数：只有列举（= 为确认本地文件而查询）才消耗预算，
+     * 缓存命中、被合并的等待方、以及 fs/mkdir、上传、下载器查询等都不算。
+     */
+    public static long getListingCallCountRound() {
+        return listingCallCountRound.get();
+    }
+
+    /**
      * 目录列举缓存命中次数（诊断用）
      */
     public static long getListingCacheHit() {
@@ -962,6 +1106,7 @@ public class OpenListApi {
      */
     public static void resetRoundApiStats() {
         apiCallCountRound.set(0L);
+        listingCallCountRound.set(0L);
     }
 
     // ---- F7-5 每轮 API 预算 ----
@@ -970,9 +1115,13 @@ public class OpenListApi {
      * 开启本轮预算限制（由 {@code RssTask} 在轮次开始时调用）。
      * <p>
      * 预算 = 0 表示不限制；负值按 0 处理。
+     * <p>
+     * 这里<b>不再做硬顶钳制</b>：钳制由 {@code RssTask} 负责——它按订阅规模算出的默认值
+     * 本就需要突破 {@link #MAX_API_BUDGET_PER_ROUND}（大库一轮的列举次数天然超过 200），
+     * 用户显式配置的值仍由 RssTask 钳到硬顶。若在这里再钳一次，等于把那条修复静默废掉。
      */
     public static void startRoundBudget(int budget) {
-        roundBudget.set(Math.max(0, Math.min(budget, MAX_API_BUDGET_PER_ROUND)));
+        roundBudget.set(Math.max(0, budget));
     }
 
     /**
@@ -990,12 +1139,16 @@ public class OpenListApi {
      * 本轮预算是否已耗尽。
      * <p>
      * 语义是"<b>还能不能再为确认本地文件而列举</b>"：耗尽后应停止 Phase B，
-     * 剩余条目保持「存疑」。注意这里只看调用次数，不看成功与否——
-     * 失败的调用同样消耗了配额，继续打只会更快触发限流。
+     * 剩余条目保持「存疑」。所以只看<b>列举</b>次数（{@link #listingCallCountRound}），
+     * 不看 {@code apiCallCountRound}——后者把 fs/mkdir、上传、下载器查询也算进去，
+     * 会让"确认本地文件"的额度被无关请求提前吃光。
+     * <p>
+     * 注意这里只看次数，不看成功与否——失败的列举同样消耗了配额，
+     * 继续打只会更快触发限流。
      */
     public static boolean isRoundBudgetExhausted() {
         int budget = roundBudget.get();
-        return budget > 0 && apiCallCountRound.get() >= budget;
+        return budget > 0 && listingCallCountRound.get() >= budget;
     }
 
     /**
@@ -1070,6 +1223,7 @@ public class OpenListApi {
         cooldownTriggered.set(0L);
         apiCallCount.set(0L);
         apiCallCountRound.set(0L);
+        listingCallCountRound.set(0L);
         listingCacheHit.set(0L);
         listingCacheMiss.set(0L);
         listingCoalesced.set(0L);
@@ -1083,17 +1237,36 @@ public class OpenListApi {
     }
 
     /**
-     * 令牌桶限流（仍<b>全局串行</b>）。
+     * 实际生效的令牌桶速率（次/秒，含默认值与钳制）。
+     * 抽出为公共方法，让"每轮预算"的换算与限流器共用同一份默认值。
+     */
+    public static int effectiveApiPerSecond(Config config) {
+        return intConfig(config == null ? null : config.getOpenListApiPerSecond(),
+                (int) DEFAULT_API_PER_SECOND, 1, (int) MAX_API_PER_SECOND);
+    }
+
+    /**
+     * 令牌桶限流：保证的是全局<b>速率</b>上限，<b>不是</b>端到端串行。
      * <p>
-     * 网盘按账号限流，并发发请求只会更容易被拒；串行 + 令牌桶既能削峰又不会像固定
-     * 300ms 那样在订阅多时把整轮拖成线性等待（速率可配、可突发）。
+     * 调用时机是 {@link #getApi(String)}/{@link #postApi(String)} 的<b>开头</b>，
+     * 所以 {@link #API_RATE_LOCK} 只覆盖"取令牌"这一段（含最多 5s 的等待）；
+     * 真正的 HTTP 请求是调用方随后在 {@code .then(...)}/{@code .thenFunction(...)} 里发出的，
+     * 在锁<b>之外</b>。非列举类请求（task 查询、fs/mkdir 等）本来就是这个形态。
+     * <p>
+     * 变化点（P1-5）：<b>递归列举</b>以前额外被 {@code findFilesStrict} 的实例监视器串起来，
+     * 全局同时只有 1 个在飞；去掉那把锁后，并发度上限变成调用方规模——
+     * 3~8 个 RSS 工作线程 + 前端每 5s 的任务列表轮询 + OpenList 的离线等待池。
+     * 因此"请求不再互相排队"是本次的有意结果，而不是回归。
+     * <p>
+     * 要降低对网盘的压力，请调 {@code openListApiPerSecond}（令牌桶速率）与
+     * {@code openListApiBurst}（突发额度），<b>不要</b>再加请求级锁——
+     * 那会把 P1-5 刚移除的"一个慢目录卡住所有人"原样加回来。
      */
     static void throttleApi() {
         apiCallCount.incrementAndGet();
         apiCallCountRound.incrementAndGet();
         synchronized (API_RATE_LOCK) {
-            double perSecond = intConfig(ConfigUtil.CONFIG == null ? null : ConfigUtil.CONFIG.getOpenListApiPerSecond(),
-                    (int) DEFAULT_API_PER_SECOND, 1, (int) MAX_API_PER_SECOND);
+            double perSecond = effectiveApiPerSecond(ConfigUtil.CONFIG);
             double burst = intConfig(ConfigUtil.CONFIG == null ? null : ConfigUtil.CONFIG.getOpenListApiBurst(),
                     (int) DEFAULT_API_BURST, 1, (int) MAX_API_BURST);
 
@@ -1122,12 +1295,112 @@ public class OpenListApi {
     }
 
     /**
-     * 目录变更后清理 findFiles/listFileNames 缓存
+     * 目录变更后清理 findFiles/listFileNames 缓存（清空全部）。
+     * <p>
+     * 保留"全清"语义：路径未知的调用方、以及测试都依赖它。已知变更路径时请改用
+     * {@link #invalidateFindFilesCache(String...)}，避免订阅 A 的一次改名把 B/C/D 的
+     * 已构建列举全部打掉（下载期间 30s 列举缓存因此形同虚设）。
      */
     void invalidateFindFilesCache() {
-        findFilesCache.clear();
-        listNamesCache.clear();
-        listNamesExpire.clear();
+        invalidateFindFilesCache((Collection<String>) null);
+    }
+
+    /**
+     * 目录变更后只失效受影响的子树（含祖先与后代）。
+     *
+     * @param changedPaths 发生变更的目录；为 null 或全为空白时退化为清空全部
+     */
+    void invalidateFindFilesCache(String... changedPaths) {
+        invalidateFindFilesCache(changedPaths == null ? null : java.util.Arrays.asList(changedPaths));
+    }
+
+    /**
+     * 目录变更后只失效受影响的子树。
+     * <p>
+     * 判定：归一化后（反斜杠转正斜杠、去尾部斜杠、折叠重复斜杠、空路径视为根）缓存键 k 受变更根 r 影响，当且仅当
+     * <ul>
+     *   <li>{@code k.equals(r)} —— 该目录本身变了；</li>
+     *   <li>{@code k} 在 {@code r} 之下 —— 递归列举会把子目录一并缓存；</li>
+     *   <li>{@code k} 是 {@code r} 的祖先 —— 祖先的递归结果里包含该目录的内容，同样过期。
+     *       例：改名 {@code /downloads/Show/Season 1} 里的文件，{@code /downloads/Show} 的缓存也失效。</li>
+     * </ul>
+     * 同时丢弃受影响的在途请求：失效<b>之后才到达</b>的调用方会重新构建，
+     * 而不是搭上一个变更前就开始的构建。
+     * <p>
+     * <b>已经在途的等待方仍会拿到变更前的结果</b>——它握着的 future 引用无法被取消，
+     * 丢掉 in-flight 条目只能阻止"后来者"，不能让"已在等的人"改口。这是<b>刻意接受</b>的：
+     * 误差方向是"看到的文件比实际少"→ 最多多下载一次（保守），
+     * 绝不会反过来把"其实不存在"说成"已下载"；且窗口只有一个构建的时间。
+     * 缓存本身不会被污染（世代号守卫 + 写后回滚），之后的读取都是新数据。
+     * <p>
+     * 路径缺失（null/空白）时退化为清空全部：宁可多清，也不能留下过期缓存——
+     * 过期缓存会把"其实存在"读成"不存在"，直接导致重复下载。
+     */
+    void invalidateFindFilesCache(Collection<String> changedPaths) {
+        // 先自增世代号：在途构建回来后比对失败，不会把变更前的旧结果回填
+        cacheEpoch.incrementAndGet();
+        if (changedPaths == null || changedPaths.stream().allMatch(StrUtil::isBlank)) {
+            findFilesCache.clear();
+            listNamesCache.clear();
+            listNamesExpire.clear();
+            findFilesInFlight.clear();
+            listNamesInFlight.clear();
+            return;
+        }
+        List<String> roots = changedPaths.stream()
+                .filter(StrUtil::isNotBlank)
+                .map(OpenListApi::normalizeCachePath)
+                .distinct()
+                .toList();
+        findFilesCache.keySet().removeIf(k -> isAffectedByChange(k, roots));
+        listNamesCache.keySet().removeIf(k -> isAffectedByChange(k, roots));
+        listNamesExpire.keySet().removeIf(k -> isAffectedByChange(k, roots));
+        findFilesInFlight.keySet().removeIf(k -> isAffectedByChange(k, roots));
+        listNamesInFlight.keySet().removeIf(k -> isAffectedByChange(k, roots));
+    }
+
+    /**
+     * 缓存键归一化：反斜杠转正斜杠、折叠重复斜杠、去掉尾部斜杠、空路径视为根。
+     * <p>
+     * 折叠重复斜杠是必需的：{@code /media/A//S01} 与 {@code /media/A/S01} 若按原样比较，
+     * 三个判定（自身/后代/祖先）全部落空，缓存条目会被<b>静默漏掉</b>——
+     * 静默漏失效是这里最坏的失败模式，必须让它不可能发生。
+     * <p>
+     * 不解析 {@code .} / {@code ..} 段（现状下无调用方能产出，见下）；若将来出现，
+     * 需要在此补上真正的路径规范化。
+     * 已核查全部生产调用点（OpenList.java:1137/1253/2128/2677/3978/3981、
+     * DownloadService:1460、LibraryController:502）都不会产生尾部或重复斜杠，故此处属加固而非在修线上缺陷。
+     */
+    private static String normalizeCachePath(String path) {
+        if (StrUtil.isBlank(path)) {
+            return "/";
+        }
+        String p = path.replace('\\', '/');
+        while (p.contains("//")) {
+            p = p.replace("//", "/");
+        }
+        while (p.length() > 1 && p.endsWith("/")) {
+            p = p.substring(0, p.length() - 1);
+        }
+        return p;
+    }
+
+    /**
+     * 缓存键是否受某个变更根影响：自身 / 后代 / 祖先（根目录视为一切的祖先）。
+     */
+    private static boolean isAffectedByChange(String key, List<String> roots) {
+        String k = normalizeCachePath(key);
+        for (String r : roots) {
+            if (k.equals(r)) {
+                return true;
+            }
+            boolean descendant = "/".equals(r) ? k.startsWith("/") : k.startsWith(r + "/");
+            boolean ancestor = "/".equals(k) || r.startsWith(k + "/");
+            if (descendant || ancestor) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -1137,11 +1410,14 @@ public class OpenListApi {
 
     /**
      * get api
+     * <p>
+     * 不再 synchronized（P1-5）：实例锁会把整个网盘客户端串行化，
+     * 限流顺序由 {@link #throttleApi()} 的静态锁保证，这里不需要实例锁。
      *
      * @param action
      * @return
      */
-    public synchronized HttpRequest getApi(String action) {
+    public HttpRequest getApi(String action) {
         throttleApi();
         String host = config.getDownloadToolHost();
         String password = config.getDownloadToolPassword();
@@ -1153,11 +1429,13 @@ public class OpenListApi {
 
     /**
      * post api
+     * <p>
+     * 不再 synchronized（P1-5），理由同 {@link #getApi(String)}。
      *
      * @param action
      * @return
      */
-    public synchronized HttpRequest postApi(String action) {
+    public HttpRequest postApi(String action) {
         throttleApi();
         String host = config.getDownloadToolHost();
         String password = config.getDownloadToolPassword();

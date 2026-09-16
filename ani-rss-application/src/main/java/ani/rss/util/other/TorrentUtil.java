@@ -27,14 +27,19 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 管理下载器的调用与种子存取
  */
 @Slf4j
 public class TorrentUtil {
-    public static BaseDownload DOWNLOAD;
+    public static volatile BaseDownload DOWNLOAD;
 
     // 种子列表缓存：避免短时间内重复请求下载器
     private static volatile List<TorrentsInfo> cachedTorrents;
@@ -42,28 +47,109 @@ public class TorrentUtil {
     private static final long CACHE_TTL_MS = TimeUnit.SECONDS.toMillis(5);
 
     /**
+     * 缓存世代号：{@link #refreshTorrentsCache()} 自增。
+     * <p>
+     * 在途查询若在刷新<b>之后</b>才拿到结果，不得回填缓存——否则一次"刷新"会被一个更早发起的
+     * 慢查询悄悄覆盖掉。与 OpenListApi 的目录列举缓存用世代号解决"失效 / 构建"竞态是同一套办法。
+     */
+    private static final AtomicLong torrentsEpoch = new AtomicLong(0L);
+
+    /**
+     * 在途的下载器查询。并发未命中时只让一个线程去问下载器，其余等它的结果（请求合并）。
+     */
+    private static final AtomicReference<CompletableFuture<List<TorrentsInfo>>> torrentsInFlight =
+            new AtomicReference<>();
+
+    /**
+     * 等待同一在途查询的上限：等待方绝不无限期挂起，超时按"查询失败"处理。
+     */
+    private static final long MAX_TORRENTS_COALESCE_WAIT_MS = 60_000L;
+
+    /**
      * 获取任务列表（带缓存，5秒内重复调用直接返回缓存）
      * (E1) 查询异常不再吞掉返回空列表: 向上抛出, 由调用方区分"无任务"与"查询失败",
      * 避免查询失败被当作无任务放行并发上限/误判坏种; 缓存命中路径不受影响。
+     * <p>
+     * <b>不再使用 {@code static synchronized}</b>：下载器查询的超时是 20s（HttpReq 默认），
+     * 而 {@link #login()} / {@link #delete} / {@link #renameOnce} 用的是<b>同一把类锁</b>，
+     * 于是一次慢查询会把它们全部按住排队；前端每 5 秒轮询一次任务列表、RSS 轮次里每个 worker
+     * 也在调本方法，争抢尤其明显。现在只有"缓存读写 + 在途标记"需要互斥，网络调用一律在锁外。
+     * <p>
+     * 返回的仍是<b>副本</b>：调用方（如 {@code DownloadService}）会就地 {@code remove} 已删除的任务，
+     * 直接返回缓存引用会被调用方污染。
      */
-    public static synchronized List<TorrentsInfo> getTorrentsInfos() {
-        long now = System.currentTimeMillis();
-        if (cachedTorrents != null && now < cacheExpireTime) {
+    public static List<TorrentsInfo> getTorrentsInfos() {
+        List<TorrentsInfo> snapshot = cachedTorrents;
+        if (snapshot != null && System.currentTimeMillis() < cacheExpireTime) {
             // 返回副本，避免调用方原地修改污染缓存
-            return new ArrayList<>(cachedTorrents);
+            return new ArrayList<>(snapshot);
         }
-        cachedTorrents = DOWNLOAD.getTorrentsInfos();
-        cacheExpireTime = now + CACHE_TTL_MS;
-        if (cachedTorrents == null) {
-            return new ArrayList<>();
+
+        // 未命中：同一时刻只放一个线程去问下载器，其余等它的结果
+        CompletableFuture<List<TorrentsInfo>> mine = new CompletableFuture<>();
+        if (!torrentsInFlight.compareAndSet(null, mine)) {
+            CompletableFuture<List<TorrentsInfo>> existing = torrentsInFlight.get();
+            if (existing != null) {
+                return awaitTorrentsInfos(existing);
+            }
+            // 恰好被前一个查询清掉了：当作无人查询，自己发一次
         }
-        return new ArrayList<>(cachedTorrents);
+        try {
+            long epoch = torrentsEpoch.get();
+            List<TorrentsInfo> fetched = DOWNLOAD.getTorrentsInfos();
+            if (torrentsEpoch.get() == epoch) {
+                cachedTorrents = fetched;
+                cacheExpireTime = System.currentTimeMillis() + CACHE_TTL_MS;
+            }
+            mine.complete(fetched);
+            return fetched == null ? new ArrayList<>() : new ArrayList<>(fetched);
+        } catch (RuntimeException e) {
+            mine.completeExceptionally(e);
+            throw e;
+        } finally {
+            torrentsInFlight.compareAndSet(mine, null);
+        }
     }
 
     /**
-     * 强制刷新种子列表缓存
+     * 等待同一在途查询的结果。
+     * <p>
+     * 超时 / 被中断一律抛异常而<b>不返回空列表</b>——空列表会被调用方当成"下载器里没有任务"，
+     * 从而放行并发上限或误判坏种，正是 E1 要消灭的误判。
      */
-    public static synchronized void refreshTorrentsCache() {
+    private static List<TorrentsInfo> awaitTorrentsInfos(CompletableFuture<List<TorrentsInfo>> future) {
+        try {
+            List<TorrentsInfo> result = future.get(MAX_TORRENTS_COALESCE_WAIT_MS, TimeUnit.MILLISECONDS);
+            return result == null ? new ArrayList<>() : new ArrayList<>(result);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof RuntimeException re) {
+                throw re;
+            }
+            throw new IllegalStateException("等待下载器任务列表失败", cause);
+        } catch (TimeoutException e) {
+            throw new IllegalStateException(
+                    "等待下载器任务列表超时（" + MAX_TORRENTS_COALESCE_WAIT_MS + "ms）", e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("等待下载器任务列表被中断", e);
+        }
+    }
+
+    /**
+     * 强制刷新种子列表缓存。
+     * <p>
+     * 不再需要类锁：只写 volatile + 递增世代号，因此不会被 {@link #login()} / {@link #delete}
+     * 这类持类锁的慢操作堵住。在途查询若在本次刷新之后才拿到结果，会因世代号变化而放弃回填缓存。
+     * <p>
+     * <b>必须一并丢弃在途查询</b>：否则刷新<b>之后</b>才到达的线程会挂到"刷新之前发起"的那次查询上，
+     * 拿到刷新前的旧结果。旧实现靠 {@code static synchronized} 让刷新必然排在在途查询之后执行，
+     * 所以没有这个问题；去掉类锁后必须显式处理。已经等在那次在途查询上的调用方仍会收到它的结果，
+     * 但不会再有人新加入进来。
+     */
+    public static void refreshTorrentsCache() {
+        torrentsEpoch.incrementAndGet();
+        torrentsInFlight.set(null);
         cachedTorrents = null;
         cacheExpireTime = 0;
     }

@@ -340,12 +340,12 @@ public class DoctorController extends BaseController {
             return timed(DoctorCheck.skip(key, label, "当前下载器不是 OpenList / Alist，不限流"), start);
         }
         String evidence = StrUtil.format(
-                "速率 {}/s，突发 {}；累计调用 {} 次（本轮 {}/{}），目录列举缓存命中 {}/{}（{}%），"
+                "速率 {}/s，突发 {}；累计调用 {} 次（本轮列举 {}/{}），目录列举缓存命中 {}/{}（{}%），"
                         + "请求合并省下 {} 次，限流累计等待 {}ms，熔断 {} 次，超预算放弃 {} 次",
-                config.getOpenListApiPerSecond() == null ? 3 : config.getOpenListApiPerSecond(),
+                OpenListApi.effectiveApiPerSecond(config),
                 config.getOpenListApiBurst() == null ? 1 : config.getOpenListApiBurst(),
                 OpenListApi.getApiCallCount(),
-                OpenListApi.getApiCallCountRound(),
+                OpenListApi.getListingCallCountRound(),
                 OpenListApi.getRoundBudget() > 0 ? OpenListApi.getRoundBudget() : "不限",
                 OpenListApi.getListingCacheHit(),
                 OpenListApi.getListingCacheHit() + OpenListApi.getListingCacheMiss(),

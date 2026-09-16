@@ -360,16 +360,57 @@ public class RssTask implements BaseTask {
     }
 
     /**
+     * 每订阅确认本地状态所需的列举次数估算（F7-5）。
+     * <p>
+     * 一次订阅至少要列举<b>下载目录本身</b>，再逐个列举其子目录——{@code findFilesStrict} 是递归列举，
+     * 下载目录 + 每个子目录各一次 {@code fs/list}。取 4 作为经验估算（1 个根目录 + 约 3 个子目录）。
+     * 这只是"给足"的参考量，真正决定上限的是周期负担（见 {@link #resolveAffordableListingsPerRound}）。
+     */
+    static final int LISTINGS_PER_SUBSCRIPTION_ESTIMATE = 4;
+
+    /**
      * 单轮网盘 API 预算（F7-5）。
      * <p>
-     * 默认 = 本轮启用订阅数 × 1：每个订阅至少要列举一次才能确认本地文件。
-     * 配了就用配的值，但一律受 {@link OpenListApi#MAX_API_BUDGET_PER_ROUND} 硬顶约束——
-     * 订阅 500 个就允许打 500 次，等于没有预算。
+     * 口径是"<b>本轮允许发出多少次目录列举</b>"，不是所有 API 调用：mkdir / 移动 / 上传 / 下载器查询
+     * 都不该吃掉这份预算（判定在 {@code OpenListApi.isRoundBudgetExhausted()}）。
+     * <p>
+     * 默认值取「需求估算」与「周期负担」的较小者，且<b>不低于启用订阅数</b>：
+     * <ul>
+     *   <li>需求估算 = 订阅数 × {@link #LISTINGS_PER_SUBSCRIPTION_ESTIMATE}；</li>
+     *   <li>周期负担 = {@link #resolveAffordableListingsPerRound}。真正要防的是"把整轮时间都花在列举上"，
+     *       而限流是按 QPS 计的，所以次数上限本质上该由"周期内发得出多少次"决定；</li>
+     *   <li>不低于订阅数：每个订阅至少要能列举一次。否则大库（200 订阅就需要 600+ 次列举）会在后半程
+     *       被整体判成「存疑」，用户看到的是"一批订阅长期未确认"，而真因是预算口径而不是网盘有问题。</li>
+     * </ul>
+     * 用户显式配置的值优先，且仍受 {@link OpenListApi#MAX_API_BUDGET_PER_ROUND} 硬顶约束——那是防手滑的护栏；
+     * <b>计算出的默认值不受它约束</b>，否则上面的"给足"会被 200 重新压回去，修复等于没做。
      */
     static int resolveApiBudgetPerRound(Config config, int enabledCount) {
+        int subscriptions = Math.max(1, enabledCount);
         Integer configured = config == null ? null : config.getOpenListApiBudgetPerRound();
-        int value = configured == null ? Math.max(1, enabledCount) : configured;
-        return Math.max(1, Math.min(value, OpenListApi.MAX_API_BUDGET_PER_ROUND));
+        if (configured != null) {
+            return Math.max(1, Math.min(configured, OpenListApi.MAX_API_BUDGET_PER_ROUND));
+        }
+        int estimate = subscriptions * LISTINGS_PER_SUBSCRIPTION_ESTIMATE;
+        int affordable = resolveAffordableListingsPerRound(config);
+        return Math.max(subscriptions, Math.min(estimate, affordable));
+    }
+
+    /**
+     * 轮询周期内"负担得起"的列举次数 = 令牌桶速率 × 周期秒数 ÷ 4。
+     * <p>
+     * 与错峰等待的 {@link #resolveStaggerBudgetMs} 用同一个 1/4 口径：周期的一部分留给列举，
+     * 其余留给下载、改名与收尾，避免扫描把整轮占满。速率取
+     * {@link OpenListApi#effectiveApiPerSecond} 的实际生效值（含默认值与钳制），
+     * 保证与限流器的判断一致、两处默认值不会各自漂移。
+     */
+    static int resolveAffordableListingsPerRound(Config config) {
+        int perSecond = OpenListApi.effectiveApiPerSecond(config);
+        int sleepMinutes = config == null || config.getRssSleepMinutes() == null
+                ? DEFAULT_RSS_SLEEP_MINUTES
+                : Math.max(1, config.getRssSleepMinutes());
+        long affordable = (long) (perSecond * TimeUnit.MINUTES.toSeconds(sleepMinutes) / 4.0);
+        return (int) Math.max(1L, Math.min(affordable, Integer.MAX_VALUE));
     }
 
     /**

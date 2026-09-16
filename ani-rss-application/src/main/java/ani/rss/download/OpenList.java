@@ -1132,7 +1132,9 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 }
                 log.info("任务已完成但本集文件尚未可见，{}s 后重扫 {}",
                         POST_SUCCESS_FILE_GRACE_POLL_MS / 1000, reName);
-                api.invalidateFindFilesCache();
+                // 只失效本次扫描涉及的目录（最终目录 + 临时目录），
+                // 不要把其它订阅已构建的列举缓存一起打掉
+                api.invalidateFindFilesCache(savePath, tempDownloadDir);
                 ThreadUtil.sleep(POST_SUCCESS_FILE_GRACE_POLL_MS);
             }
         } catch (OfflineTimeoutException e) {
@@ -1245,7 +1247,10 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             verifyAttempt++;
             log.warn("第{}次校验：文件未出现在最终目录顶层，重试移动 {}", verifyAttempt, missingNames);
             ThreadUtil.sleep(MOVE_VERIFY_RETRY_DELAY_MS);
-            api.invalidateFindFilesCache();
+            // 只失效本次归位涉及的目录：最终目录 + 各源目录（pathToNames 的键）
+            List<String> changedDirs = new ArrayList<>(pathToNames.keySet());
+            changedDirs.add(savePath);
+            api.invalidateFindFilesCache(changedDirs);
             for (Map.Entry<String, List<String>> entry : pathToNames.entrySet()) {
                 String dirPath = entry.getKey();
                 if (Objects.equals(trimTrailingSlash(dirPath), savePathNorm)) {
@@ -2120,7 +2125,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             return List.of();
         }
         try {
-            api.invalidateFindFilesCache();
+            api.invalidateFindFilesCache(cloudDir);
             return findFiles(cloudDir);
         } catch (Exception e) {
             log.debug("扫描 115 云下载目录失败 {}: {}", cloudDir, ExceptionUtils.getMessage(e));
@@ -2669,7 +2674,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         List<OpenListFileInfo> last = List.of();
         int n = Math.max(1, attempts);
         for (int i = 0; i < n; i++) {
-            api.invalidateFindFilesCache();
+            api.invalidateFindFilesCache(path);
             last = findFiles(path);
             if (!last.isEmpty() || i == n - 1) {
                 return last;
@@ -3970,10 +3975,10 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     private TimeoutFileSnapshot freshEpisodeVideoSnapshot(String tempPath, String savePath, String reName,
                                                           List<Double> expectedEpisodes, Integer expectedSeason,
                                                           List<String> titleTokens) {
-        api.invalidateFindFilesCache();
+        api.invalidateFindFilesCache(tempPath);
         List<OpenListFileInfo> videos = expectedEpisodeVideos(findEpisodeFiles(tempPath, reName), expectedEpisodes, expectedSeason);
         if (videos.isEmpty() && !Objects.equals(tempPath, savePath)) {
-            api.invalidateFindFilesCache();
+            api.invalidateFindFilesCache(savePath);
             // 最终目录通常是模板命名；reName 可能是合集临时目录名，回退扫最终目录视频
             videos = expectedEpisodeVideos(findEpisodeFiles(savePath, reName), expectedEpisodes, expectedSeason);
             if (videos.isEmpty()) {
@@ -4171,11 +4176,14 @@ public class OpenList implements BaseDownload, OfflineDownloader {
 
     /**
      * 获取目录下及子目录的文件
+     * <p>
+     * 不再 synchronized（P1-5）：这是单例 OpenList 的实例锁，递归列举会跨多次 HTTP
+     * 持有它，一次慢目录就会阻塞其它订阅与前端轮询。限流顺序由 OpenListApi 内部保证。
      *
      * @param path 目录
      * @return 文件列表
      */
-    public synchronized List<OpenListFileInfo> findFiles(String path) {
+    public List<OpenListFileInfo> findFiles(String path) {
         return api.findFiles(path);
     }
 
@@ -4200,21 +4208,27 @@ public class OpenList implements BaseDownload, OfflineDownloader {
 
     /**
      * get api
+     * <p>
+     * 不再 synchronized（P1-5）：本方法会进入 {@code api.getApi()} → {@code throttleApi()}，
+     * 那里可能为限流睡满 5 秒。锁住单例实例监视器会让这 5 秒变成整个 OpenList 的停顿，
+     * 而限流所需的互斥由 {@code throttleApi()} 自己的静态锁负责，与实例锁无关。
      *
      * @param action
      * @return
      */
-    public synchronized HttpRequest getApi(String action) {
+    public HttpRequest getApi(String action) {
         return api.getApi(action);
     }
 
     /**
      * post api
+     * <p>
+     * 不再 synchronized（P1-5），理由同 {@link #getApi(String)}。
      *
      * @param action
      * @return
      */
-    public synchronized HttpRequest postApi(String action) {
+    public HttpRequest postApi(String action) {
         return api.postApi(action);
     }
 

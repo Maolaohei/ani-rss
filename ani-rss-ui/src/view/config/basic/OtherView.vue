@@ -185,7 +185,7 @@
       </div>
       <div class="flex flex-wrap gap-8 margin-top-4">
         <el-input-number v-model="props.config['openListApiBudgetPerRound']" :min="1" :max="200" :step="10"
-                         placeholder="留空 = 启用订阅数">
+                         placeholder="留空 = 自动">
           <template #prefix>单轮预算</template>
           <template #suffix><span>次</span></template>
         </el-input-number>
@@ -203,7 +203,10 @@
       </div>
       <div class="margin-top-4">
         <el-text class="mx-1" size="small">
-          单轮预算留空时等于「本轮启用订阅数 × 1」，硬上限 200 次；预算用完后停止真实文件校验，
+          单轮预算只统计「目录列举」次数（mkdir、移动、上传、下载器查询都不消耗它）。
+          留空时自动取值：先按「每个订阅 1 次根目录 + 估算子目录数」给足，再以本轮周期内网盘限速
+          发得出的次数封顶（速率 × 轮询周期 ÷ 4），并保证不低于订阅数——这样大库也不会因为预算不够
+          而在后半程把订阅整体判成「存疑」。手动填写时最多 200 次。预算用完后停止真实文件校验，
           剩余条目保持「存疑」并在任务管理器标注原因。列举文件数超过上限时会截断——
           截断后仍能确认「存在」，但不能断言「不存在」，相关条目同样显示为「存疑」。
         </el-text>

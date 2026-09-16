@@ -175,6 +175,7 @@ class OpenListRateLimitTest {
         assertEquals(0L, OpenListApi.getThrottleWaitMs());
         assertEquals(0L, OpenListApi.getApiCallCount());
         assertEquals(0L, OpenListApi.getApiCallCountRound());
+        assertEquals(0L, OpenListApi.getListingCallCountRound());
         assertEquals(0L, OpenListApi.getListingCacheHit());
         assertEquals(0L, OpenListApi.getListingCacheMiss());
     }
@@ -382,21 +383,76 @@ class OpenListRateLimitTest {
 
     // ---------------- F7-5 每轮 API 预算 ----------------
 
+    /**
+     * 只替换最底层的 fs/list，让 {@code findFilesStrict} 的缓存、请求合并与
+     * 「列举预算」计数全部走真实代码。
+     * <p>
+     * 预算的语义是"还能不能再<b>为确认本地文件而列举</b>"，所以必须用真实列举来驱动，
+     * 不能用 {@code throttleApi()} 这种"任意 API 调用"来凑数。
+     */
+    private static class FsListStubApi extends OpenListApi {
+        final AtomicInteger listCalls = new AtomicInteger();
+
+        @Override
+        public List<OpenListFileInfo> fsListStrict(String path, Boolean refresh) {
+            listCalls.incrementAndGet();
+            return List.of(new OpenListFileInfo()
+                    .setName("番剧 S01E01.mkv")
+                    .setPath(path)
+                    .setIsDir(false)
+                    .setSize(1024L));
+        }
+    }
+
     @Test
-    void budget_is_exhausted_after_configured_calls() {
-        ConfigUtil.CONFIG.setOpenListApiPerSecond(20).setOpenListApiBurst(5);
+    void budget_is_exhausted_after_configured_listings() {
         OpenListApi.resetRateLimitState();
+        FsListStubApi api = new FsListStubApi();
+        api.invalidateFindFilesCache();
 
         OpenListApi.startRoundBudget(2);
         assertEquals(2, OpenListApi.getRoundBudget());
-        assertFalse(OpenListApi.isRoundBudgetExhausted(), "还没调用就不该判定为耗尽");
+        assertFalse(OpenListApi.isRoundBudgetExhausted(), "还没列举就不该判定为耗尽");
 
-        OpenListApi.throttleApi();
+        api.findFilesStrict("/media/A");
+        assertEquals(1L, OpenListApi.getListingCallCountRound());
         assertFalse(OpenListApi.isRoundBudgetExhausted(), "1/2 未耗尽");
 
-        OpenListApi.throttleApi();
+        api.findFilesStrict("/media/B");
         assertTrue(OpenListApi.isRoundBudgetExhausted(),
-                "调用数达到预算即视为耗尽，剩余条目应保持「存疑」而不是继续打网盘");
+                "列举数达到预算即视为耗尽，剩余条目应保持「存疑」而不是继续打网盘");
+    }
+
+    @Test
+    void cache_hit_does_not_consume_listing_budget() {
+        OpenListApi.resetRateLimitState();
+        FsListStubApi api = new FsListStubApi();
+        api.invalidateFindFilesCache();
+        OpenListApi.startRoundBudget(10);
+
+        api.findFilesStrict("/media/A");
+        long afterFirst = OpenListApi.getListingCallCountRound();
+        assertEquals(1L, afterFirst);
+
+        api.findFilesStrict("/media/A");
+        assertEquals(afterFirst, OpenListApi.getListingCallCountRound(),
+                "缓存命中没有发请求，不该消耗列举预算");
+        assertEquals(1, api.listCalls.get());
+    }
+
+    @Test
+    void non_listing_api_calls_do_not_consume_listing_budget() {
+        ConfigUtil.CONFIG.setOpenListApiPerSecond(20).setOpenListApiBurst(5);
+        OpenListApi.resetRateLimitState();
+        OpenListApi.startRoundBudget(2);
+
+        for (int i = 0; i < 5; i++) {
+            OpenListApi.throttleApi();
+        }
+        assertEquals(5L, OpenListApi.getApiCallCountRound());
+        assertEquals(0L, OpenListApi.getListingCallCountRound());
+        assertFalse(OpenListApi.isRoundBudgetExhausted(),
+                "fs/mkdir、上传、下载器查询等不该吃掉「确认本地文件」的列举预算");
     }
 
     @Test
@@ -415,12 +471,13 @@ class OpenListRateLimitTest {
     }
 
     @Test
-    void budget_is_capped_by_hard_limit() {
+    void start_round_budget_does_not_clamp_here() {
         OpenListApi.resetRateLimitState();
-        // 订阅 500 个就允许打 500 次，等于没有预算
+        // 大库一轮的列举次数天然超过硬顶，RssTask 算出的默认值必须能生效；
+        // 钳制只由 RssTask 对"用户显式配置的值"负责，这里再钳一次会把那条修复静默废掉
         OpenListApi.startRoundBudget(1000);
-        assertEquals(OpenListApi.MAX_API_BUDGET_PER_ROUND, OpenListApi.getRoundBudget());
-        assertEquals(200, OpenListApi.MAX_API_BUDGET_PER_ROUND);
+        assertEquals(1000, OpenListApi.getRoundBudget());
+        assertEquals(200, OpenListApi.MAX_API_BUDGET_PER_ROUND, "硬顶常量本身保持不变");
     }
 
     @Test
@@ -433,10 +490,11 @@ class OpenListRateLimitTest {
 
     @Test
     void clearing_budget_releases_the_limit() {
-        ConfigUtil.CONFIG.setOpenListApiPerSecond(20).setOpenListApiBurst(5);
         OpenListApi.resetRateLimitState();
+        FsListStubApi api = new FsListStubApi();
+        api.invalidateFindFilesCache();
         OpenListApi.startRoundBudget(1);
-        OpenListApi.throttleApi();
+        api.findFilesStrict("/media/A");
         assertTrue(OpenListApi.isRoundBudgetExhausted());
 
         // 轮次结束后必须撤掉预算，否则用户随后手动预览会被上一轮的预算卡住

@@ -1885,10 +1885,12 @@ public class DownloadService {
 
         // F7-5：本轮预算已耗尽 → 停止 Phase B，本订阅一律"存疑"（不发任何请求）。
         // 这是主动放弃，不是查询失败：继续打只会更快撞上限流，代价比"显示存疑"大得多。
+        // 预算口径是"目录列举次数"（不是所有 API 调用），所以这里必须打印列举计数——
+        // 用 apiCallCountRound 会普遍大于预算，日志读起来自相矛盾。
         if (cloud && OpenListApi.isRoundBudgetExhausted()) {
             OpenListApi.markBudgetExhausted();
-            log.warn("本轮网盘 API 预算已耗尽（{}/{}），停止真实文件校验，剩余条目保持「存疑」: {}",
-                    OpenListApi.getApiCallCountRound(), OpenListApi.getRoundBudget(), ani.getTitle());
+            log.warn("本轮网盘列举预算已耗尽（{}/{}），停止真实文件校验，剩余条目保持「存疑」: {}",
+                    OpenListApi.getListingCallCountRound(), OpenListApi.getRoundBudget(), ani.getTitle());
             return LocalStateContext.unreliable(downloadPath, activeTaskKeys,
                     UnknownReason.BUDGET_EXHAUSTED);
         }

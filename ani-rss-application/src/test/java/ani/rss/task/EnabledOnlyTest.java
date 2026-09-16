@@ -1,5 +1,6 @@
 package ani.rss.task;
 
+import ani.rss.download.OpenListApi;
 import ani.rss.entity.Ani;
 import ani.rss.entity.Config;
 import ani.rss.util.other.AniUtil;
@@ -121,13 +122,75 @@ class EnabledOnlyTest {
     // ---------------- F7-5 预算取值 ----------------
 
     @Test
-    void budget_defaults_to_enabled_subscription_count() {
+    void budget_defaults_to_estimated_listings_not_subscription_count() {
         Config config = new Config();
         config.setOpenListApiBudgetPerRound(null);
-        assertEquals(80, RssTask.resolveApiBudgetPerRound(config, 80),
-                "默认 = 启用订阅数 × 1（每个订阅至少一次列举）");
-        assertEquals(1, RssTask.resolveApiBudgetPerRound(config, 0),
-                "没有订阅时也要给 1，避免预算为 0 被当成「不限制」");
+        // 50 订阅：需求估算 = 50 × 4 = 200；周期负担（默认 3 次/秒 × 15 分钟 ÷ 4）= 675 → 取 200。
+        // 旧口径给的是 50，而每个订阅实际要 1 + 子目录数 次列举，大库必然中途耗尽。
+        assertEquals(50 * RssTask.LISTINGS_PER_SUBSCRIPTION_ESTIMATE,
+                RssTask.resolveApiBudgetPerRound(config, 50));
+    }
+
+    /**
+     * 真正要守的性质是"算出来不能是 0"：0 在 {@code startRoundBudget} 的语义里是"不限制"，
+     * 所以 0 订阅也必须给出一个正数预算。这条断言不依赖具体取值，只锁意图。
+     */
+    @Test
+    void budget_is_never_zero() {
+        assertTrue(RssTask.resolveApiBudgetPerRound(new Config(), 0) > 0);
+        assertTrue(RssTask.resolveApiBudgetPerRound(null, 0) > 0);
+
+        Config zeroConfigured = new Config();
+        zeroConfigured.setOpenListApiBudgetPerRound(0);
+        assertTrue(RssTask.resolveApiBudgetPerRound(zeroConfigured, 0) > 0);
+    }
+
+    /**
+     * 订阅数超过"周期负担"时的行为：保底值胜出，等于每订阅一次列举。
+     * <p>
+     * 这是<b>有意</b>的取舍，不是漏掉的边界：让每个订阅都至少能列举一次，好过让任意一批订阅
+     * 完全不被校验——后者正是"一批订阅长期显示存疑"的成因，也正是本项要修的 bug。
+     * 代价是这一轮被限流拖住的时长约为 {@code 订阅数 ÷ 速率}（1000 订阅 / 3 次每秒 ≈ 5.5 分钟），
+     * 这已经低于默认 15 分钟周期；真要更快的全量扫描只能提高速率或缩短周期。
+     */
+    @Test
+    void library_larger_than_period_allowance_falls_back_to_one_listing_per_subscription() {
+        Config config = new Config();
+        config.setOpenListApiBudgetPerRound(null);
+        assertEquals(675, RssTask.resolveApiBudgetPerRound(config, 675),
+                "恰好等于周期负担时两者一致");
+        assertEquals(1000, RssTask.resolveApiBudgetPerRound(config, 1000),
+                "超过周期负担后由保底值决定：每订阅一次列举，旧实现只给 200");
+    }
+
+    @Test
+    void default_budget_may_exceed_the_configured_value_hard_cap() {
+        Config config = new Config();
+        config.setOpenListApiBudgetPerRound(null);
+        int budget = RssTask.resolveApiBudgetPerRound(config, 200);
+        // 200 订阅需要约 800 次列举；旧实现无论怎么算都被 200 硬顶压住，后半程订阅全被判「存疑」。
+        assertTrue(budget > OpenListApi.MAX_API_BUDGET_PER_ROUND,
+                "大库的默认预算必须能突破 200，否则修复等于没做，实际 " + budget);
+        assertEquals(675, budget, "默认速率 3 次/秒、周期 15 分钟 → 周期负担 3×900÷4 = 675");
+    }
+
+    @Test
+    void affordable_bound_follows_rate_and_period() {
+        Config config = new Config()
+                .setOpenListApiPerSecond(2)
+                .setRssSleepMinutes(60);
+        // 周期负担 = 2 × 3600 ÷ 4 = 1800；需求估算 = 500 × 4 = 2000 → 取 1800
+        assertEquals(1800, RssTask.resolveApiBudgetPerRound(config, 500));
+    }
+
+    @Test
+    void budget_never_drops_below_subscription_count() {
+        Config config = new Config()
+                .setOpenListApiPerSecond(1)
+                .setRssSleepMinutes(4);
+        // 周期负担只有 1 × 240 ÷ 4 = 60，但 500 个订阅至少要各列举一次 → 保底 500
+        assertEquals(500, RssTask.resolveApiBudgetPerRound(config, 500),
+                "每个订阅至少要能列举一次，否则会被整体判成「存疑」");
     }
 
     @Test
@@ -138,11 +201,11 @@ class EnabledOnlyTest {
     }
 
     @Test
-    void budget_is_capped_at_hard_limit() {
+    void explicit_budget_is_still_capped_at_hard_limit() {
         Config config = new Config();
         config.setOpenListApiBudgetPerRound(9999);
-        assertEquals(200, RssTask.resolveApiBudgetPerRound(config, 10),
-                "无论订阅多少，单轮最多 200 次");
+        assertEquals(OpenListApi.MAX_API_BUDGET_PER_ROUND, RssTask.resolveApiBudgetPerRound(config, 10),
+                "手填值仍受硬顶约束（防手滑）；只有计算出的默认值可以突破它");
     }
 
     @Test
@@ -157,7 +220,21 @@ class EnabledOnlyTest {
 
     @Test
     void null_config_does_not_throw() {
-        assertEquals(5, RssTask.resolveApiBudgetPerRound(null, 5));
-        assertEquals(1, RssTask.resolveApiBudgetPerRound(null, 0));
+        assertEquals(5 * RssTask.LISTINGS_PER_SUBSCRIPTION_ESTIMATE,
+                RssTask.resolveApiBudgetPerRound(null, 5));
+        assertEquals(RssTask.LISTINGS_PER_SUBSCRIPTION_ESTIMATE,
+                RssTask.resolveApiBudgetPerRound(null, 0));
+    }
+
+    @Test
+    void affordable_listings_uses_effective_rate_not_raw_config() {
+        // 速率未配置时应按限流器的默认值 3 计算，而不是当成 0
+        assertEquals(3 * 900 / 4, RssTask.resolveAffordableListingsPerRound(new Config()));
+        // 超过上限的速率按上限 20 钳制，与 OpenListApi.effectiveApiPerSecond 保持一致
+        assertEquals(20 * 900 / 4,
+                RssTask.resolveAffordableListingsPerRound(new Config().setOpenListApiPerSecond(999)));
+        // 速率低于下限按 1 钳制
+        assertEquals(1 * 900 / 4,
+                RssTask.resolveAffordableListingsPerRound(new Config().setOpenListApiPerSecond(0)));
     }
 }
