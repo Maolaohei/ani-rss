@@ -338,6 +338,79 @@ class AniLocksTest {
         AniLocks.lockFor(ani).writeLock().unlock();
     }
 
+    // ---------------- 锁对象回收（P2-4） ----------------
+
+    @Test
+    void release_drops_the_lock_when_nobody_holds_it() {
+        AniLocks.lockFor("rel1");
+        assertEquals(1, AniLocks.size());
+
+        AniLocks.release("rel1");
+
+        assertEquals(0, AniLocks.size());
+        // 回收后重新取锁应当拿到一把全新的、可用的锁
+        assertTrue(AniLocks.lockFor("rel1").writeLock().tryLock());
+        AniLocks.lockFor("rel1").writeLock().unlock();
+    }
+
+    /**
+     * 有线程正在持锁时<b>绝不能</b>回收：移除映射后新请求会拿到一把新锁，
+     * 与旧锁的持有者失去互斥——那是比"锁对象残留"严重得多的问题。
+     */
+    @Test
+    void release_keeps_the_lock_while_it_is_held() throws Exception {
+        Ani ani = ani("rel2");
+        AniLocks.lockFor(ani);
+        assertEquals(1, AniLocks.size());
+
+        CountDownLatch held = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        Thread writer = new Thread(() -> AniLocks.runWithWrite(ani, () -> {
+            held.countDown();
+            awaitQuietly(release);
+        }));
+        writer.start();
+        assertTrue(held.await(5, TimeUnit.SECONDS));
+
+        AniLocks.release(ani);
+
+        assertEquals(1, AniLocks.size(), "持锁期间必须放弃回收");
+        // 原锁仍在生效：此时另一个写操作依然要被阻塞
+        AtomicBoolean secondEntered = new AtomicBoolean();
+        Thread second = new Thread(() -> AniLocks.runWithWrite(ani, () -> secondEntered.set(true)));
+        second.start();
+        Thread.sleep(200);
+        assertFalse(secondEntered.get(), "回收失败后互斥必须仍然成立");
+
+        release.countDown();
+        writer.join(5000);
+        second.join(5000);
+        assertTrue(secondEntered.get());
+    }
+
+    @Test
+    void release_for_an_unknown_id_is_a_noop() {
+        assertEquals(0, AniLocks.size());
+
+        assertDoesNotThrow(() -> AniLocks.release("never-registered"));
+        assertDoesNotThrow(() -> AniLocks.release((Ani) null));
+
+        assertEquals(0, AniLocks.size(), "回收一个没登记过的 id 不该把它登记进来");
+    }
+
+    /**
+     * 反复增删订阅不该让锁对象常驻（原实现 LOCKS 只增不删，长期运行缓慢泄漏）。
+     */
+    @Test
+    void released_locks_do_not_leak_across_subscription_churn() {
+        for (int i = 0; i < 50; i++) {
+            Ani ani = ani("churn-" + i);
+            AniLocks.lockFor(ani);
+            AniLocks.release(ani);
+        }
+        assertEquals(0, AniLocks.size(), "反复增删订阅后不该留下锁对象");
+    }
+
     // ---------------- 工具 ----------------
 
     private static void awaitQuietly(CountDownLatch latch) {

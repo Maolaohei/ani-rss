@@ -207,6 +207,7 @@ public class ShareController extends BaseController {
             }
             ani.setId(UUID.fastUUID().toString());
             AniUtil.getAniList().add(ani);
+            AniUtil.invalidateIdIndex();
             added++;
             titles.add(title);
         }

@@ -20,6 +20,8 @@ import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.lang.Assert;
 import cn.hutool.core.text.StrFormatter;
+import cn.hutool.core.thread.ExecutorBuilder;
+import cn.hutool.core.thread.NamedThreadFactory;
 import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.core.util.CharsetUtil;
 import cn.hutool.core.util.ObjectUtil;
@@ -37,6 +39,9 @@ import org.springframework.web.bind.annotation.RestController;
 import java.io.File;
 import java.io.IOException;
 import java.util.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -44,6 +49,23 @@ import java.util.stream.Collectors;
 @Slf4j
 @RestController
 public class CollectionController extends BaseController {
+
+    /**
+     * 合集下载的「等待元数据 + 逐文件重命名」后处理池。
+     * <p>
+     * 这段逻辑最坏要跑 ~32.5 秒（5×500ms 等元数据 + 30×1000ms 等重命名），
+     * 原实现直接在 Tomcat 请求线程里跑：并发几个合集就能吃掉一批 worker（上限 100），
+     * 且中途没有任何进度反馈（P1-8）。这里挪到独立线程，请求立即返回。
+     * <p>
+     * 2 个线程 + 有界队列：合集下载本身是低频人工操作，够用且不会无限堆积。
+     */
+    private static final ExecutorService COLLECTION_POST_POOL = ExecutorBuilder.create()
+            .setCorePoolSize(2)
+            .setMaxPoolSize(2)
+            .setWorkQueue(new LinkedBlockingQueue<>(32))
+            .setThreadFactory(new NamedThreadFactory("collection-post", true))
+            .setHandler(new ThreadPoolExecutor.CallerRunsPolicy())
+            .build();
 
     @Resource
     private DownloadService downloadService;
@@ -96,80 +118,128 @@ public class CollectionController extends BaseController {
         TorrentsInfo torrentsInfo = new TorrentsInfo()
                 .setHash(torrentFile.getHexHash());
 
-        List<qBittorrent.FileEntity> files = new ArrayList<>();
-        for (int i = 0; i < 5; i++) {
-            ThreadUtil.sleep(500);
-            try {
-                files.addAll(qBittorrent.files(torrentsInfo, false, config));
-            } catch (Exception e) {
-                log.error(e.getMessage(), e);
-            }
-            if (!files.isEmpty()) {
-                // 添加下载完成
-                break;
-            }
-        }
-
-        Map<String, String> reNameMap = plan
-                .stream()
-                .map(item -> {
-                    Optional<qBittorrent.FileEntity> fileEntity = files.stream()
-                            .filter(f -> new File(f.getName()).getName().equals(new File(item.getTitle()).getName()))
-                            .filter(f -> f.getSize().longValue() == item.getLength())
-                            .findFirst();
-                    if (fileEntity.isEmpty()) {
-                        return null;
-                    }
-                    String oldPath = fileEntity.get().getName();
-                    return item.setTitle(oldPath);
-                })
-                .filter(Objects::nonNull)
-                .collect(Collectors.toMap(
-                        Item::getTitle,
-                        Item::getReName
-                ));
-
-        String host = config.getDownloadToolHost();
-
-        for (int i = 0; i < 30; i++) {
-            for (qBittorrent.FileEntity file : files) {
-                String oldPath = file.getName();
-                String newPath = reNameMap.get(oldPath);
-
-                if (!reNameMap.containsKey(oldPath)) {
-                    if (!reNameMap.containsValue(oldPath) && file.getPriority() > 0) {
-                        HttpReq.post(host + "/api/v2/torrents/filePrio")
-                                .form("hash", torrentFile.getHexHash())
-                                .form("id", file.getIndex())
-                                .form("priority", 0)
-                                .thenFunction(HttpResponse::isOk);
-                    }
-                    continue;
-                }
-                log.info("重命名 {} ==> {}", oldPath, newPath);
-                HttpReq.post(host + "/api/v2/torrents/renameFile")
-                        .form("hash", torrentFile.getHexHash())
-                        .form("oldPath", oldPath)
-                        .form("newPath", newPath)
-                        .thenFunction(HttpResponse::isOk);
-            }
-            files.clear();
-            files.addAll(qBittorrent.files(torrentsInfo, false, config));
-
-            if (CollUtil.containsAll(files.stream()
-                    .map(qBittorrent.FileEntity::getName)
-                    .toList(), reNameMap.values())) {
-                // 所有命名已完成
-                break;
-            }
-            // 命名有遗漏 继续
-            ThreadUtil.sleep(1000);
-        }
-
-        qBittorrent.start(torrentsInfo, config);
-        // 合集关联的番剧也写入订阅列表(仅入列、不轮询、去重), 使其在「订阅」里可见可管理
+        // 合集关联的番剧也写入订阅列表(仅入列、不轮询、去重), 使其在「订阅」里可见可管理。
+        // 放在提交后立即执行：后处理已异步化，若等它跑完再入列，用户要 ~32.5s 后才看得到订阅
         AniUtil.addCollectionAni(ani);
-        return Result.success("已经开始下载合集");
+
+        // 等待元数据 + 逐文件重命名放后台：最坏 ~32.5s，不能占用 Tomcat 请求线程（P1-8）
+        COLLECTION_POST_POOL.execute(() -> finishQbCollection(torrentsInfo, plan, config));
+
+        return Result.success("已经开始下载合集, 正在后台等待元数据并重命名, 进度可在日志中查看");
+    }
+
+    /**
+     * qBittorrent 合集后处理：等元数据 → 逐文件重命名 → 启动任务。
+     * <p>
+     * 已移到 {@link #COLLECTION_POST_POOL}，不再阻塞请求线程。相比原实现还做了两件事：
+     * <ul>
+     *   <li>记录「已经成功发过重命名」的旧路径，避免后续轮次对同一文件重发 {@code renameFile}；</li>
+     *   <li>每 5 轮打一行进度日志——原实现全程无任何输出，用户只能干等。</li>
+     * </ul>
+     */
+    private static void finishQbCollection(TorrentsInfo torrentsInfo, List<Item> plan, Config config) {
+        try {
+            List<qBittorrent.FileEntity> files = new ArrayList<>();
+            for (int i = 0; i < 5; i++) {
+                ThreadUtil.sleep(500);
+                try {
+                    files.addAll(qBittorrent.files(torrentsInfo, false, config));
+                } catch (Exception e) {
+                    log.error(e.getMessage(), e);
+                }
+                if (!files.isEmpty()) {
+                    // 添加下载完成
+                    break;
+                }
+            }
+
+            Map<String, String> reNameMap = plan
+                    .stream()
+                    .map(item -> {
+                        Optional<qBittorrent.FileEntity> fileEntity = files.stream()
+                                .filter(f -> new File(f.getName()).getName().equals(new File(item.getTitle()).getName()))
+                                .filter(f -> f.getSize().longValue() == item.getLength())
+                                .findFirst();
+                        if (fileEntity.isEmpty()) {
+                            return null;
+                        }
+                        String oldPath = fileEntity.get().getName();
+                        return item.setTitle(oldPath);
+                    })
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toMap(
+                            Item::getTitle,
+                            Item::getReName
+                    ));
+
+            if (reNameMap.isEmpty()) {
+                log.warn("合集后处理: 未匹配到任何待重命名文件, 直接启动任务");
+                qBittorrent.start(torrentsInfo, config);
+                return;
+            }
+
+            String host = config.getDownloadToolHost();
+            // 已经发过重命名的旧路径：避免下一轮刷新后重复 POST
+            Set<String> renamedPaths = new HashSet<>();
+
+            for (int i = 0; i < 30; i++) {
+                for (qBittorrent.FileEntity file : files) {
+                    String oldPath = file.getName();
+                    String newPath = reNameMap.get(oldPath);
+
+                    if (!reNameMap.containsKey(oldPath)) {
+                        if (!reNameMap.containsValue(oldPath) && file.getPriority() > 0) {
+                            HttpReq.post(host + "/api/v2/torrents/filePrio")
+                                    .form("hash", torrentsInfo.getHash())
+                                    .form("id", file.getIndex())
+                                    .form("priority", 0)
+                                    .thenFunction(HttpResponse::isOk);
+                        }
+                        continue;
+                    }
+                    if (!renamedPaths.add(oldPath)) {
+                        // 本轮已经发过, 等下一轮刷新结果
+                        continue;
+                    }
+                    log.info("重命名 {} ==> {}", oldPath, newPath);
+                    HttpReq.post(host + "/api/v2/torrents/renameFile")
+                            .form("hash", torrentsInfo.getHash())
+                            .form("oldPath", oldPath)
+                            .form("newPath", newPath)
+                            .thenFunction(HttpResponse::isOk);
+                }
+                files.clear();
+                files.addAll(qBittorrent.files(torrentsInfo, false, config));
+
+                if (CollUtil.containsAll(files.stream()
+                        .map(qBittorrent.FileEntity::getName)
+                        .toList(), reNameMap.values())) {
+                    // 所有命名已完成
+                    log.info("合集重命名完成, 共 {} 个文件", reNameMap.size());
+                    break;
+                }
+                // 命名有遗漏 继续
+                if (i % 5 == 0) {
+                    log.info("合集重命名进行中: 第 {} 轮, 已完成 {}/{}",
+                            i + 1, countRenamed(files, reNameMap), reNameMap.size());
+                }
+                ThreadUtil.sleep(1000);
+            }
+
+            qBittorrent.start(torrentsInfo, config);
+        } catch (Exception e) {
+            log.error("合集后处理失败: {}", e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 统计已按计划重命名完成的文件数（按当前文件列表的实际名称比对）
+     */
+    private static int countRenamed(List<qBittorrent.FileEntity> files, Map<String, String> reNameMap) {
+        Set<String> names = files.stream()
+                .map(qBittorrent.FileEntity::getName)
+                .collect(Collectors.toSet());
+        return (int) reNameMap.values().stream().filter(names::contains).count();
     }
 
     /**

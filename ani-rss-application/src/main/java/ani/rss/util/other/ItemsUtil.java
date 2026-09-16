@@ -18,6 +18,8 @@ import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.lang.Assert;
 import cn.hutool.core.text.StrFormatter;
+import cn.hutool.core.thread.ExecutorBuilder;
+import cn.hutool.core.thread.NamedThreadFactory;
 import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.core.util.*;
 import cn.hutool.crypto.digest.DigestUtil;
@@ -46,6 +48,25 @@ public class ItemsUtil {
         Arrays.setAll(RSS_FETCH_LOCKS, ignored -> new Object());
     }
     private static final long RSS_LAST_SUCCESS_TTL_MS = TimeUnit.MINUTES.toMillis(15);
+
+    /**
+     * 备用 RSS 抓取共用的线程池。
+     * <p>
+     * 原实现是「每个订阅每轮 {@code newFixedThreadPool(≤3)} + {@code finally shutdownNow()}」：
+     * 200 订阅一轮就是 200 个池的创建与销毁（P2-3）。
+     * <p>
+     * 池大小 8：任务体是阻塞式 HTTP（{@code getItems(ani, url, subgroup)} → {@code getRss}），
+     * 且不会向本池再提交任务（无自等待，不会死锁）；RSS 并发度默认 3、每订阅扇出 ≤3，
+     * 8 个线程足够覆盖并留有余量。队列满时 {@link ThreadPoolExecutor.CallerRunsPolicy}
+     * 退回调用线程执行——调用方本来就在 {@code future.get()} 上等，正好形成背压。
+     */
+    private static final ExecutorService STANDBY_RSS_POOL = ExecutorBuilder.create()
+            .setCorePoolSize(8)
+            .setMaxPoolSize(8)
+            .setWorkQueue(new LinkedBlockingQueue<>(256))
+            .setThreadFactory(new NamedThreadFactory("standby-rss", true))
+            .setHandler(new ThreadPoolExecutor.CallerRunsPolicy())
+            .build();
 
     /**
      * 获取视频列表
@@ -77,32 +98,26 @@ public class ItemsUtil {
 
         List<StandbyRss> standbyRssList = ani.getStandbyRssList();
         if (CollUtil.isNotEmpty(standbyRssList)) {
-            // 备用 RSS：最多 3 路并发，去掉固定 1s sleep
-            int poolSize = Math.min(3, standbyRssList.size());
-            ExecutorService pool = Executors.newFixedThreadPool(poolSize);
-            try {
-                List<Future<List<Item>>> futures = new ArrayList<>();
-                for (StandbyRss rss : standbyRssList) {
-                    futures.add(pool.submit(() -> {
-                        String standbySubgroup = StrUtil.blankToDefault(rss.getLabel(), "未知字幕组");
-                        Ani clone = ObjUtil.clone(ani);
-                        clone.setOffset(rss.getOffset());
-                        return ItemsUtil.getItems(clone, rss.getUrl(), standbySubgroup)
-                                .stream()
-                                .peek(item -> item.setMaster(false))
-                                .toList();
-                    }));
+            // 备用 RSS：最多 3 路并发，去掉固定 1s sleep；线程池静态共享（P2-3）
+            List<Future<List<Item>>> futures = new ArrayList<>();
+            for (StandbyRss rss : standbyRssList) {
+                futures.add(STANDBY_RSS_POOL.submit(() -> {
+                    String standbySubgroup = StrUtil.blankToDefault(rss.getLabel(), "未知字幕组");
+                    Ani clone = ObjUtil.clone(ani);
+                    clone.setOffset(rss.getOffset());
+                    return ItemsUtil.getItems(clone, rss.getUrl(), standbySubgroup)
+                            .stream()
+                            .peek(item -> item.setMaster(false))
+                            .toList();
+                }));
+            }
+            for (Future<List<Item>> future : futures) {
+                try {
+                    items.addAll(future.get());
+                } catch (Exception e) {
+                    log.error("备用RSS获取失败: {}", e.getMessage());
+                    log.error(e.getMessage(), e);
                 }
-                for (Future<List<Item>> future : futures) {
-                    try {
-                        items.addAll(future.get());
-                    } catch (Exception e) {
-                        log.error("备用RSS获取失败: {}", e.getMessage());
-                        log.error(e.getMessage(), e);
-                    }
-                }
-            } finally {
-                pool.shutdownNow();
             }
         }
         // 多字幕组共存模式

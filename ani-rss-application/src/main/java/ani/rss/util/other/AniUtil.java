@@ -35,12 +35,103 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Slf4j
 public class AniUtil {
 
     private static volatile List<Ani> ANI_LIST = new CopyOnWriteArrayList<>();
     public static final String FILE_NAME = "ani.v2.json";
+
+    /**
+     * 运行时状态回写的合并窗口（毫秒）。
+     * <p>
+     * {@code doSync()} 每次都会把<b>整个订阅列表</b>序列化 + 写临时文件 + 原子 move，
+     * 200 订阅一轮里每个状态变化的订阅各触发一次就是 200 次全量写（P2-1）。
+     * 这里把窗口内的多次回写合并成一次尾部落盘：首次调用仍立即写（结构性变更的可见性不受影响），
+     * 之后 500ms 内的回写只排队，不丢数据、只延后。
+     */
+    private static final long SYNC_THROTTLE_MS = 500L;
+
+    /**
+     * 上次真正落盘的时刻。{@link System#nanoTime()} 的绝对值没有意义（且会回绕），
+     * 只用于相减判定是否还在节流窗口内。
+     */
+    private static final AtomicLong LAST_SYNC_NANOS = new AtomicLong(0L);
+
+    /** 是否已排入一次尾部落盘，避免同一窗口内重复排队 */
+    private static final AtomicBoolean FLUSH_SCHEDULED = new AtomicBoolean(false);
+
+    /** 上次落盘的内容，用于"内容未变则跳过"，省掉无意义的临时文件 + 原子 move */
+    private static volatile String LAST_WRITTEN_JSON;
+
+    /**
+     * 订阅 id → 订阅 的正向索引（P2-14）。
+     * <p>
+     * 全项目有 50+ 处 {@code getAniList().stream().filter(...)}，其中"按 id 反查"是最常见的一类
+     * （预览回写、批量操作、外部接口按 id 取订阅）。订阅数上三位数后，这些 O(n) 过滤叠加起来
+     * 是实打实的开销。
+     * <p>
+     * 索引<b>惰性构建</b>、并在所有结构变更点整体失效。失效点有两重保障：
+     * <ol>
+     *   <li>所有订阅增删点都会调用 {@link #sync()}，因此显式失效收敛在一处；
+     *       调用方还应在改动列表后立刻调用 {@link #invalidateIdIndex()}，把"改完到 sync 之间"的窗口也关掉。</li>
+     *   <li>索引自带「列表引用 + 元素个数」校验（{@link IdIndex#stillValid()}），
+     *       将来若有人绕过 sync() 直接改列表，最坏也只是退化为重建，不会返回陈旧条目。</li>
+     * </ol>
+     */
+    private static volatile IdIndex ANI_ID_INDEX;
+
+    /**
+     * 索引快照。{@code source}/{@code size} 只用于判断快照是否还对应当前的订阅列表。
+     */
+    private record IdIndex(Map<String, Ani> byId, List<Ani> source, int size) {
+        boolean stillValid() {
+            List<Ani> current = ANI_LIST;
+            return source == current && size == current.size();
+        }
+    }
+
+    /**
+     * 订阅列表结构已变更：丢弃 id 索引，下次查询时重建。
+     * <p>
+     * 只置空引用，代价可忽略，因此在每个增删点直接调用也没问题。
+     */
+    public static void invalidateIdIndex() {
+        ANI_ID_INDEX = null;
+    }
+
+    /**
+     * 按 id 查订阅（P2-14）。返回的是 {@link #getAniList()} 里的<b>活对象</b>，
+     * 调用方若要修改它，请自行确认并发语义（或按需拷贝）。
+     * <p>
+     * 未命中返回 {@link Optional#empty()}——与 {@code stream().filter(...).findFirst()} 语义一致。
+     */
+    public static Optional<Ani> findById(String id) {
+        if (StrUtil.isBlank(id)) {
+            return Optional.empty();
+        }
+        IdIndex index = ANI_ID_INDEX;
+        if (index == null || !index.stillValid()) {
+            index = buildIdIndex();
+            ANI_ID_INDEX = index;
+        }
+        return Optional.ofNullable(index.byId().get(id));
+    }
+
+    private static IdIndex buildIdIndex() {
+        List<Ani> current = ANI_LIST;
+        Map<String, Ani> byId = new HashMap<>(Math.max(16, current.size() * 2));
+        for (Ani ani : current) {
+            if (ani == null || StrUtil.isBlank(ani.getId())) {
+                continue;
+            }
+            byId.put(ani.getId(), ani);
+        }
+        return new IdIndex(byId, current, current.size());
+    }
 
     /**
      * 订阅增删操作的锁，防止 TOCTOU 竞态（添加订阅 / 删除订阅 / 添加合集订阅 共用）
@@ -186,9 +277,11 @@ public class AniUtil {
      * 而预览、每下完一集都会触发回写，等于把缓存废掉。
      */
     public static synchronized void sync() {
-        // 订阅已变更：下载路径反向索引 + 本地状态快照失效
+        // 订阅已变更：下载路径反向索引 + 本地状态快照 + id 索引失效
         DownloadService.invalidateDownloadPathIndex();
-        doSync();
+        invalidateIdIndex();
+        // 结构性变更不节流：调用方（增删订阅）随后可能立刻读盘
+        doSyncNow();
     }
 
     /**
@@ -199,7 +292,64 @@ public class AniUtil {
      * 因此失效缓存既无必要、代价又极大（预览是最常用入口，每次都清空等于没有缓存）。
      */
     public static synchronized void syncStateOnly() {
+        if (inThrottleWindow()) {
+            // 窗口内：不立即写盘，排一次尾部落盘即可（内容不丢，只是延后 ≤ SYNC_THROTTLE_MS）
+            scheduleTrailingFlush();
+            return;
+        }
+        doSyncNow();
+    }
+
+    /**
+     * 是否还在落盘节流窗口内
+     */
+    private static boolean inThrottleWindow() {
+        long last = LAST_SYNC_NANOS.get();
+        if (last == 0L) {
+            // 从未落盘过，不做节流
+            return false;
+        }
+        return System.nanoTime() - last < TimeUnit.MILLISECONDS.toNanos(SYNC_THROTTLE_MS);
+    }
+
+    /**
+     * 排队一次尾部落盘（同一窗口内只会排一次）
+     */
+    private static void scheduleTrailingFlush() {
+        if (!FLUSH_SCHEDULED.compareAndSet(false, true)) {
+            return;
+        }
+        ThreadUtil.execute(() -> {
+            ThreadUtil.sleep(SYNC_THROTTLE_MS);
+            FLUSH_SCHEDULED.set(false);
+            flushPending();
+        });
+    }
+
+    /**
+     * 尾部落盘：期间若已有人写过（时间戳被刷新）则无需重复写
+     */
+    private static synchronized void flushPending() {
+        if (inThrottleWindow()) {
+            return;
+        }
+        doSyncNow();
+    }
+
+    private static void doSyncNow() {
+        LAST_SYNC_NANOS.set(System.nanoTime());
         doSync();
+    }
+
+    /**
+     * 仅供测试：复位落盘节流窗口。
+     * <p>
+     * 节流状态是 JVM 级静态量，用例之间会互相影响（表现为"单独跑通过、全量跑失败"）。
+     * 调用后还需等一个窗口让已排队的尾部落盘跑完，否则它可能落到下一个用例的临时目录里。
+     */
+    static void resetSyncThrottleForTest() {
+        LAST_SYNC_NANOS.set(0L);
+        FLUSH_SCHEDULED.set(false);
     }
 
     private static void doSync() {
@@ -213,10 +363,22 @@ public class AniUtil {
                 }
             }
             String json = GsonStatic.toJson(ANI_LIST);
+
+            /*
+            内容未变则跳过：落盘是「序列化 + 写临时文件 + 原子 move」三件事，
+            序列化无法避免（要算出 json 才知道有没有变），但后两件可以省。
+            文件不存在时不能跳过（外部删除/配置恢复后必须重新写出来）。
+            */
+            if (json.equals(LAST_WRITTEN_JSON) && configFile.exists()) {
+                log.debug("订阅内容未变化, 跳过落盘 {}", configFile);
+                return;
+            }
+
             File temp = new File(configFile + ".temp");
             FileUtil.del(temp);
             FileUtil.writeUtf8String(json, temp);
             FileUtils.move(temp.toPath(), configFile.toPath());
+            LAST_WRITTEN_JSON = json;
             log.debug("保存成功 {}", configFile);
         } catch (Exception e) {
             log.error("保存失败 {}", configFile);

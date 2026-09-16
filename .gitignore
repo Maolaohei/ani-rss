@@ -54,3 +54,6 @@ build.info
 *.versionsBackup
 .pnpm-store
 /test/
+
+# Windows 组件服务误以未展开的 %SystemDrive% 为目录名写出的缓存, 不属于仓库内容
+%SystemDrive%/

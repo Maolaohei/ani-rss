@@ -584,6 +584,25 @@ public class ConfigUtil {
      * 不再加 synchronized：导出先在锁内把待打包文件快照到暂存目录，
      * 再在锁外打包，避免长时间打包阻塞所有 sync/load。
      */
+    /**
+     * 把暂存目录里的 json 副本重写为格式化（缩进）版本，仅供导出使用。
+     * <p>
+     * 解析失败或文件缺失时静默跳过：导出不应因为"美化失败"而整个失败，
+     * 原样导出 compact 版本也完全可用。
+     */
+    private static void prettifyStaged(File stagingDir, String fileName) {
+        try {
+            File staged = new File(stagingDir, fileName);
+            if (!staged.exists()) {
+                return;
+            }
+            String json = FileUtil.readUtf8String(staged);
+            FileUtil.writeUtf8String(GsonStatic.prettyJson(json), staged);
+        } catch (Exception e) {
+            log.debug("导出美化 {} 失败, 保持原样: {}", fileName, e.getMessage());
+        }
+    }
+
     public static void backup(OutputStream outputStream) {
         File stagingDir = null;
         List<File> backupFiles = List.of();
@@ -613,6 +632,10 @@ public class ConfigUtil {
                     FileUtil.copy(src, dst, true);
                     staged.add(dst);
                 }
+                // 落盘已改 compact（P1-12，体积 -31%），但导出的 json 是用户会直接打开看的，
+                // 这里用格式化实例把暂存副本重写一遍，两边的收益都拿到
+                prettifyStaged(stagingDir, AniUtil.FILE_NAME);
+                prettifyStaged(stagingDir, ConfigUtil.FILE_NAME);
                 backupFiles = staged;
             } catch (Exception e) {
                 // 快照失败: 清理暂存目录后上抛, 不产出半截备份

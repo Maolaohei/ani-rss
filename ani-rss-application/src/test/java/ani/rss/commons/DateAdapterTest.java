@@ -113,7 +113,9 @@ class DateAdapterTest {
                 .setReleaseDate(dateOf(2023, 10, 1));
 
         String json = GsonStatic.toJson(ani);
-        assertTrue(json.contains("\"releaseDate\": \"2023-10-01\""),
+        // 比对前去掉空白：这里要钉的是"日期格式"，不是"有没有缩进"
+        // （共享 GSON 自 P1-12 起输出 compact，格式化能力挪到了 GsonStatic.PRETTY_GSON）
+        assertTrue(json.replaceAll("\\s", "").contains("\"releaseDate\":\"2023-10-01\""),
                 "releaseDate 应被序列化为 yyyy-MM-dd，实际 JSON: " + json);
 
         Ani parsed = GsonStatic.fromJson(json, Ani.class);
@@ -138,7 +140,8 @@ class DateAdapterTest {
                 futures.add(pool.submit(() -> {
                     for (int n = 0; n < iterations; n++) {
                         String json = GsonStatic.toJson(new Ani().setId("id-" + n).setReleaseDate(fixed));
-                        if (!json.contains("\"releaseDate\": \"2020-01-01\"")) {
+                        // 同样只比对日期格式，不依赖缩进（P1-12 后共享 GSON 输出 compact）
+                        if (!json.replaceAll("\\s", "").contains("\"releaseDate\":\"2020-01-01\"")) {
                             return "序列化结果异常: " + json;
                         }
                         Ani parsed = GsonStatic.fromJson(json, Ani.class);

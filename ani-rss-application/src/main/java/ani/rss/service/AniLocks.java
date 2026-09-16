@@ -40,6 +40,53 @@ import java.util.function.Supplier;
  *   <li><b>只在外层入口加锁</b>。写锁可重入（同线程），但依赖重入会把锁边界散到各处，
  *       后续维护者很难判断谁才是真正的临界区。</li>
  * </ol>
+ *
+ * <h2>锁覆盖矩阵（读之前先看这张表，别假设"加了锁所以安全"）</h2>
+ * <table border="1">
+ *   <caption>订阅锁的实际覆盖面</caption>
+ *   <tr><th>路径</th><th>是否取订阅锁</th><th>说明</th></tr>
+ *   <tr>
+ *     <td>预览 {@code AniController.previewAni}</td>
+ *     <td>读（{@code callWithTryRead}，300ms）</td>
+ *     <td>F6-1</td>
+ *   </tr>
+ *   <tr>
+ *     <td>手动搜索 {@code ManualSearchController}</td>
+ *     <td>读（{@code callWithTryRead}）</td>
+ *     <td>F6-1</td>
+ *   </tr>
+ *   <tr>
+ *     <td>媒体库详情 {@code LibraryController.libraryDetail}</td>
+ *     <td>读（{@code callWithTryRead}）</td>
+ *     <td>F6-1</td>
+ *   </tr>
+ *   <tr>
+ *     <td>媒体库批量 {@code LibraryController.library}</td>
+ *     <td><b>不取</b></td>
+ *     <td>F6-5 矩阵刻意为之：批量路径遍历全部订阅，逐个 {@code tryLock(300ms)} 在多订阅
+ *         同时下载时会线性叠加成秒级延迟；它读的只是展示计数，不会诱发写动作</td>
+ *   </tr>
+ *   <tr>
+ *     <td><b>RSS 轮次主判定路径</b>（{@code RssTask} 构建本地集数索引、列举网盘、
+ *         判定 {@code itemDownloaded}）</td>
+ *     <td><b>不取</b></td>
+ *     <td><b>这是最重要的一条</b>：F6 的"读写互斥"实际只保护了三个展示面。
+ *         主判定路径靠 F4 静默窗口（下载/改名窗口内按 infoHash 识别在途任务）兜底，
+ *         而不是靠订阅锁。见 {@code 稳定性与性能专项优化清单.md} P1-6——
+ *         若要给判定段补锁，<b>只能用 {@code callWithTryRead}</b>，
+ *         绝不能改成无条件 {@code lock()}：写锁在下载期间是分钟级，会让整轮卡死</td>
+ *   </tr>
+ *   <tr>
+ *     <td>写：{@code DownloadService.downloadAni / retryFailedItem / forceDownloadItem}</td>
+ *     <td>写</td>
+ *     <td>F6-2</td>
+ *   </tr>
+ *   <tr>
+ *     <td>写：{@code RenameTask}（整段）、{@code TorrentController.deleteTorrent}</td>
+ *     <td>写</td>
+ *     <td>F6-2；{@code RenameTask} 用 {@code findAniByDownloadPath} 反查订阅拿锁键</td>
+ *   </tr>
+ * </table>
  */
 @Slf4j
 public final class AniLocks {
@@ -177,9 +224,50 @@ public final class AniLocks {
 
     // ---------------- 诊断 ----------------
 
+    // ---------------- 回收 ----------------
+
     /**
-     * 当前登记在册的订阅锁数量。订阅删除后锁对象不回收（数量级很小，且回收需要额外的引用计数，
-     * 收益不抵复杂度），这里只用于诊断与测试。
+     * 订阅被删除/被替换后回收它的锁对象（P2-4）。
+     * <p>
+     * 原实现里 {@link #LOCKS} 只增不删：反复增删订阅会让锁对象常驻（长期运行缓慢泄漏）。
+     * <p>
+     * <b>只在能安全回收时才回收</b>——必须同时满足：
+     * <ol>
+     *   <li>能立刻拿到写锁（说明当前没有读者/写者持有它）。拿不到通常意味着该订阅正在下载或改名，
+     *       此时<b>直接放弃回收</b>：让残留的锁对象继续生效，比"换一把新锁从而绕过互斥"安全得多。</li>
+     *   <li>没有线程在排队等这把锁（否则移除后它仍持旧锁、新请求拿新锁，互斥被绕开）。</li>
+     * </ol>
+     * 因此本方法<b>是尽力而为的</b>：漏掉几个锁对象不会造成任何功能问题，最坏情况是下次删除时再回收。
+     */
+    public static void release(Ani ani) {
+        release(idOf(ani));
+    }
+
+    public static void release(String aniId) {
+        String key = idOf(aniId);
+        ReentrantReadWriteLock lock = LOCKS.get(key);
+        if (lock == null) {
+            return;
+        }
+        ReentrantReadWriteLock.WriteLock writeLock = lock.writeLock();
+        if (!writeLock.tryLock()) {
+            log.debug("订阅 {} 的锁正被占用, 跳过回收（残留锁对象不影响正确性）", key);
+            return;
+        }
+        try {
+            if (lock.hasQueuedThreads()) {
+                log.debug("订阅 {} 有线程在排队等锁, 跳过回收", key);
+                return;
+            }
+            LOCKS.remove(key, lock);
+        } finally {
+            writeLock.unlock();
+        }
+    }
+
+    /**
+     * 当前登记在册的订阅锁数量。订阅删除时会尽力回收（见 {@link #release(Ani)}），
+     * 拿不到锁的少数残留对象保留到进程重启。这里只用于诊断与测试。
      */
     public static int size() {
         return LOCKS.size();

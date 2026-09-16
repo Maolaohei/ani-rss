@@ -6,6 +6,7 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
+import com.google.gson.JsonParser;
 import com.google.gson.TypeAdapter;
 import com.google.gson.TypeAdapterFactory;
 import com.google.gson.reflect.TypeToken;
@@ -92,6 +93,23 @@ public class GsonStatic {
             .create();
 
     /**
+     * 仅供「给人看」的导出场景使用的格式化实例（缩进 + 换行）。
+     * <p>
+     * {@link #GSON} <b>刻意不</b>开 {@code setPrettyPrinting()}（P1-12）：
+     * 它是全应用唯一的 Gson，同时承担落盘、OpenList 请求体与外部响应解析。
+     * 解析时空白会被跳过，所以 pretty 对解析无害，但对<b>写出</b>是纯损耗——
+     * 实测 200 条订阅（30+ 字段）pretty 224.7KB vs compact 171.4KB，<b>1.31×（+31%）</b>；
+     * 请求体里那些换行更是每次出网都白带。
+     * <p>
+     * 导出（{@code /exportConfig} 的 zip）里仍然给出格式化后的 {@code ani.v2.json} /
+     * {@code config.v2.json}——这两个文件是用户会直接打开看的。
+     */
+    public static final Gson PRETTY_GSON = baseBuilder()
+            .setPrettyPrinting()
+            .registerTypeAdapterFactory(ISOLATED_TMDB_FACTORY)
+            .create();
+
+    /**
      * 除 {@link #ISOLATED_TMDB_FACTORY} 之外的全部 Gson 配置。
      * <p>
      * 抽成方法是为了让线程独占实例与共享实例的配置<b>不可能发生漂移</b>；
@@ -103,7 +121,6 @@ public class GsonStatic {
                 .disableHtmlEscaping()
                 .disableJdkUnsafe()
                 .disableInnerClassSerialization()
-                .setPrettyPrinting()
                 .setDateFormat(DatePattern.NORM_DATETIME_PATTERN)
                 .registerTypeAdapter(TimeZone.class, new TimeZoneSerializer())
                 .registerTypeHierarchyAdapter(IntEnum.class, new IntEnumDeserializer());
@@ -145,6 +162,24 @@ public class GsonStatic {
 
     public static String toJson(Object obj) {
         return GSON.toJson(obj);
+    }
+
+    /**
+     * 格式化输出，仅用于导出/给人看的场景（见 {@link #PRETTY_GSON}）
+     */
+    public static String toPrettyJson(Object obj) {
+        return PRETTY_GSON.toJson(obj);
+    }
+
+    /**
+     * 把一段 JSON 文本重排为格式化输出。
+     * <p>
+     * 走 {@link JsonParser} → {@link JsonElement} 而不是"解析成 {@code Object} 再序列化"：
+     * 后者会把数字统一读成 {@code Double}，大整数（如文件 size）会被写成科学计数法。
+     * {@code JsonElement} 保留原始字面量，往返无损。
+     */
+    public static String prettyJson(String json) {
+        return PRETTY_GSON.toJson(JsonParser.parseString(json));
     }
 
 }

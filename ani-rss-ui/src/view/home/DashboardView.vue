@@ -324,9 +324,25 @@ const loadConfig = async () => {
   config.value = res.data || config.value
 }
 
+/**
+ * 按 hash 做增量更新：只替换内容真正变化的任务对象，未变的沿用旧引用。
+ * 整体替换会让 Vue 认为每张卡片都变了、每次轮询都全量重渲染（P1-11）。
+ * 键序稳定（同一接口的 JSON），因此直接比字符串即可。
+ */
+const mergeTorrents = list => {
+  const previous = new Map(torrentsInfos.value.map(item => [item.hash, item]))
+  return (list || []).map(item => {
+    const old = previous.get(item.hash)
+    if (old && JSON.stringify(old) === JSON.stringify(item)) {
+      return old
+    }
+    return item
+  })
+}
+
 const loadTorrents = async () => {
   const res = await http.torrentsInfos()
-  torrentsInfos.value = res.data || []
+  torrentsInfos.value = mergeTorrents(res.data)
 }
 
 const loadHistory = async () => {
@@ -353,15 +369,46 @@ const loadAll = async () => {
   }
 }
 
-const startPolling = () => {
-  if (timer) {
+/*
+轮询间隔自适应（P1-11）：有任务在跑时 5 秒，空闲时 30 秒。
+原实现固定 5 秒，而 /torrentsInfos 会真的打到下载器 API，与 RSS 轮次、
+网盘限流形成叠加争抢；而首页绝大多数时间是空闲的，那 5 秒一次纯属白问。
+改成 setTimeout 自调度（而不是 setInterval），间隔才能在每轮结束时重新计算。
+*/
+const POLL_ACTIVE_MS = 5000
+const POLL_IDLE_MS = 30000
+let polling = false
+
+const pollIntervalMs = () => (downloadingList.value.length > 0 || seedingList.value.length > 0)
+    ? POLL_ACTIVE_MS
+    : POLL_IDLE_MS
+
+const scheduleNextPoll = () => {
+  if (!polling) {
     return
   }
-  timer = setInterval(loadTorrents, 5000)
+  timer = setTimeout(async () => {
+    try {
+      await loadTorrents()
+    } catch (e) {
+      // 单次失败不影响后续轮询
+    } finally {
+      scheduleNextPoll()
+    }
+  }, pollIntervalMs())
+}
+
+const startPolling = () => {
+  if (polling) {
+    return
+  }
+  polling = true
+  scheduleNextPoll()
 }
 
 const stopPolling = () => {
-  clearInterval(timer)
+  polling = false
+  clearTimeout(timer)
   timer = undefined
 }
 

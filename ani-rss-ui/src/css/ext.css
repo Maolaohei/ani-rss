@@ -2,9 +2,37 @@
     display: flex;
 }
 
+.flex-wrap {
+    flex-wrap: wrap;
+}
+
+.flex-col {
+    display: flex;
+    flex-direction: column;
+}
+
 .flex-center {
     display: flex;
     justify-content: center;
+    align-items: center;
+}
+
+/* 这些间距/布局工具类此前只在模板里被引用、ext.css 中并没有定义，
+   于是 class 静默失效（例如设置页的 .flex.flex-wrap.gap-8 实际上既不换行也没有间距）。
+   统一补齐，避免后人继续往不存在的类上写布局。 */
+.gap-4 {
+    gap: 4px;
+}
+
+.gap-8 {
+    gap: 8px;
+}
+
+.gap-12 {
+    gap: 12px;
+}
+
+.align-center {
     align-items: center;
 }
 
@@ -22,6 +50,10 @@
 
 .margin-top-4 {
     margin-top: 4px;
+}
+
+.margin-top-8 {
+    margin-top: 8px;
 }
 
 .spacer {

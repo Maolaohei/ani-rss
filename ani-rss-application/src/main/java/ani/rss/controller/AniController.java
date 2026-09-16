@@ -1,6 +1,7 @@
 package ani.rss.controller;
 
 import ani.rss.annotation.Auth;
+import ani.rss.commons.CacheUtils;
 import ani.rss.commons.DeleteGuard;
 import ani.rss.commons.ExceptionUtils;
 import ani.rss.commons.FileUtils;
@@ -50,6 +51,14 @@ public class AniController extends BaseController {
     // 订阅增删操作的锁(与添加合集订阅共用 AniUtil.SUBSCRIPTION_LOCK)，防止 TOCTOU 竞态
     private static final Object SUBSCRIPTION_LOCK = AniUtil.SUBSCRIPTION_LOCK;
 
+    /**
+     * 预览回写「漏集检查水位」的最小落盘间隔。
+     * <p>
+     * 预览是最常用入口，若每次都落盘，光是翻订阅列表就能写出大量全量订阅文件（P2-1）。
+     * 健康分的「漏集信息可能过期」提示以 <b>3 天</b>为界，因此水位只要保留到小时级就足够准确。
+     */
+    private static final long OMIT_PERSIST_INTERVAL_MS = 60 * 60 * 1000L;
+
     @Resource
     private AniService aniService;
 
@@ -68,6 +77,49 @@ public class AniController extends BaseController {
     private static void syncAniList() {
         AniUtil.sync();
         LibraryController.invalidate();
+    }
+
+    /**
+     * 列表派生字段缓存时长。拼音/首字母只由标题决定，改标题就是换 key，
+     * 因此不需要任何失效逻辑，TTL 只是防止长期不访问的标题常驻。
+     */
+    private static final long PINYIN_CACHE_TTL_MS = 10 * 60 * 1000L;
+
+    /**
+     * 列表派生字段：拼音（P1-10）。
+     * <p>
+     * 列表每次请求都会对全部订阅重算拼音，200 订阅下是可观的无谓 CPU。
+     * 键就是标题本身，因此不存在失效错误的问题。
+     */
+    private static String cachedPinyin(String title) {
+        if (StrUtil.isBlank(title)) {
+            return title;
+        }
+        String key = "pinyin:" + title;
+        String cached = CacheUtils.get(key);
+        if (cached != null) {
+            return cached;
+        }
+        String value = PinyinUtils.getPinyin(title, "");
+        CacheUtils.put(key, value, PINYIN_CACHE_TTL_MS);
+        return value;
+    }
+
+    /**
+     * 列表派生字段：拼音首字母（P1-10），与 {@link #cachedPinyin(String)} 同源同策
+     */
+    private static String cachedPinyinInitials(String title) {
+        if (StrUtil.isBlank(title)) {
+            return title;
+        }
+        String key = "pinyinInitials:" + title;
+        String cached = CacheUtils.get(key);
+        if (cached != null) {
+            return cached;
+        }
+        String value = PinyinUtils.getFirstLetter(title, "");
+        CacheUtils.put(key, value, PINYIN_CACHE_TTL_MS);
+        return value;
     }
 
     @Auth
@@ -99,6 +151,10 @@ public class AniController extends BaseController {
                 Boolean replace = config.getReplace();
                 if (replace) {
                     AniUtil.getAniList().remove(first.get());
+                    // 被替换掉的订阅不再存在，尽力回收它的锁对象（P2-4）
+                    AniLocks.release(first.get());
+                    // 立刻失效 id 索引，避免"改完列表到 sync() 之间"查到已被替换掉的订阅（P2-14）
+                    AniUtil.invalidateIdIndex();
                     log.info("自动替换 {} 第{}季", title, season);
                 } else {
                     throw new IllegalArgumentException("订阅标题重复");
@@ -106,6 +162,7 @@ public class AniController extends BaseController {
             }
 
             AniUtil.getAniList().add(ani);
+            AniUtil.invalidateIdIndex();
         }
         syncAniList();
         Boolean enable = ani.getEnable();
@@ -238,7 +295,11 @@ public class AniController extends BaseController {
             }
             for (Ani ani : anis) {
                 AniUtil.getAniList().remove(ani);
+                // 订阅已删除，尽力回收它的锁对象，避免反复增删订阅时锁对象常驻（P2-4）
+                AniLocks.release(ani);
             }
+            // 立刻失效 id 索引，避免"改完列表到 sync() 之间"查到已删除的订阅（P2-14）
+            AniUtil.invalidateIdIndex();
         }
 
         syncAniList();
@@ -320,8 +381,9 @@ public class AniController extends BaseController {
                 ).toList();
         listAni.setWeekList(weekAniList);
 
-        // 按拼音排序
-        List<Ani> aniList = AniUtil.getAniList();
+        // 按拼音排序。刻意复制一份：排序与下面的派生字段计算都只在副本上进行，
+        // 不触碰 AniUtil.ANI_LIST 里那些被 RSS 轮次/落盘同时使用的活对象（P1-10）
+        List<Ani> aniList = new ArrayList<>(AniUtil.getAniList());
 
         List<String> releaseDateList = aniList.stream()
                 .map(Ani::getReleaseDate)
@@ -365,33 +427,42 @@ public class AniController extends BaseController {
         int index = 0;
         long now = System.currentTimeMillis();
         for (Ani ani : aniList) {
-            ani.setSort(index++);
-            String title = ani.getTitle();
-            String pinyin = PinyinUtils.getPinyin(title, "");
-            String pinyinInitials = PinyinUtils.getFirstLetter(title, "");
+            /*
+            P1-10：列表是纯展示接口，绝不能往共享的 Ani 上写字段。
+            同一条 Ani 此刻可能正被 AniUtil.doSync()（把 healthScore/Level/Reasons 置 null 后序列化落盘）
+            与 RssTask（写 sort / lastDownloadTime）同时改动——那是无锁并发写同一批对象，
+            轻则列表里"健康分忽有忽无"，重则 ani.v2.json 里落进半写状态的字段。
+            这里浅拷贝一份，所有派生字段只写在副本上；JSON 结构完全不变，前端无感知。
+            */
+            Ani view = new Ani();
+            BeanUtil.copyProperties(ani, view);
+            view.setSort(index++);
+            String title = view.getTitle();
+            String pinyin = cachedPinyin(title);
+            String pinyinInitials = cachedPinyinInitials(title);
 
-            Date releaseDate = ani.getReleaseDate();
+            Date releaseDate = view.getReleaseDate();
             int week = DateUtil.dayOfWeek(releaseDate) - 1;
             String weekLabel = weeks.get(week);
 
             // 运维健康分（不落盘）；列表用 RSS 周期缓存的漏集，避免 N 次拉源
             try {
                 boolean omitOn = Boolean.TRUE.equals(config.getOmit());
-                int omitCount = SubscriptionHealth.cachedOmitCount(ani, omitOn);
-                SubscriptionHealth.Score health = SubscriptionHealth.compute(ani, omitCount, now);
-                ani.setHealthScore(health.score())
+                int omitCount = SubscriptionHealth.cachedOmitCount(view, omitOn);
+                SubscriptionHealth.Score health = SubscriptionHealth.compute(view, omitCount, now);
+                view.setHealthScore(health.score())
                         .setHealthLevel(health.level())
                         .setHealthReasons(health.reasons());
             } catch (Exception ignored) {
             }
 
-            ani
+            view
                     .setPinyin(pinyin)
                     .setPinyinInitials(pinyinInitials)
                     .setWeekLabel(weekLabel);
 
             List<Ani> anis = weekItemsMap.get(weekLabel);
-            anis.add(ani);
+            anis.add(view);
         }
 
         return Result.success(listAni);
@@ -596,12 +667,22 @@ public class AniController extends BaseController {
         // 只落盘、不失效缓存：这里每预览一次就会走到，走 syncAniList() 会把下载路径索引、
         // 本地状态快照、媒体库缓存全部清空——预览恰恰是最需要缓存命中的入口。
         try {
-            Optional<Ani> live = AniUtil.getAniList().stream()
-                    .filter(a -> Objects.equals(a.getId(), ani.getId()))
-                    .findFirst();
+            // 按 id 反查走 AniUtil 的 id 索引（P2-14），不再全表 stream 过滤
+            Optional<Ani> live = AniUtil.findById(ani.getId());
             Ani target = live.orElse(ani);
-            SubscriptionHealth.rememberOmit(target, omitList == null ? 0 : omitList.size(), System.currentTimeMillis());
-            if (live.isPresent()) {
+            int omitCount = omitList == null ? 0 : omitList.size();
+            Integer oldOmitCount = target.getOmitCount();
+            Long oldCheckedAt = target.getOmitCheckedAt();
+            long now = System.currentTimeMillis();
+            SubscriptionHealth.rememberOmit(target, omitCount, now);
+            /*
+            只有「漏集数真的变了」或「落盘水位过期」才写盘。
+            预览每次都改 omitCheckedAt，若不加这道闸门，内容比对永远认为"变了"，
+            等于预览几次就写几次全量订阅文件（P2-1）。
+            */
+            boolean omitChanged = !Objects.equals(oldOmitCount, omitCount);
+            boolean stale = oldCheckedAt == null || now - oldCheckedAt >= OMIT_PERSIST_INTERVAL_MS;
+            if (live.isPresent() && (omitChanged || stale)) {
                 AniUtil.syncStateOnly();
             }
         } catch (Exception e) {
@@ -804,6 +885,7 @@ public class AniController extends BaseController {
                 ani.setCover(cover)
                         .setId(UUID.fastUUID().toString());
                 AniUtil.getAniList().add(ani);
+                AniUtil.invalidateIdIndex();
                 continue;
             }
 

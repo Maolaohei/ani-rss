@@ -96,13 +96,25 @@
   </SettingsItem>
   <SettingsItem label="错峰更新">
     <div class="full-width">
-      <div class="flex flex-wrap gap-8">
-        <el-switch v-model="props.config['staggeredUpdateEnable']"/>
+      <div class="num-field">
+        <el-text class="num-label" size="small">启用</el-text>
+        <div class="num-switch">
+          <el-switch v-model="props.config['staggeredUpdateEnable']"/>
+        </div>
+        <el-text class="num-hint" size="small" type="info">默认开启</el-text>
+      </div>
+      <div class="num-field">
+        <el-text class="num-label" size="small">批间隔</el-text>
         <el-input-number v-model="props.config['staggerBatchIntervalMs']"
-                         :min="0" :max="60000" :step="500" :disabled="props.config['staggeredUpdateEnable'] === false">
-          <template #prefix>间隔</template>
-          <template #suffix><span>毫秒</span></template>
-        </el-input-number>
+                         :min="0" :max="60000" :step="500" controls-position="right"
+                         placeholder="默认 2000"
+                         :disabled="props.config['staggeredUpdateEnable'] === false"/>
+        <el-text class="num-hint" size="small" type="info">毫秒，默认 2000</el-text>
+      </div>
+      <div class="margin-top-4">
+        <el-text class="mx-1" size="small" type="info">
+          数值项留空时按右侧标注的默认值处理。
+        </el-text>
       </div>
       <div class="margin-top-4">
         <el-text class="mx-1" size="small">
@@ -115,24 +127,34 @@
   </SettingsItem>
   <SettingsItem label="网盘 API 限流">
     <div class="full-width">
-      <div class="flex flex-wrap gap-8">
-        <el-input-number v-model="props.config['openListApiPerSecond']" :min="1" :max="20">
-          <template #prefix>速率</template>
-          <template #suffix><span>次/秒</span></template>
-        </el-input-number>
-        <el-input-number v-model="props.config['openListApiBurst']" :min="1" :max="5">
-          <template #prefix>突发</template>
-        </el-input-number>
+      <div class="num-field">
+        <el-text class="num-label" size="small">速率</el-text>
+        <el-input-number v-model="props.config['openListApiPerSecond']" :min="1" :max="20"
+                         controls-position="right" placeholder="默认 3"/>
+        <el-text class="num-hint" size="small" type="info">次/秒，默认 3</el-text>
       </div>
-      <div class="flex flex-wrap gap-8 margin-top-4">
-        <el-input-number v-model="props.config['openListFailThreshold']" :min="1" :max="10">
-          <template #prefix>连续失败</template>
-          <template #suffix><span>次后熔断</span></template>
-        </el-input-number>
-        <el-input-number v-model="props.config['openListCooldownSeconds']" :min="10" :max="600">
-          <template #prefix>冷却</template>
-          <template #suffix><span>秒</span></template>
-        </el-input-number>
+      <div class="num-field">
+        <el-text class="num-label" size="small">突发</el-text>
+        <el-input-number v-model="props.config['openListApiBurst']" :min="1" :max="5"
+                         controls-position="right" placeholder="默认 1"/>
+        <el-text class="num-hint" size="small" type="info">允许瞬时连续发出的次数，默认 1</el-text>
+      </div>
+      <div class="num-field">
+        <el-text class="num-label" size="small">连续失败</el-text>
+        <el-input-number v-model="props.config['openListFailThreshold']" :min="1" :max="10"
+                         controls-position="right" placeholder="默认 3"/>
+        <el-text class="num-hint" size="small" type="info">次后熔断，默认 3</el-text>
+      </div>
+      <div class="num-field">
+        <el-text class="num-label" size="small">冷却</el-text>
+        <el-input-number v-model="props.config['openListCooldownSeconds']" :min="10" :max="600"
+                         controls-position="right" placeholder="默认 60"/>
+        <el-text class="num-hint" size="small" type="info">秒，默认 60（逐级加倍，上限 10 分钟）</el-text>
+      </div>
+      <div class="margin-top-4">
+        <el-text class="mx-1" size="small" type="info">
+          数值项留空时按右侧标注的默认值处理。
+        </el-text>
       </div>
       <div class="margin-top-4">
         <el-text class="mx-1" size="small">
@@ -146,15 +168,22 @@
   </SettingsItem>
   <SettingsItem label="静默窗口">
     <div class="full-width">
-      <div class="flex flex-wrap gap-8">
-        <el-input-number v-model="props.config['quiescentConfirmTimes']" :min="1" :max="10">
-          <template #prefix>连续确认</template>
-          <template #suffix><span>次</span></template>
-        </el-input-number>
-        <el-input-number v-model="props.config['quiescentTimeoutMinutes']" :min="1" :max="1440">
-          <template #prefix>超时</template>
-          <template #suffix><span>分钟</span></template>
-        </el-input-number>
+      <div class="num-field">
+        <el-text class="num-label" size="small">连续确认</el-text>
+        <el-input-number v-model="props.config['quiescentConfirmTimes']" :min="1" :max="10"
+                         controls-position="right" placeholder="默认 2"/>
+        <el-text class="num-hint" size="small" type="info">次，默认 2</el-text>
+      </div>
+      <div class="num-field">
+        <el-text class="num-label" size="small">超时</el-text>
+        <el-input-number v-model="props.config['quiescentTimeoutMinutes']" :min="1" :max="1440"
+                         controls-position="right" placeholder="默认 30"/>
+        <el-text class="num-hint" size="small" type="info">分钟，默认 30（= 轮询周期 × 2，不小于 5）</el-text>
+      </div>
+      <div class="margin-top-4">
+        <el-text class="mx-1" size="small" type="info">
+          数值项留空时按右侧标注的默认值处理。
+        </el-text>
       </div>
       <div class="margin-top-4">
         <el-text class="mx-1" size="small">
@@ -173,26 +202,34 @@
   </SettingsItem>
   <SettingsItem label="结果缓存">
     <div class="full-width">
-      <div class="flex flex-wrap gap-8">
-        <el-input-number v-model="props.config['localStateCacheTtlSeconds']" :min="10" :max="3600" :step="10">
-          <template #prefix>本地缓存</template>
-          <template #suffix><span>秒</span></template>
-        </el-input-number>
-        <el-input-number v-model="props.config['cloudStateCacheTtlSeconds']" :min="30" :max="3600" :step="30">
-          <template #prefix>网盘缓存</template>
-          <template #suffix><span>秒</span></template>
-        </el-input-number>
+      <div class="num-field">
+        <el-text class="num-label" size="small">本地缓存</el-text>
+        <el-input-number v-model="props.config['localStateCacheTtlSeconds']" :min="10" :max="3600" :step="10"
+                         controls-position="right" placeholder="默认 60"/>
+        <el-text class="num-hint" size="small" type="info">秒，默认 60</el-text>
       </div>
-      <div class="flex flex-wrap gap-8 margin-top-4">
+      <div class="num-field">
+        <el-text class="num-label" size="small">网盘缓存</el-text>
+        <el-input-number v-model="props.config['cloudStateCacheTtlSeconds']" :min="30" :max="3600" :step="30"
+                         controls-position="right" placeholder="默认 300"/>
+        <el-text class="num-hint" size="small" type="info">秒，默认 300</el-text>
+      </div>
+      <div class="num-field">
+        <el-text class="num-label" size="small">单轮预算</el-text>
         <el-input-number v-model="props.config['openListApiBudgetPerRound']" :min="1" :max="200" :step="10"
-                         placeholder="留空 = 自动">
-          <template #prefix>单轮预算</template>
-          <template #suffix><span>次</span></template>
-        </el-input-number>
-        <el-input-number v-model="props.config['cloudListMaxFiles']" :min="100" :max="50000" :step="500">
-          <template #prefix>列举上限</template>
-          <template #suffix><span>个文件</span></template>
-        </el-input-number>
+                         controls-position="right" placeholder="留空 = 自动"/>
+        <el-text class="num-hint" size="small" type="info">次，留空 = 自动（按订阅数与限速推算）</el-text>
+      </div>
+      <div class="num-field">
+        <el-text class="num-label" size="small">列举上限</el-text>
+        <el-input-number v-model="props.config['cloudListMaxFiles']" :min="100" :max="50000" :step="500"
+                         controls-position="right" placeholder="默认 5000"/>
+        <el-text class="num-hint" size="small" type="info">个文件，默认 5000</el-text>
+      </div>
+      <div class="margin-top-4">
+        <el-text class="mx-1" size="small" type="info">
+          数值项留空时按右侧标注的默认值处理；「单轮预算」留空表示自动取值。
+        </el-text>
       </div>
       <div class="margin-top-4">
         <el-text class="mx-1" size="small">
@@ -399,4 +436,51 @@ let copy = (v) => {
 
 let props = defineProps(['config'])
 </script>
+
+<style scoped>
+/*
+设置页数值项的统一布局：标签（定宽）| 输入框（定宽）| 单位 / 默认值说明。
+
+原实现把标签塞进 el-input-number 的 #prefix / #suffix 插槽里：
+el-input-number 默认宽 150px，左右各留 42px 给加减按钮，实际可输入区只剩约 66px；
+再被「连续失败」「次后熔断」这类长中文盖住，用户既看不清自己输的数字、也点不准输入位置。
+改为「标签外置 + controls-position="right" + 定宽输入框」后，输入区约 130px 且位置固定。
+*/
+.num-field {
+    display: grid;
+    grid-template-columns: 84px 170px minmax(0, 1fr);
+    align-items: center;
+    column-gap: 8px;
+    row-gap: 2px;
+    margin-bottom: 6px;
+}
+
+.num-field > .num-label {
+    white-space: nowrap;
+}
+
+.num-field > .num-switch {
+    display: flex;
+    align-items: center;
+}
+
+/* 输入框占满自己那一列；element-plus 自带的 width:150px 会与列宽打架 */
+.num-field > .el-input-number {
+    width: 100%;
+}
+
+.num-field > .num-hint {
+    line-height: 1.4;
+}
+
+@media (max-width: 700px) {
+    .num-field {
+        grid-template-columns: 84px minmax(0, 1fr);
+    }
+
+    .num-field > .num-hint {
+        grid-column: 2;
+    }
+}
+</style>
 

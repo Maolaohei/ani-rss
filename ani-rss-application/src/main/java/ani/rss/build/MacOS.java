@@ -1,10 +1,10 @@
 package ani.rss.build;
 
+import ani.rss.util.basic.HttpReq;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.lang.Assert;
 import cn.hutool.core.util.RuntimeUtil;
 import cn.hutool.core.util.ZipUtil;
-import cn.hutool.http.HttpUtil;
 import cn.hutool.system.OsInfo;
 import cn.hutool.system.SystemUtil;
 import lombok.extern.slf4j.Slf4j;
@@ -27,7 +27,16 @@ public class MacOS implements Runnable {
 
         if (!macosZip.exists()) {
             String url = "https://github.com/wushuo894/ani-rss-macos/archive/refs/heads/main.zip";
-            HttpUtil.downloadFile(url, macosZip);
+            /*
+            原实现用 hutool 的 HttpUtil.downloadFile，是全项目唯一一处「裸下载」：
+            hutool 默认 timeout = -1（无限等待），也没有统一的代理设置。
+            这里改走 HttpReq（默认带代理、UA、跟随重定向），并显式区分连接/读取超时（P2-6）。
+            */
+            HttpReq.get(url, 1000 * 30, 1000 * 60 * 5)
+                    .then(res -> {
+                        HttpReq.assertStatus(res);
+                        FileUtil.writeFromStream(res.bodyStream(), macosZip, true);
+                    });
         }
 
         ZipUtil.unzip(macosZip, macosZip.getParentFile());

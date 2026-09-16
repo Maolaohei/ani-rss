@@ -163,6 +163,20 @@
 
     <build>
         <finalName>ani-rss</finalName>
+        <!--
+          构建卫生: 本机 Windows 组件服务偶尔会以未展开的 "%SystemDrive%" 作为目录名,
+          在 src/main/resources 下写出 ProgramData/... 的 COM+ 缓存 .db 文件(约 976KB)。
+          若不排除, 它会被 resources 插件复制进 target/classes 并最终打进 jar。
+        -->
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>false</filtering>
+                <excludes>
+                    <exclude>%SystemDrive%/**</exclude>
+                </excludes>
+            </resource>
+        </resources>
         <plugins>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
