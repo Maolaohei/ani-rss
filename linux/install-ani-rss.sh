@@ -270,7 +270,7 @@ Environment="SERVER_PORT=$SERVER_PORT"
 Environment="CONFIG=$INSTALL_DIR/config"
 Environment="SWAGGER_ENABLED=false"
 Environment="MCP_ENABLED=false"
-Environment="JAVA_OPTS=-Xms64m -Xmx512m -Xss256k -XX:+UseG1GC $NETWORK_OPTS"
+Environment="JAVA_OPTS=-Xms64m -Xmx512m -Xss512k -XX:+UseG1GC $NETWORK_OPTS"
 
 [Install]
 WantedBy=multi-user.target

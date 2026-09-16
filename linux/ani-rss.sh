@@ -188,7 +188,7 @@ switch_network() {
 
     echo "$new_opts" > "$NETWORK_CONF"
 
-    local base_opts="-Xms64m -Xmx512m -Xss256k -XX:+UseG1GC"
+    local base_opts="-Xms64m -Xmx512m -Xss512k -XX:+UseG1GC"
     local new_java_opts="$base_opts $new_opts"
     sed -i "s|^Environment=\"JAVA_OPTS=.*\"|Environment=\"JAVA_OPTS=$new_java_opts\"|" "$SERVICE_FILE"
 

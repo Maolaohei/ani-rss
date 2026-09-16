@@ -10,7 +10,6 @@ import ani.rss.util.other.DownloadHistory;
 import ani.rss.util.other.FailedDownloadQueue;
 import ani.rss.util.other.NotificationUtil;
 import ani.rss.util.other.SubscriptionHealth;
-import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.core.util.ObjectUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -43,7 +42,8 @@ public class WeeklyReportTask implements BaseTask {
             log.error("追番周报生成失败: {}", ExceptionUtils.getMessage(e));
         }
 
-        ThreadUtil.sleep(intervalHours * 3600_000L);
+        // 可中断的周期等待：停止请求最长 500ms 内生效
+        sleepInterruptibly(loop, intervalHours * 3600_000L);
     }
 
     private void report(Config config) {

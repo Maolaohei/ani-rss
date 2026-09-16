@@ -36,17 +36,26 @@ sigterm_handler() {
 trap 'sigterm_handler' 15
 
 if [ -z "$JAVA_OPTS" ]; then
-  export JAVA_OPTS="-Xms64m -Xmx512m -Xss256k -XX:+UseG1GC"
+  export JAVA_OPTS="-Xms64m -Xmx512m -Xss512k -XX:+UseG1GC"
 fi
+
+# OOM 现场：转储目录必须先存在，否则 JVM 会放弃转储、只留一行警告
+: "${CONFIG:=.}"
+mkdir -p "$CONFIG/logs"
 
 echo "JAVA_OPTS=$JAVA_OPTS"
 
 while :
 do
+    # 注意：不要加 -XX:TieredStopAtLevel=1。那是"加快启动"的取舍，代价是 C2 永不启用；
+    # 本项目是常驻服务，热点在 JSON 序列化/正则/字符串处理上，C1-only 会让吞吐下降数倍。
     # IgnoreUnrecognizedVMOptions 必须位于 UseCompactObjectHeaders(JDK24+) 之前，否则 JDK 17~23 启动失败
     java $JAVA_OPTS \
       -XX:+UseStringDeduplication \
-      -XX:TieredStopAtLevel=1 \
+      -XX:+HeapDumpOnOutOfMemoryError \
+      -XX:HeapDumpPath="$CONFIG/logs" \
+      -XX:+ExitOnOutOfMemoryError \
+      -XX:MaxMetaspaceSize=256m \
       -XX:+IgnoreUnrecognizedVMOptions \
       -XX:+UseCompactObjectHeaders \
       --enable-native-access=ALL-UNNAMED \

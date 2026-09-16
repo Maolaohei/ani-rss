@@ -8,7 +8,6 @@ import ani.rss.util.other.ConfigUtil;
 import ani.rss.util.other.DiskMonitorUtil;
 import ani.rss.util.other.EventWebhookUtil;
 import ani.rss.util.other.NotificationUtil;
-import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.core.util.ObjectUtil;
 import cn.hutool.core.util.StrUtil;
 import lombok.extern.slf4j.Slf4j;
@@ -56,7 +55,8 @@ public class DiskTask implements BaseTask {
             log.error("磁盘空间检查失败: {}", ExceptionUtils.getMessage(e));
         }
 
-        ThreadUtil.sleep(intervalMinutes * 60_000L);
+        // 可中断的周期等待：停止请求最长 500ms 内生效
+        sleepInterruptibly(loop, intervalMinutes * 60_000L);
     }
 
     private void check(Config config) {

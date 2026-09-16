@@ -2204,11 +2204,12 @@ public class RssTask implements BaseTask {
             // 把等待静默的时间从本轮间隔里扣掉。
             // 不扣的话"等待 + 间隔"会把周期悄悄拉长一倍（15 分钟周期变成 30 分钟等待 + 15 分钟间隔），
             // 用户只会觉得"RSS 变慢了"却找不到原因。保底留一小段，避免退化成忙等。
-            ThreadUtil.sleep(resolvePostRoundSleepMs(config, waitedMs));
+            // 用可中断等待：停止请求最长 500ms 内生效，不必等满整个轮询间隔或依赖 interrupt
+            sleepInterruptibly(loop, resolvePostRoundSleepMs(config, waitedMs));
         } catch (Exception e) {
             String message = ExceptionUtils.getMessage(e);
             log.error(message, e);
-            ThreadUtil.sleep(sleepMinutes, TimeUnit.MINUTES);
+            sleepInterruptibly(loop, TimeUnit.MINUTES.toMillis(sleepMinutes));
         }
     }
 

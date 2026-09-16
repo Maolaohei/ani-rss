@@ -94,6 +94,7 @@ public class BgmTask implements BaseTask {
             log.debug("BGM 评分/总集数无变化，跳过同步");
         }
 
-        ThreadUtil.sleep(12, TimeUnit.HOURS);
+        // 可中断的周期等待：停止请求最长 500ms 内生效，不必等满 12 小时或依赖 interrupt
+        sleepInterruptibly(loop, TimeUnit.HOURS.toMillis(12));
     }
 }

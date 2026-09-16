@@ -302,11 +302,20 @@ public class DoctorController extends BaseController {
         String key = "tasks";
         String label = "后台任务线程";
         long start = System.currentTimeMillis();
-        boolean running = TaskService.LOOP.get();
+        boolean running = TaskService.isRunning();
         List<Thread> threads = TaskService.THREADS;
+        List<String> abandoned = TaskService.abandonedThreadNames();
         long alive = threads.stream().filter(Thread::isAlive).count();
         if (!running) {
             return timed(DoctorCheck.fail(key, label, "任务循环未运行", "尝试重启服务；若仍不恢复请检查启动日志"), start);
+        }
+        if (!abandoned.isEmpty()) {
+            // 有线程没退干净：它们不会再跑新一轮（代际旗标已关），但仍在占用资源。
+            // 摊开来说，避免用户只看到"任务好像变慢了"却查不到原因。
+            return timed(DoctorCheck.warn(key, label,
+                    StrUtil.format("任务循环运行中，但有 {} 个上一代线程未退出: {}", abandoned.size(),
+                            String.join(", ", abandoned)),
+                    "这些线程卡在不可中断的 IO 上；重启服务可彻底回收"), start);
         }
         if (threads.isEmpty() || alive < threads.size()) {
             return timed(DoctorCheck.warn(key, label,
