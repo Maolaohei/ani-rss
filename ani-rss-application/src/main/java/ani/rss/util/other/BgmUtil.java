@@ -18,6 +18,8 @@ import cn.hutool.core.lang.Assert;
 import cn.hutool.core.lang.Opt;
 import cn.hutool.core.net.url.UrlBuilder;
 import cn.hutool.core.text.StrFormatter;
+import cn.hutool.core.thread.ExecutorBuilder;
+import cn.hutool.core.thread.NamedThreadFactory;
 import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.core.util.*;
 import cn.hutool.extra.spring.SpringUtil;
@@ -32,8 +34,11 @@ import wushuo.tmdb.api.entity.Tmdb;
 
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
 /**
@@ -42,6 +47,129 @@ import java.util.function.Function;
 @Slf4j
 public class BgmUtil {
     private static final Config config = ConfigUtil.CONFIG;
+
+    /**
+     * BGM 阻塞 IO 专用有界线程池：仅服务于「双源并行获取」这类 socket 阻塞任务。
+     * <p>
+     * 原先走 {@code ForkJoinPool.commonPool()}，其并行度是 {@code CPU 核数 - 1}；而任务体是阻塞式
+     * socket 读，FJP 的阻塞补偿只对 {@code ManagedBlocker}/{@code ForkJoinTask} 生效，对普通
+     * {@code CompletableFuture} 里的阻塞<b>不生效</b>。后果是：小主机（2~4 核）上"并行双源"其实
+     * 根本没并行，且会把 commonPool 占满，饿死其它使用 commonPool 的代码（含 {@code parallelStream}）。
+     * <p>
+     * 池大小固定 2：本类的扇出恰好是 2，且这两个任务体不会再向本池提交（无自等待），
+     * 因此 2 线程既够用、也不会因为"池内线程等池内任务"而死锁。
+     */
+    private static final ExecutorService IO_POOL = ExecutorBuilder.create()
+            .setCorePoolSize(2)
+            .setMaxPoolSize(2)
+            .setWorkQueue(new LinkedBlockingQueue<>(64))
+            .setThreadFactory(new NamedThreadFactory("bgm-io", true))
+            .build();
+
+    // ---- BGM API 限流：令牌桶 ----
+    // 原先把节流藏在 setToken（加 Authorization 头的方法）里，每个请求无条件睡 500~1000ms。
+    // 三个副作用：① 重试会重复付一次固定成本；② 只想加个头的调用点也被迫等待；
+    // ③ getEpisodes/getSubjectId 在这之外还各睡 500/1000ms，单次元数据获取纯睡眠就有 1.5~2.5s。
+    // 现在改为在"真正发请求"前取令牌，速率与原实现均值一致（不增加对 bgm.tv 的压力），
+    // 但空闲/慢响应之后不会再白等。
+
+    /**
+     * 速率（次/秒）：1 / 750ms，与原先 {@code randomInt(500, 1000)} 的均值一致
+     */
+    private static final double BGM_PER_SECOND = 1000.0 / 750.0;
+
+    /**
+     * 突发容量：允许连续 2 个请求不等待（覆盖"双源并行"这种成对发出的场景）
+     */
+    private static final double BGM_BURST = 2.0;
+
+    private static final Object BGM_RATE_LOCK = new Object();
+    private static double bgmAvailableTokens = BGM_BURST;
+    private static long bgmLastRefillNanos = System.nanoTime();
+
+    /**
+     * 取一个 BGM API 令牌，保证全局速率不超过 {@link #BGM_PER_SECOND}。
+     * <p>
+     * <b>必须在真正发请求之前调用</b>（即 {@code thenFunction}/{@code then} 之前）。
+     * 等待发生在锁内，但最多约 750ms（差 1 个令牌的时间），不会出现长阻塞。
+     */
+    public static void throttleBgmApi() {
+        synchronized (BGM_RATE_LOCK) {
+            while (true) {
+                long now = System.nanoTime();
+                double elapsedSec = (now - bgmLastRefillNanos) / 1_000_000_000.0;
+                bgmLastRefillNanos = now;
+                bgmAvailableTokens = Math.min(BGM_BURST, bgmAvailableTokens + elapsedSec * BGM_PER_SECOND);
+
+                if (bgmAvailableTokens >= 1.0) {
+                    bgmAvailableTokens -= 1.0;
+                    return;
+                }
+                ThreadUtil.sleep(Math.max(1L, resolveTokenWaitMs(bgmAvailableTokens, BGM_PER_SECOND)));
+            }
+        }
+    }
+
+    /**
+     * 「当前令牌数下，再取一个令牌需要等多久（毫秒）」——令牌够用时为 0。
+     * <p>
+     * 抽成纯函数以便单测覆盖边界（令牌刚好 1 个 / 0 个 / 半个），不必靠 sleep 计时来验证。
+     *
+     * @param availableTokens 当前可用令牌数
+     * @param perSecond       速率（次/秒）
+     * @return 需要等待的毫秒数，0 表示无需等待
+     */
+    static long resolveTokenWaitMs(double availableTokens, double perSecond) {
+        if (availableTokens >= 1.0) {
+            return 0L;
+        }
+        return (long) Math.ceil((1.0 - availableTokens) / perSecond * 1000.0);
+    }
+
+    /**
+     * 仅供测试：复位 BGM 令牌桶到"满桶 + 刚补充过"的初始状态。
+     * <p>
+     * 令牌桶是 static 全局状态，不复位会让用例之间互相影响（前一个用例耗掉的令牌会变成
+     * 后一个用例的等待时间）。
+     */
+    static void resetBgmRateLimiterForTest() {
+        synchronized (BGM_RATE_LOCK) {
+            bgmAvailableTokens = BGM_BURST;
+            bgmLastRefillNanos = System.nanoTime();
+        }
+    }
+
+    /**
+     * 剧集列表缓存键（抽出来供测试复用，避免测试里手写格式串而与实现脱节）。
+     */
+    static String episodesCacheKey(String subjectId, Integer type) {
+        return "BGM_getEpisodes:" + subjectId + ":" + type;
+    }
+
+    /**
+     * 发一个 BGM 请求：先取令牌限流，再加 Authorization 头，最后真正发出。
+     * <p>
+     * 这是本类<b>唯一的出网点</b>——限流与鉴权都在这里完成，调用点不需要（也不应该）自己 sleep。
+     *
+     * @param httpRequest 已构造完毕的请求（query/form/body 都应在此之前设置好）
+     * @param fun         响应处理函数
+     * @return 响应处理结果
+     */
+    public static <T> T send(HttpRequest httpRequest, Function<HttpResponse, T> fun) {
+        throttleBgmApi();
+        return setToken(httpRequest).thenFunction(fun);
+    }
+
+    /**
+     * {@link #send(HttpRequest, Function)} 的 void 版（响应只需断言/忽略时使用）。
+     * <p>
+     * 单独取名而不是重载 {@code send}：{@code HttpResponse::isOk} 这类方法引用对
+     * {@code Function} 与 {@code Consumer} 都兼容，重载会产生歧义。名字对齐 Hutool 的 {@code .then(Consumer)}。
+     */
+    public static void sendThen(HttpRequest httpRequest, Consumer<HttpResponse> consumer) {
+        throttleBgmApi();
+        setToken(httpRequest).then(consumer);
+    }
 
     /**
      * 获取bgm名称
@@ -112,8 +240,7 @@ public class BgmUtil {
 
         HttpRequest httpRequest = HttpReq.get(url);
 
-        return setToken(httpRequest)
-                .thenFunction(res -> {
+        return send(httpRequest, res -> {
                     if (!res.isOk()) {
                         return new ArrayList<>();
                     }
@@ -185,7 +312,8 @@ public class BgmUtil {
         if (StrUtil.isBlank(id)) {
             id = list.get(0).getId();
         }
-        ThreadUtil.sleep(1000);
+        // (第三批) 原先此处还额外睡 1s 作为"调用节奏限制"——限流已在 send() 的出网点统一做，
+        // 这里再睡一次只会让每次 BGM 搜索多付 1 秒，已移除。
         CacheUtils.put(key, id, TimeUnit.MINUTES.toMillis(10));
         return id;
     }
@@ -228,18 +356,35 @@ public class BgmUtil {
      * @return
      */
     public static List<JsonObject> getEpisodes(String subjectId, Integer type) {
-        ThreadUtil.sleep(500);
+        // (第三批) 原先此处额外睡 500ms；限流已统一在 send() 出网点完成，不再重复睡眠
         Objects.requireNonNull(subjectId);
+
+        // (P2-13) 进程内缓存：此前完全没有缓存，同一番剧在同一轮里会被
+        // getEpisodeId / getEpisodeTitleMap / getEps 各抓一次。剧集列表变动以天计，5 分钟足够。
+        // 存 JSON 快照而非 List 本身：反序列化天然给出独立实例，某个调用点就地改 JsonObject
+        // 不会污染其它调用点（与 me() 同一套写法）。
+        String key = episodesCacheKey(subjectId, type);
+        String cached = CacheUtils.get(key);
+        if (StrUtil.isNotBlank(cached)) {
+            // 快照解析失败必须当作未命中继续请求：缓存不能变成故障点
+            try {
+                JsonArray cachedArray = GsonStatic.fromJson(cached, JsonArray.class);
+                if (Objects.nonNull(cachedArray)) {
+                    return GsonStatic.fromJsonList(cachedArray, JsonObject.class);
+                }
+            } catch (Exception e) {
+                log.warn("BGM 剧集列表缓存快照解析失败, 重新请求: {} ({})", subjectId, e.getMessage());
+            }
+        }
+
         String bgmApi = config.getBgmApi();
         HttpRequest httpRequest = HttpReq.get(bgmApi + "/v0/episodes");
-        setToken(httpRequest);
 
-        return httpRequest
+        List<JsonObject> episodes = send(httpRequest
                 .form("subject_id", subjectId)
                 .form("type", 0)
                 .form("limit", 1000)
-                .form("offset", 0)
-                .thenFunction(res -> {
+                .form("offset", 0), res -> {
                     if (!res.isOk()) {
                         return List.of();
                     }
@@ -280,6 +425,12 @@ public class BgmUtil {
                             })
                             .toList();
                 });
+
+        // 只缓存成功的非空结果：一次网络抖动不该被固化成"这个番剧没有剧集"
+        if (!episodes.isEmpty()) {
+            CacheUtils.put(key, GsonStatic.toJson(episodes), TimeUnit.MINUTES.toMillis(5));
+        }
+        return episodes;
     }
 
     public static BgmMe me() {
@@ -294,11 +445,10 @@ public class BgmUtil {
         }
 
         String bgmApi = config.getBgmApi();
-        BgmMe bgmMe = setToken(HttpReq.get(bgmApi + "/v0/me"))
-                .thenFunction(res -> {
-                    HttpReq.assertStatus(res);
-                    return GsonStatic.fromJson(res.body(), BgmMe.class);
-                });
+        BgmMe bgmMe = send(HttpReq.get(bgmApi + "/v0/me"), res -> {
+            HttpReq.assertStatus(res);
+            return GsonStatic.fromJson(res.body(), BgmMe.class);
+        });
 
         CacheUtils.put(key, GsonStatic.toJson(bgmMe), TimeUnit.MINUTES.toMillis(10));
         return bgmMe;
@@ -326,25 +476,23 @@ public class BgmUtil {
             // 获取评分
             String username = username();
             String bgmApi = config.getBgmApi();
-            return setToken(HttpReq.get(bgmApi + "/v0/users/" + username + "/collections/" + subjectId))
-                    .thenFunction(res -> {
-                        if (res.getStatus() == 404) {
-                            return 0;
-                        }
-                        HttpReq.assertStatus(res);
-                        JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                        return jsonObject.get("rate").getAsInt();
-                    });
+            return send(HttpReq.get(bgmApi + "/v0/users/" + username + "/collections/" + subjectId), res -> {
+                if (res.getStatus() == 404) {
+                    return 0;
+                }
+                HttpReq.assertStatus(res);
+                JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
+                return jsonObject.get("rate").getAsInt();
+            });
         }
 
         String bgmApi = config.getBgmApi();
-        setToken(HttpReq.post(bgmApi + "/v0/users/-/collections/" + subjectId))
+        sendThen(HttpReq.post(bgmApi + "/v0/users/-/collections/" + subjectId)
                 .contentType(ContentType.JSON)
                 .body(GsonStatic.toJson(Map.of(
                         "type", 3,
                         "rate", rate
-                )))
-                .then(HttpReq::assertStatus);
+                ))), HttpReq::assertStatus);
         return rate;
     }
 
@@ -366,8 +514,8 @@ public class BgmUtil {
 
         // 如果已经订阅，则不再订阅
         String bgmApi = config.getBgmApi();
-        Boolean ok = setToken(HttpReq.get(bgmApi + "/v0/users/" + username + "/collections/" + subjectId))
-                .thenFunction(HttpResponse::isOk);
+        Boolean ok = send(HttpReq.get(bgmApi + "/v0/users/" + username + "/collections/" + subjectId),
+                HttpResponse::isOk);
 
         if (ok) {
             // 已经收藏
@@ -375,10 +523,9 @@ public class BgmUtil {
             return;
         }
 
-        setToken(HttpReq.post(bgmApi + "/v0/users/-/collections/" + subjectId))
+        send(HttpReq.post(bgmApi + "/v0/users/-/collections/" + subjectId)
                 .contentType(ContentType.JSON)
-                .body(GsonStatic.toJson(Map.of("type", 3)))
-                .thenFunction(HttpResponse::isOk);
+                .body(GsonStatic.toJson(Map.of("type", 3))), HttpResponse::isOk);
     }
 
     /**
@@ -433,14 +580,15 @@ public class BgmUtil {
      * @param type      0 未看过, 1 想看, 2 看过
      */
     public static void collectionsEpisodes(String episodeId, Integer type) {
-        ThreadUtil.sleep(500);
+        // (第三批) 原先此处睡 500ms；限流已统一在 send() 出网点完成，不再重复睡眠
         Objects.requireNonNull(episodeId);
 
         // bgm点格子前先判断状态，防止刷屏 #142
         String bgmApi = config.getBgmApi();
-        JsonObject jsonObject = setToken(HttpReq.get(bgmApi + "/v0/users/-/collections/-/episodes/" + episodeId))
-                .contentType(ContentType.JSON)
-                .thenFunction(res -> {
+        JsonObject jsonObject = send(
+                HttpReq.get(bgmApi + "/v0/users/-/collections/-/episodes/" + episodeId)
+                        .contentType(ContentType.JSON),
+                res -> {
                     if (res.getStatus() == 404) {
                         // 未收藏, 视为 type=0 继续后续标记
                         return null;
@@ -462,13 +610,11 @@ public class BgmUtil {
             }
         }
 
-        // 间隔 500 毫秒, 防止流控
-        ThreadUtil.sleep(500);
-
-        setToken(HttpReq.put(bgmApi + "/v0/users/-/collections/-/episodes/" + episodeId))
+        // (第三批) 原先此处再睡 500ms 作为"两次请求的间隔, 防止流控"。
+        // 令牌桶保证相邻请求间隔 ≥750ms（且是全局速率，不依赖某个调用点自觉 sleep），已移除。
+        send(HttpReq.put(bgmApi + "/v0/users/-/collections/-/episodes/" + episodeId)
                 .contentType(ContentType.JSON)
-                .body(GsonStatic.toJson(Map.of("type", type)))
-                .thenFunction(HttpResponse::isOk);
+                .body(GsonStatic.toJson(Map.of("type", type))), HttpResponse::isOk);
     }
 
     /**
@@ -542,26 +688,26 @@ public class BgmUtil {
         if (!isCache) {
             // 不使用缓存
             HttpRequest httpRequest = HttpReq.get(bgmApi + "/v0/subjects/" + subjectId);
-            return setToken(httpRequest).thenFunction(fun);
+            return send(httpRequest, fun);
         }
 
         AtomicReference<BgmInfo> bgmInfoAR = new AtomicReference<>();
         AtomicReference<BgmInfo> bgmInfoCacheAR = new AtomicReference<>();
 
-        // 并行获取bgm信息
+        // 并行获取bgm信息（走本类专用 IO 池，不再占用 ForkJoinPool.commonPool）
         CompletableFuture.allOf(
                 CompletableFuture.runAsync(() -> {
                     // 不使用缓存
                     HttpRequest httpRequest = HttpReq.get(bgmApi + "/v0/subjects/" + subjectId);
                     try {
-                        BgmInfo bgmInfo = setToken(httpRequest)
-                                .thenFunction(fun);
+                        BgmInfo bgmInfo = send(httpRequest, fun);
                         bgmInfoAR.set(bgmInfo);
                     } catch (Exception e) {
                         log.error(e.getMessage(), e);
                     }
-                }),
+                }, IO_POOL),
                 CompletableFuture.runAsync(() -> {
+                    // cache.wushuo.top 是第三方镜像，不是 bgm.tv，因此不走 BGM 令牌桶
                     HttpRequest httpRequest = HttpReq
                             .get("https://cache.wushuo.top/bgm/subjects/" + subjectId);
                     try {
@@ -570,7 +716,7 @@ public class BgmUtil {
                         bgmInfoCacheAR.set(bgmInfo);
                     } catch (Exception ignored) {
                     }
-                })
+                }, IO_POOL)
         ).join();
 
         BgmInfo bgmInfo = bgmInfoAR.get();
@@ -704,10 +850,13 @@ public class BgmUtil {
     }
 
     /**
-     * 设置token
+     * 设置token（<b>只加请求头，不做任何限流</b>）
      * <p>
-     * (A9) 不再加 synchronized: 方法内无共享可变状态(仅读 volatile CONFIG + 设置请求头),
-     * 原实现持类锁睡眠 500-1000ms 会把全站 BGM 流量串行化; 保留睡眠作为调用节奏限制。
+     * (A9) 不再加 synchronized: 方法内无共享可变状态(仅读 volatile CONFIG + 设置请求头)。
+     * <p>
+     * (第三批) 原先这里还睡 500~1000ms 作为"调用节奏限制"，属于**放错位置**的限流：
+     * 它让"只是想加个 Authorization 头"的调用点也被迫等待，重试时还会再睡一遍。
+     * 节流已移到真正发请求的 {@link #throttleBgmApi()}，本方法现在是纯函数。
      *
      * @param httpRequest
      * @return
@@ -719,7 +868,6 @@ public class BgmUtil {
             httpRequest.header(Header.AUTHORIZATION, "Bearer " + bgmToken);
         }
 
-        ThreadUtil.sleep(RandomUtil.randomInt(500, 1000));
         return httpRequest;
     }
 
@@ -812,11 +960,15 @@ public class BgmUtil {
 
     /**
      * 获取每集的标题
+     * <p>
+     * (第三批) 不再加 {@code synchronized}：缓存未命中时本方法会发起网络（getSubjectId / getEpisodes），
+     * 持类锁做网络会把全站 BGM 路径串起来。方法内无共享可变状态：缓存走线程安全的 CacheUtils，
+     * 并发未命中最多重复一次请求（结果一致，put 后写覆盖）。
      *
      * @param ani
      * @return
      */
-    public static synchronized Map<Integer, Function<Boolean, String>> getEpisodeTitleMap(Ani ani) {
+    public static Map<Integer, Function<Boolean, String>> getEpisodeTitleMap(Ani ani) {
         Map<Integer, Function<Boolean, String>> episodeTitleMap = new HashMap<>();
 
         if (Objects.isNull(ani)) {

@@ -25,6 +25,7 @@ import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -777,12 +778,16 @@ public class SubtitleService {
         }
 
         String toolType = StrUtil.blankToDefault(ConfigUtil.CONFIG.getDownloadToolType(), "");
+        // (P1-17) 计划内字节缓存：合集压缩包候选会在下面的逐视频循环里被反复取用，
+        // 不缓存的话每个视频都要把整包重新下载一遍（一季 12~24 集 = 同样一次下载做 12~24 次）。
+        // 生命周期绑定"本次计划构建"，构建结束即释放，不会跨计划驻留大对象。
+        Map<String, byte[]> bytesCache = new HashMap<>();
         if ("OpenList".equals(toolType)) {
             // OpenList 离线下载：视频落在云端，字幕需上传到云端同目录
-            planCloudFetch(ani, plan, candidates, lang);
+            planCloudFetch(ani, plan, candidates, lang, bytesCache);
         } else {
             // 其余下载器（qBittorrent / Transmission / aria2 / 本地路径等）均视为本地下载
-            planLocalFetch(ani, plan, candidates, lang);
+            planLocalFetch(ani, plan, candidates, lang, bytesCache);
         }
         cachePlan(plan);
         return plan;
@@ -950,7 +955,8 @@ public class SubtitleService {
         return false;
     }
 
-    private void planLocalFetch(Ani ani, FetchPlan plan, List<SubtitleCandidate> candidates, String lang) {
+    private void planLocalFetch(Ani ani, FetchPlan plan, List<SubtitleCandidate> candidates, String lang,
+                               Map<String, byte[]> bytesCache) {
         File dir = new File(downloadService.getDownloadPath(ani));
         if (!dir.exists() || !dir.isDirectory()) {
             return;
@@ -961,11 +967,12 @@ public class SubtitleService {
                 continue;
             }
             plan.getItems().add(planOne(ani, video.getName(), FileUtil.mainName(video), null, video, null,
-                    candidates, lang));
+                    candidates, lang, bytesCache));
         }
     }
 
-    private void planCloudFetch(Ani ani, FetchPlan plan, List<SubtitleCandidate> candidates, String lang) {
+    private void planCloudFetch(Ani ani, FetchPlan plan, List<SubtitleCandidate> candidates, String lang,
+                                Map<String, byte[]> bytesCache) {
         OpenListApi api = new OpenListApi();
         api.setConfig(ConfigUtil.CONFIG);
         String cloudDir = downloadService.getDownloadPath(ani);
@@ -982,7 +989,7 @@ public class SubtitleService {
                 log.info("云端已有字幕，跳过: {}", f.getName());
                 continue;
             }
-            plan.getItems().add(planOne(ani, f.getName(), mainName, f.getPath(), null, api, candidates, lang));
+            plan.getItems().add(planOne(ani, f.getName(), mainName, f.getPath(), null, api, candidates, lang, bytesCache));
         }
     }
 
@@ -996,7 +1003,8 @@ public class SubtitleService {
      */
     private FetchPlanItem planOne(Ani ani, String videoName, String mainName, String cloudDir,
                                   File localVideo, OpenListApi api,
-                                  List<SubtitleCandidate> candidates, String lang) {
+                                  List<SubtitleCandidate> candidates, String lang,
+                                  Map<String, byte[]> bytesCache) {
         if (candidates == null || candidates.isEmpty()) {
             return notMatched(videoName, "所选字幕没有可下载的文件，建议重新搜索或手动上传");
         }
@@ -1010,7 +1018,8 @@ public class SubtitleService {
                 continue;
             }
             try {
-                SubtitlePick pick = assrtSubtitleProvider.download(c, lang, targetSeason, targetEp, videoName, ani);
+                SubtitlePick pick = assrtSubtitleProvider.download(c, lang, targetSeason, targetEp, videoName, ani,
+                        bytesCache);
                 if (pick == null || pick.getContent() == null || pick.getContent().length == 0) {
                     continue;
                 }

@@ -1,5 +1,7 @@
 package ani.rss.service;
 
+import ani.rss.commons.CacheUtils;
+import ani.rss.commons.GsonStatic;
 import ani.rss.commons.GroupRegexUtils;
 import ani.rss.entity.*;
 import ani.rss.util.basic.HttpReq;
@@ -9,6 +11,8 @@ import ani.rss.util.other.ConfigUtil;
 import cn.hutool.core.collection.ListUtil;
 import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.lang.Assert;
+import cn.hutool.core.thread.ExecutorBuilder;
+import cn.hutool.core.thread.NamedThreadFactory;
 import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.core.util.NumberUtil;
 import cn.hutool.core.util.ObjectUtil;
@@ -30,6 +34,9 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -41,6 +48,22 @@ public class MikanService {
 
     @Resource
     private CacheService cacheService;
+
+    /**
+     * Mikan 阻塞 IO 专用有界线程池：服务于 {@link #list} 里的「列表 + 评分双源并行」。
+     * <p>
+     * 原先走 {@code ForkJoinPool.commonPool()}（并行度 = CPU 核数 - 1），任务体是阻塞式 socket 读，
+     * FJP 的阻塞补偿对普通 {@code CompletableFuture} 不生效 —— 小主机（2~4 核）上"并行"名不副实，
+     * 还会把 commonPool 占满、饿死其它使用 commonPool 的代码。
+     * <p>
+     * 池大小固定 2：扇出恰好是 2，且这两个任务体不会再向本池提交（无自等待），故不会死锁。
+     */
+    private static final ExecutorService IO_POOL = ExecutorBuilder.create()
+            .setCorePoolSize(2)
+            .setMaxPoolSize(2)
+            .setWorkQueue(new LinkedBlockingQueue<>(64))
+            .setThreadFactory(new NamedThreadFactory("mikan-io", true))
+            .build();
 
     public static String getMikanHost() {
         Config config = ConfigUtil.CONFIG;
@@ -60,16 +83,16 @@ public class MikanService {
         AtomicReference<Map<String, MikanBgm>> mikanBgmAtomicReference = new AtomicReference<>(new HashMap<>());
         AtomicReference<Mikan> mikanAtomicReference = new AtomicReference<>();
 
-        // 并行获取 mikan 番剧列表及其评分
+        // 并行获取 mikan 番剧列表及其评分（走本类专用 IO 池，不再占用 ForkJoinPool.commonPool）
         CompletableFuture.allOf(
                 CompletableFuture.runAsync(() -> {
                     Map<String, MikanBgm> mikanBgm = cacheService.getMikanBgm();
                     mikanBgmAtomicReference.set(mikanBgm);
-                }),
+                }, IO_POOL),
                 CompletableFuture.runAsync(() -> {
                     Mikan mikan = search(text, season);
                     mikanAtomicReference.set(mikan);
-                })
+                }, IO_POOL)
         ).join();
 
         Map<String, MikanBgm> mikanBgmMap = mikanBgmAtomicReference.get();
@@ -361,10 +384,45 @@ public class MikanService {
         return groupList;
     }
 
+    /**
+     * Mikan 番剧详情（含字幕组与各字幕组的剧集列表）的进程内缓存 TTL。
+     * <p>
+     * (P2-13) 此前完全没有缓存：同一番剧在「添加订阅」「BGM 轮次」等 per-ani 路径上会被反复抓取 + Jsoup 解析
+     * 整页（一页含全部字幕组的剧集表，解析不便宜）。字幕组/剧集变动以天计，2 分钟足够覆盖"同一轮 / 同一请求内"
+     * 的重复调用。
+     * <p>
+     * TTL 取得比 BGM 剧集列表短：单条 MikanInfo 可能达百 KB 级（多个字幕组 × 每组的完整剧集表），
+     * 200 个订阅全量驻留会明显吃内存，短 TTL 可以限制驻留窗口。
+     */
+    private static final long MIKAN_INFO_TTL_MS = TimeUnit.MINUTES.toMillis(2);
+
+    /**
+     * Mikan 番剧详情缓存键（抽出来供测试复用，避免测试里手写格式串而与实现脱节）。
+     */
+    static String mikanInfoCacheKey(String bangumiId) {
+        return "MikanService_getMikanInfo:" + bangumiId;
+    }
+
     public static MikanInfo getMikanInfo(String bangumiId) {
+        // 存 JSON 快照而非对象本身：MikanService.list 会就地改 item 的 score/bgmId/exists，
+        // 直接共享实例会把"上一轮的展示状态"带进下一轮。
+        String cacheKey = mikanInfoCacheKey(bangumiId);
+        String cached = CacheUtils.get(cacheKey);
+        if (StrUtil.isNotBlank(cached)) {
+            // 快照解析失败必须当作未命中继续抓取：缓存不能变成故障点
+            try {
+                MikanInfo cachedInfo = GsonStatic.fromJson(cached, MikanInfo.class);
+                if (Objects.nonNull(cachedInfo)) {
+                    return cachedInfo;
+                }
+            } catch (Exception e) {
+                log.warn("Mikan 详情缓存快照解析失败, 重新抓取: {} ({})", bangumiId, e.getMessage());
+            }
+        }
+
         URI host = URLUtil.getHost(URLUtil.url(getMikanHost()));
         String url = host + "/Home/Bangumi/" + bangumiId;
-        return withMikanRetry(url, () -> HttpReq.get(url)
+        MikanInfo info = withMikanRetry(url, () -> HttpReq.get(url)
                 .thenFunction(res -> {
                     HttpReq.assertStatus(res);
                     assertNotChallengePage(res);
@@ -448,6 +506,9 @@ public class MikanService {
                     mikanInfo.setGroups(groups);
                     return mikanInfo;
                 }));
+
+        CacheUtils.put(cacheKey, GsonStatic.toJson(info), MIKAN_INFO_TTL_MS);
+        return info;
     }
 
     public static void getMikanInfo(Ani ani, String subgroupId) {

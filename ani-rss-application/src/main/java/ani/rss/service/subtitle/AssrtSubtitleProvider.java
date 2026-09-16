@@ -334,21 +334,43 @@ public class AssrtSubtitleProvider {
      */
     public SubtitlePick download(SubtitleCandidate c, String preferredLang,
                                  Integer targetSeason, Integer targetEp, String videoName, Ani ani) {
+        return download(c, preferredLang, targetSeason, targetEp, videoName, ani, null);
+    }
+
+    /**
+     * 带「计划内字节缓存」的下载。
+     * <p>
+     * (P1-17) 合集压缩包候选会在 {@code SubtitleService#planOne} 的<b>逐视频</b>循环里被反复取用：
+     * 同一 URL 若不缓存，每个视频都要把整包重新下载一遍（一季 12~24 集 = 同样一次下载做 12~24 次）。
+     * 缓存由调用方按"一次计划构建"为生命周期传入，构建结束即释放，不会跨计划驻留大对象。
+     *
+     * @param bytesCache URL → 已下载字节；可为 {@code null}（不缓存，等价于旧行为）
+     */
+    public SubtitlePick download(SubtitleCandidate c, String preferredLang,
+                                 Integer targetSeason, Integer targetEp, String videoName, Ani ani,
+                                 Map<String, byte[]> bytesCache) {
         try {
-            byte[] data = fetchBytes(c.getUrl());
+            byte[] data = bytesCache == null ? null : bytesCache.get(c.getUrl());
             if (data == null || data.length == 0) {
-                return null;
-            }
-            // 部分 url 返回的是 JSON 重定向（含真实 url），再跳一次
-            String asText = new String(data, StandardCharsets.UTF_8).trim();
-            if (asText.startsWith("{")) {
-                try {
-                    JsonObject j = GsonStatic.fromJson(asText, JsonObject.class);
-                    if (j != null && j.has("url") && j.get("url").isJsonPrimitive()) {
-                        data = fetchBytes(j.get("url").getAsString());
+                data = fetchBytes(c.getUrl());
+                if (data == null || data.length == 0) {
+                    return null;
+                }
+                // 部分 url 返回的是 JSON 重定向（含真实 url），再跳一次
+                String asText = new String(data, StandardCharsets.UTF_8).trim();
+                if (asText.startsWith("{")) {
+                    try {
+                        JsonObject j = GsonStatic.fromJson(asText, JsonObject.class);
+                        if (j != null && j.has("url") && j.get("url").isJsonPrimitive()) {
+                            data = fetchBytes(j.get("url").getAsString());
+                        }
+                    } catch (Exception ignored) {
+                        // 不是 JSON，按字幕正文处理
                     }
-                } catch (Exception ignored) {
-                    // 不是 JSON，按字幕正文处理
+                }
+                // 只缓存有效结果：失败/空结果绝不入缓存，否则一次抖动会被固化成"这个候选是空的"
+                if (bytesCache != null && data != null && data.length > 0) {
+                    bytesCache.put(c.getUrl(), data);
                 }
             }
             if (c.isArchive()) {
@@ -634,7 +656,14 @@ public class AssrtSubtitleProvider {
         return 60_000L / rpm;
     }
 
-    private byte[] fetchBytes(String url) {
+    /**
+     * 取字幕文件字节（CDN 直链，<b>不</b>受 ASSRT 接口限流约束）。
+     * <p>
+     * 包可见（非 private）是刻意留的测试接缝：{@link #download} 的「计划内字节缓存」语义
+     * （同一 URL 只下一次）必须能在不起真实网络的前提下被断言，见
+     * {@code AssrtSubtitleProviderBytesCacheTest}。
+     */
+    byte[] fetchBytes(String url) {
         String safeUrl = url;
         if (safeUrl.startsWith("//")) {
             safeUrl = "https:" + safeUrl;

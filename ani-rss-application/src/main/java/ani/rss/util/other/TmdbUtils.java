@@ -2,6 +2,7 @@ package ani.rss.util.other;
 
 import ani.rss.commons.CacheUtils;
 import ani.rss.commons.ExceptionUtils;
+import ani.rss.commons.GsonStatic;
 import ani.rss.entity.Ani;
 import ani.rss.entity.Config;
 import ani.rss.entity.CustomTmdbConfig;
@@ -25,12 +26,45 @@ public class TmdbUtils {
     public final static TmdbUtil TMDB_UTIL = new TmdbUtil(config);
 
     /**
+     * 「标题 → TMDB」查询结果的进程内缓存 TTL（命中时）。
+     * <p>
+     * (P1-15) 此前没有任何进程内缓存：同一番剧在预览 / 改名 / 媒体库 / 字幕季解析等路径上
+     * 会被反复查询，而一次查询是 2~4 个网络往返（搜索 + getTitles + 可能的 AniList 罗马音）。
+     * 标题到 TMDB 的映射本身很稳定，10 分钟足够覆盖同一轮及相邻几轮。
+     */
+    private static final long TMDB_CACHE_TTL_MS = TimeUnit.MINUTES.toMillis(10);
+
+    /**
+     * 未命中（含"确实没有匹配"）的缓存 TTL。
+     * <p>
+     * 刻意取得很短：TMDB 抖动/超时绝不能像命中那样被固化 10 分钟，否则会出现
+     * "一段时间内所有番剧都拿不到 TMDB 标题"；但又足够吃掉同一轮里的重复无效搜索。
+     */
+    private static final long TMDB_EMPTY_TTL_MS = TimeUnit.SECONDS.toMillis(10);
+
+    /**
+     * 「标题 → TMDB」缓存键（抽出来供测试复用，避免测试里手写格式串而与实现脱节）。
+     */
+    static String tmdbCacheKey(String titleName, TmdbTypeEnum tmdbType) {
+        return StrFormatter.format("TmdbUtils_getTmdb:{}:{}", tmdbType, titleName);
+    }
+
+    /**
+     * 负结果占位符（{@code CacheUtils} 对 null 值不友好，用一个不可能与 JSON 冲突的哨兵）
+     */
+    static final String TMDB_EMPTY_MARKER = "\u0000TMDB_EMPTY";
+
+    /**
      * 获取番剧在tmdb的名称
+     * <p>
+     * (P1-15) 不再加 {@code synchronized}：原实现持类锁做 TMDB 查询（锁内 HTTP，默认 20s 超时），
+     * 一次慢查询会把全站改名/预览路径全部按住。方法内没有共享可变状态——唯一的写操作是
+     * {@code ani.setTmdb(...)}，写的是调用方自己的 {@link Ani} 实例；{@link RenameUtil} 也只有静态纯函数。
      *
      * @param ani 订阅
      * @return
      */
-    public synchronized static String getFinalName(Ani ani) {
+    public static String getFinalName(Ani ani) {
         Boolean ova = ani.getOva();
         String name = ani.getTitle();
         name = RenameUtil.renameDel(name, false);
@@ -249,12 +283,58 @@ public class TmdbUtils {
 
     /**
      * 根据名称获取tmdb信息
+     * <p>
+     * (P1-15) 加了进程内缓存，命中/未命中分别用不同 TTL（见 {@link #TMDB_CACHE_TTL_MS} /
+     * {@link #TMDB_EMPTY_TTL_MS}）。
+     * <p>
+     * 缓存的是 <b>JSON 快照</b>而不是 {@link Tmdb} 实例：{@link #getRomaji} 会改 {@code name}，
+     * 而 {@link #getFinalName(Ani)} 又把实例挂到 {@code ani.setTmdb(...)} 上。共享同一个实例会让
+     * 不同订阅/不同调用点互相影响；反序列化天然给出独立实例，代价只是一次小对象的 JSON 往返。
      *
      * @param titleName 标题名
      * @param tmdbType  类型
      * @return
      */
     public static Optional<Tmdb> getTmdb(String titleName, TmdbTypeEnum tmdbType) {
+        if (StrUtil.isBlank(titleName)) {
+            return Optional.empty();
+        }
+
+        String cacheKey = tmdbCacheKey(titleName, tmdbType);
+        String cached = CacheUtils.get(cacheKey);
+        if (Objects.nonNull(cached)) {
+            if (TMDB_EMPTY_MARKER.equals(cached)) {
+                return Optional.empty();
+            }
+            // 快照解析失败（理论上不会发生）必须当作未命中继续走真实查询：
+            // 缓存绝不能变成故障点，否则一条坏数据会让该标题永远查不到 TMDB。
+            try {
+                Tmdb cachedTmdb = GsonStatic.fromJson(cached, Tmdb.class);
+                if (Objects.nonNull(cachedTmdb)) {
+                    return Optional.of(cachedTmdb);
+                }
+            } catch (Exception e) {
+                log.warn("TMDB 缓存快照解析失败, 重新查询: {} ({})", titleName, e.getMessage());
+            }
+        }
+
+        Optional<Tmdb> tmdb = lookupTmdb(titleName, tmdbType);
+
+        tmdb.ifPresentOrElse(
+                it -> CacheUtils.put(cacheKey, GsonStatic.toJson(it), TMDB_CACHE_TTL_MS),
+                () -> CacheUtils.put(cacheKey, TMDB_EMPTY_MARKER, TMDB_EMPTY_TTL_MS)
+        );
+        return tmdb;
+    }
+
+    /**
+     * 真正发起 TMDB 查询（无缓存），并做相关性校验。
+     *
+     * @param titleName 标题名
+     * @param tmdbType  类型
+     * @return
+     */
+    private static Optional<Tmdb> lookupTmdb(String titleName, TmdbTypeEnum tmdbType) {
         Optional<Tmdb> tmdb = TMDB_UTIL.getTmdb(titleName, tmdbType);
         if (tmdb.isEmpty()) {
             return tmdb;
@@ -348,11 +428,15 @@ public class TmdbUtils {
 
     /**
      * 获取每集的标题
+     * <p>
+     * (P1-15 同批) 不再加 {@code synchronized}：缓存未命中时会发起 TMDB 网络请求，
+     * 持类锁做网络会拖住所有其它 TMDB 路径。缓存本身走线程安全的 CacheUtils，
+     * 并发未命中最多重复一次请求（结果一致）。
      *
      * @param ani 订阅
      * @return
      */
-    public static synchronized Map<Integer, TmdbEpisode> getEpisodeTitleMap(Ani ani) {
+    public static Map<Integer, TmdbEpisode> getEpisodeTitleMap(Ani ani) {
         Map<Integer, TmdbEpisode> episodeTitleMap = new HashMap<>();
 
         if (Objects.isNull(ani)) {
