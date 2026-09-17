@@ -3,6 +3,7 @@ package ani.rss.util.other;
 import ani.rss.commons.CacheUtils;
 import ani.rss.commons.ExceptionUtils;
 import ani.rss.commons.FileUtils;
+import ani.rss.commons.URLUtils;
 import ani.rss.entity.Ani;
 import ani.rss.entity.Config;
 import ani.rss.entity.Item;
@@ -460,6 +461,11 @@ public class ItemsUtil {
      * @return XML
      */
     public static String getRss(String url) {
+        try {
+            URLUtils.verify(url);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("RSS 地址非法: " + e.getMessage(), e);
+        }
         String cacheKey = "rss:" + url;
         String lastSuccessKey = "rss:last-success:" + url;
         String cached = CacheUtils.get(cacheKey);

@@ -70,6 +70,7 @@
                       <template #title>
                         <div class="flex collapse-title">
                           <img :src="proxyImage(anime['cover'])" class="cover" v-if="anime.cover"
+                               loading="lazy" decoding="async" :alt="anime.title?.primary || 'cover'"
                                @click.stop="open(`https://anibt.net/anime/${anime['bgmId']}`)">
                           <div class="flex collapse-title">
                             <el-text :truncated="false" line-clamp="1" size="small"

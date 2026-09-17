@@ -218,10 +218,14 @@ public class Transmission implements BaseDownload {
                 torrentsInfos.add(torrentsInfo);
             }
             return torrentsInfos;
+        } catch (RuntimeException e) {
+            // P0-2：查询失败必须上抛，与 qB 对齐；返回空会被当成"无任务"放行并发上限/误判坏种
+            throw e;
         } catch (Exception e) {
             log.error(e.getMessage(), e);
+            throw new IllegalStateException("查询 Transmission 任务列表失败", e);
         }
-        return new ArrayList<>();
+        // unreachable: 上方分支要么返回要么抛异常
     }
 
     @Override

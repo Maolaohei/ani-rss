@@ -113,6 +113,18 @@ public class AssrtSubtitleProvider {
     private static final Map<Character, Integer> CJK_UNITS = Map.of('十', 10, '百', 100, '千', 1000);
 
     /**
+     * 单次字幕下载上限 150MiB：Content-Length 预检与落盘后双重校验，
+     * 防止异常大文件打爆内存（调用方 {@link #download} 捕获抛出的异常并视为失败）。
+     */
+    private static final long MAX_FETCH_BYTES = 150L * 1024 * 1024;
+
+    /**
+     * 压缩包内单字幕条目上限 20MiB：超限条目直接跳过
+     * （与 {@code SubtitleService} 落盘 20MiB 检查对齐）。
+     */
+    private static final long MAX_ZIP_ENTRY_BYTES = 20L * 1024 * 1024;
+
+    /**
      * ASSRT 频率限制默认值（次/分钟）。实际值取自 {@code Config.assrtRateLimitPerMinute}，
      * 与 assrt.net 用户后台配额保持一致；此处仅作兜底，避免未配置时无限流。
      */
@@ -673,7 +685,20 @@ public class AssrtSubtitleProvider {
             if (!res.isOk()) {
                 data = new byte[0];
             } else {
+                String contentLength = res.header("Content-Length");
+                if (StrUtil.isNotBlank(contentLength)) {
+                    try {
+                        long length = Long.parseLong(contentLength.trim());
+                        if (length > MAX_FETCH_BYTES) {
+                            throw new IllegalStateException("字幕文件过大，拒绝下载: " + length + " bytes");
+                        }
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
                 data = res.bodyBytes();
+                if (data.length > MAX_FETCH_BYTES) {
+                    throw new IllegalStateException("字幕文件过大，拒绝缓存: " + data.length + " bytes");
+                }
             }
         }
         return data;
@@ -714,6 +739,10 @@ public class AssrtSubtitleProvider {
                 if (!SUB_EXT.contains(ext)) {
                     continue;
                 }
+                if (entry.getSize() > MAX_ZIP_ENTRY_BYTES) {
+                    log.warn("ASSRT 压缩包条目过大已跳过 {}: {} bytes", name, entry.getSize());
+                    continue;
+                }
                 // 已知目标集数时按集/季过滤
                 int[] se = extractSeasonEpisode(name);
                 int s = se[0];
@@ -736,6 +765,10 @@ public class AssrtSubtitleProvider {
                         && entrySeason != null && entrySeason.equals(effectiveSeason);
 
                 byte[] content = zis.readAllBytes();
+                if (content.length > MAX_ZIP_ENTRY_BYTES) {
+                    log.warn("ASSRT 压缩包条目过大已跳过 {}: {} bytes", name, content.length);
+                    continue;
+                }
                 double sc = similarity(videoName, name) * 50;
                 if (preferredLang.equalsIgnoreCase(detectLang(name, "", preferredLang))) {
                     sc += 100;

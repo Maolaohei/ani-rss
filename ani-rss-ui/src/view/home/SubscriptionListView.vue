@@ -86,6 +86,11 @@
 </template>
 
 <script setup>
+/**
+ * P1: 封面懒加载已由卡片层承担（AniCardView/AniCoverView img 均带 loading="lazy" + decoding="async"，
+ * 本页无直写 <img>）。虚拟滚动太重不做：订阅卡片高度不一（含 popover/下拉菜单等有状态弹层），
+ * 虚拟化需重写卡片状态保持，收益不及风险，暂保持 v-memo + 全量渲染。
+ */
 import {computed, nextTick, onActivated, onMounted, onUnmounted, ref, watch} from "vue";
 import {useRoute} from "vue-router";
 import EditAniView from "./EditAniView.vue";

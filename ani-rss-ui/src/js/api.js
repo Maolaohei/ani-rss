@@ -37,7 +37,7 @@ let put = async (url, body, options) => {
  *   skipAuthReload —— 403 时不清理令牌、不 reload（登录页必须用，否则提示会被刷新抹掉）
  */
 let fetch_ = async (url, method, body, options = {}) => {
-    let {silent = false, skipAuthReload = false} = options
+    let {silent = false, skipAuthReload = false, signal} = options
     let headers = {}
     if (authorization.value) {
         headers['Authorization'] = authorization.value
@@ -51,9 +51,15 @@ let fetch_ = async (url, method, body, options = {}) => {
         res = await fetch(url, {
             method: method,
             body: body ? JSON.stringify(body) : null,
-            headers: headers
+            headers: headers,
+            // P1: 透传 AbortSignal，任务页切 Tab/失活时可取消在途轮询
+            ...(signal ? {signal} : {})
         })
     } catch (e) {
+        // 主动取消不弹错（调用方切页/失活是预期行为）
+        if (e && (e.name === 'AbortError' || signal?.aborted)) {
+            return Promise.reject(makeError('请求已取消'))
+        }
         return Promise.reject(handleTransportError(e, silent))
     }
 

@@ -193,10 +193,12 @@ export let previewAni = (ani) => api.post('api/previewAni', ani)
 export let forceDownload = (ani, infoHashes) => api.post('api/forceDownload', {ani, infoHashes})
 
 /**
- * 日志
+ * 日志（倒序最新 N 条，默认 200，与后端 /logs limit 对齐）
+ * @param limit 条数
+ * @param options 透传 api 选项
  * @returns {Promise<unknown>}
  */
-export let logs = () => api.post('api/logs')
+export let logs = (limit = 200, options) => api.post('api/logs', {limit}, options)
 
 /**
  * 清理日志

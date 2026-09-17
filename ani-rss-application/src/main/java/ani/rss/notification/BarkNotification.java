@@ -48,6 +48,7 @@ public class BarkNotification implements BaseNotification {
         Assert.notBlank(serverUrl, "请设置 Bark ServerUrl");
 
         return HttpReq.post(serverUrl + "/push")
+                .timeout(10_000)
                 .body(GsonStatic.toJson(barkPushBody))
                 .thenFunction(HttpResponse::isOk);
     }

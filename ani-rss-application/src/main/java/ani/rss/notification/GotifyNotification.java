@@ -47,6 +47,7 @@ public class GotifyNotification implements BaseNotification {
         ));
 
         return HttpReq.post(serverUrl + "/message?token=" + token.trim())
+                .timeout(10_000)
                 .body(payload)
                 .thenFunction(HttpResponse::isOk);
     }

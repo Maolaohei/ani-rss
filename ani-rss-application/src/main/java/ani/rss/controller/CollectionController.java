@@ -77,55 +77,62 @@ public class CollectionController extends BaseController {
         String torrent = collectionInfo.getTorrent();
         Assert.notBlank(torrent, "种子内容为空, 请重新上传种子文件");
         File tempFile = FileUtil.createTempFile();
-        Base64.decodeToFile(torrent, tempFile);
-        TorrentFile torrentFile;
         try {
-            torrentFile = new TorrentFile(tempFile);
-        } catch (Exception e) {
-            throw ResultException.exception("种子文件解析失败, 请确认是有效的 .torrent 文件");
-        }
-        Ani ani = collectionInfo.getAni();
-        // 尽早校验: 标题会进下载路径、季数会被拆箱, 有问题要在动手下载之前就拒掉
-        AniUtil.verifyCollectionAni(ani);
-        String title = ani.getTitle();
-        String subgroup = ani.getSubgroup();
-        String downloadPath = ani.getDownloadPath();
+            Base64.decodeToFile(torrent, tempFile);
+            TorrentFile torrentFile;
+            try {
+                torrentFile = new TorrentFile(tempFile);
+            } catch (Exception e) {
+                throw ResultException.exception("种子文件解析失败, 请确认是有效的 .torrent 文件");
+            }
+            Ani ani = collectionInfo.getAni();
+            // 尽早校验: 标题会进下载路径、季数会被拆箱, 有问题要在动手下载之前就拒掉
+            AniUtil.verifyCollectionAni(ani);
+            String title = ani.getTitle();
+            String subgroup = ani.getSubgroup();
+            String downloadPath = ani.getDownloadPath();
 
-        String name = StrFormatter.format("[{}] {} 第{}季", subgroup, title, ani.getSeason());
+            String name = StrFormatter.format("[{}] {} 第{}季", subgroup, title, ani.getSeason());
 
-        Config config = ConfigUtil.CONFIG;
-        String downloadTool = config.getDownloadToolType();
+            Config config = ConfigUtil.CONFIG;
+            String downloadTool = config.getDownloadToolType();
 
-        // 预览计划: 一次解析, qB 与 OpenList 共用
-        List<Item> plan = preview(collectionInfo);
-        Assert.notEmpty(plan, "预览结果为空, 请检查匹配/排除规则");
+            // 预览计划: 一次解析, qB 与 OpenList 共用
+            // NOTE: preview 内部会再次解码/解析同一种子（双解析），未复用此处 torrentFile：
+            // preview 是多入口共用的 static synchronized 方法，复用需改签名，改动面大；
+            // 合集为低频人工操作，双解析成本可接受，此处至少保证 tempFile 在 finally 清理。
+            List<Item> plan = preview(collectionInfo);
+            Assert.notEmpty(plan, "预览结果为空, 请检查匹配/排除规则");
 
-        // OpenList/Alist: 走离线下载全链路(提交/等待/重命名/归位/清理/通知), 与订阅体验一致
-        if ("OpenList".equalsIgnoreCase(downloadTool) || "Alist".equalsIgnoreCase(downloadTool)) {
-            Result<Void> result = startCollectionByOpenList(ani, plan, tempFile, torrentFile.getName());
-            // 合集关联的番剧也写入订阅列表(仅入列、不轮询、去重), 使其在「订阅」里可见可管理
+            // OpenList/Alist: 走离线下载全链路(提交/等待/重命名/归位/清理/通知), 与订阅体验一致
+            if ("OpenList".equalsIgnoreCase(downloadTool) || "Alist".equalsIgnoreCase(downloadTool)) {
+                Result<Void> result = startCollectionByOpenList(ani, plan, tempFile, torrentFile.getName());
+                // 合集关联的番剧也写入订阅列表(仅入列、不轮询、去重), 使其在「订阅」里可见可管理
+                AniUtil.addCollectionAni(ani);
+                return result;
+            }
+
+            if (!"qBittorrent".equalsIgnoreCase(downloadTool)) {
+                throw ResultException.exception(StrFormatter.format(
+                        "合集下载暂时只支持 qBittorrent / OpenList, 当前: {}", downloadTool));
+            }
+
+            download(name, tempFile, downloadPath, List.of("ANI-RSS合集下载", subgroup));
+
+            TorrentsInfo torrentsInfo = new TorrentsInfo()
+                    .setHash(torrentFile.getHexHash());
+
+            // 合集关联的番剧也写入订阅列表(仅入列、不轮询、去重), 使其在「订阅」里可见可管理。
+            // 放在提交后立即执行：后处理已异步化，若等它跑完再入列，用户要 ~32.5s 后才看得到订阅
             AniUtil.addCollectionAni(ani);
-            return result;
+
+            // 等待元数据 + 逐文件重命名放后台：最坏 ~32.5s，不能占用 Tomcat 请求线程（P1-8）
+            COLLECTION_POST_POOL.execute(() -> finishQbCollection(torrentsInfo, plan, config));
+
+            return Result.success("已经开始下载合集, 正在后台等待元数据并重命名, 进度可在日志中查看");
+        } finally {
+            FileUtil.del(tempFile);
         }
-
-        if (!"qBittorrent".equalsIgnoreCase(downloadTool)) {
-            throw ResultException.exception(StrFormatter.format(
-                    "合集下载暂时只支持 qBittorrent / OpenList, 当前: {}", downloadTool));
-        }
-
-        download(name, tempFile, downloadPath, List.of("ANI-RSS合集下载", subgroup));
-
-        TorrentsInfo torrentsInfo = new TorrentsInfo()
-                .setHash(torrentFile.getHexHash());
-
-        // 合集关联的番剧也写入订阅列表(仅入列、不轮询、去重), 使其在「订阅」里可见可管理。
-        // 放在提交后立即执行：后处理已异步化，若等它跑完再入列，用户要 ~32.5s 后才看得到订阅
-        AniUtil.addCollectionAni(ani);
-
-        // 等待元数据 + 逐文件重命名放后台：最坏 ~32.5s，不能占用 Tomcat 请求线程（P1-8）
-        COLLECTION_POST_POOL.execute(() -> finishQbCollection(torrentsInfo, plan, config));
-
-        return Result.success("已经开始下载合集, 正在后台等待元数据并重命名, 进度可在日志中查看");
     }
 
     /**
@@ -292,15 +299,16 @@ public class CollectionController extends BaseController {
         String torrent = collectionInfo.getTorrent();
         Assert.notBlank(torrent, "种子内容为空, 请重新上传种子文件");
         File tempFile = FileUtil.createTempFile();
-        Base64.decodeToFile(torrent, tempFile);
-        TorrentFile torrentFile;
         try {
-            torrentFile = new TorrentFile(tempFile);
-        } catch (Exception e) {
-            throw ResultException.exception("种子文件解析失败, 请确认是有效的 .torrent 文件");
-        }
+            Base64.decodeToFile(torrent, tempFile);
+            TorrentFile torrentFile;
+            try {
+                torrentFile = new TorrentFile(tempFile);
+            } catch (Exception e) {
+                throw ResultException.exception("种子文件解析失败, 请确认是有效的 .torrent 文件");
+            }
 
-        Ani ani = collectionInfo.getAni();
+            Ani ani = collectionInfo.getAni();
         long[] lengths = torrentFile.getLengths();
         AtomicInteger index = new AtomicInteger(0);
 
@@ -401,6 +409,10 @@ public class CollectionController extends BaseController {
                 })
                 .filter(Objects::nonNull)
                 .toList();
+        } finally {
+            // 解析已在内存（TorrentFile），临时文件不再需要，必须清理防 /tmp 堆积
+            FileUtil.del(tempFile);
+        }
     }
 
     public static synchronized void download(String name, File torrentFile, String savePath, List<String> tags) {

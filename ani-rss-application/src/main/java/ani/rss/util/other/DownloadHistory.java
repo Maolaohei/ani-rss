@@ -1,5 +1,6 @@
 package ani.rss.util.other;
 
+import ani.rss.commons.FileUtils;
 import ani.rss.commons.GsonStatic;
 import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.io.FileUtil;
@@ -19,6 +20,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 下载历史（本地 JSON，成功侧对账）。
@@ -37,6 +43,20 @@ public final class DownloadHistory {
 
     private static final CopyOnWriteArrayList<DownloadRecord> ITEMS = new CopyOnWriteArrayList<>();
     private static volatile boolean loaded = false;
+
+    /**
+     * 落盘节流：record 高频时合并写盘，避免每次下载都全量序列化 + 写临时文件 + move。
+     * query/list 只读内存（CopyOnWrite），保持同步可见，不受异步落盘影响。
+     */
+    private static final long SAVE_THROTTLE_MS = 2000L;
+    private static final AtomicLong LAST_SAVE_MS = new AtomicLong(0L);
+    private static final AtomicBoolean SAVE_SCHEDULED = new AtomicBoolean(false);
+    private static final ScheduledExecutorService SAVE_EXECUTOR = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "download-history-save");
+        t.setDaemon(true);
+        return t;
+    });
+    private static volatile String LAST_SAVED_JSON;
 
     private DownloadHistory() {
     }
@@ -114,7 +134,7 @@ public final class DownloadHistory {
             String ts = DateUtil.format(new Date(), "yyyyMMddHHmmss");
             File badFile = new File(file.getParentFile(), FILE_NAME + ".bad-" + ts);
             try {
-                FileUtil.move(file, badFile, true);
+                FileUtils.move(file.toPath(), badFile.toPath());
                 log.error("下载历史文件解析失败, 已改名为 [{}] 保留现场; 本次以空历史继续", badFile.getName());
             } catch (Exception moveException) {
                 log.error("下载历史文件解析失败, 且改名保留失败(可能被占用): {}", file, moveException);
@@ -128,12 +148,42 @@ public final class DownloadHistory {
         ensureLoaded();
         try {
             File file = file();
+            String json = GsonStatic.toJson(new ArrayList<>(ITEMS));
+            // 内容未变跳过：record 去重/高频调用时省掉临时文件 + 原子 move
+            if (json.equals(LAST_SAVED_JSON) && file.exists()) {
+                return;
+            }
             File temp = new File(file.getPath() + ".temp");
-            FileUtil.writeString(GsonStatic.toJson(new ArrayList<>(ITEMS)), temp, StandardCharsets.UTF_8);
-            FileUtil.move(temp, file, true);
+            FileUtil.writeString(json, temp, StandardCharsets.UTF_8);
+            FileUtils.move(temp.toPath(), file.toPath());
+            LAST_SAVED_JSON = json;
+            LAST_SAVE_MS.set(System.currentTimeMillis());
         } catch (Exception e) {
             log.warn("保存下载历史失败: {}", e.getMessage());
         }
+    }
+
+    /**
+     * 节流落盘：距上次落盘不足 2s 则延迟 2s 异步写一次（同窗口只排一次），
+     * 异步线程执行时读取当前 ITEMS 全量，因此不丢数据、只延后。
+     */
+    private static void saveThrottled() {
+        long now = System.currentTimeMillis();
+        // 文件不存在时立即落盘（首写/换目录/测试隔离），避免跨用例节流窗口吞掉写入
+        if (now - LAST_SAVE_MS.get() < SAVE_THROTTLE_MS && file().exists()) {
+            if (SAVE_SCHEDULED.compareAndSet(false, true)) {
+                SAVE_EXECUTOR.schedule(() -> {
+                    SAVE_SCHEDULED.set(false);
+                    try {
+                        save();
+                    } catch (Exception e) {
+                        log.debug("异步保存下载历史失败: {}", e.getMessage());
+                    }
+                }, SAVE_THROTTLE_MS, TimeUnit.MILLISECONDS);
+            }
+            return;
+        }
+        save();
     }
 
     public static List<DownloadRecord> list() {
@@ -310,7 +360,7 @@ public final class DownloadHistory {
         while (ITEMS.size() > MAX_SIZE) {
             ITEMS.remove(ITEMS.size() - 1);
         }
-        save();
+        saveThrottled();
     }
 
     private static void ensureLoaded() {
@@ -329,5 +379,8 @@ public final class DownloadHistory {
     static synchronized void resetForTest() {
         ITEMS.clear();
         loaded = true;
+        LAST_SAVED_JSON = null;
+        LAST_SAVE_MS.set(0L);
+        SAVE_SCHEDULED.set(false);
     }
 }

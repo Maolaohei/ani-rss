@@ -180,9 +180,10 @@ const getLogs = () => {
   if (!logs.value.length) {
     loading.value = true
   }
-  return http.logs()
+  return http.logs(200)
       .then(async res => {
-        logs.value = res.data || []
+        // 后端 /logs 默认倒序（最新在前）；本页是时间正序 viewer（跟随=滚到底部看最新），收后翻回正序
+        logs.value = [...(res.data || [])].reverse()
         selectLoggerNames.value = selectLoggerNames.value
             .filter(loggerName => loggerNames.value.includes(loggerName))
         await scrollToBottom()

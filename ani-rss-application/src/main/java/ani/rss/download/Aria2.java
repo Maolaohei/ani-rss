@@ -85,13 +85,17 @@ public class Aria2 implements BaseDownload {
     public List<TorrentsInfo> getTorrentsInfos() {
         List<TorrentsInfo> torrentsInfos = new ArrayList<>();
         // (A4) 原 sleep(1000) 位于调用方(TorrentUtil.getTorrentsInfos)类锁内, 已删除
+        // P0-2：三批查询任一失败必须上抛（与 qB 对齐），否则空/半截列表会被当成"无任务"
+        // 放行并发上限或误判坏种；调用方已有 catch 降级，不会打挂整轮。
         try {
             torrentsInfos.addAll(getTorrentsInfos("aria2/tellActive.json"));
             torrentsInfos.addAll(getTorrentsInfos("aria2/tellWaiting.json"));
             torrentsInfos.addAll(getTorrentsInfos("aria2/tellStopped.json"));
+        } catch (RuntimeException e) {
+            throw e;
         } catch (Exception e) {
-            // 保持原语义: 单批失败记录日志, 返回已获取的部分(不整体上抛)
             log.error(e.getMessage(), e);
+            throw new IllegalStateException("查询 Aria2 任务列表失败", e);
         }
         return torrentsInfos;
     }

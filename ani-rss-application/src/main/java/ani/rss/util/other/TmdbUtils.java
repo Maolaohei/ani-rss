@@ -160,7 +160,7 @@ public class TmdbUtils {
         Config config = ConfigUtil.CONFIG;
 
         boolean titleYear = config.getTitleYear();
-        if (titleYear) {
+        if (titleYear && tmdb.getDate() != null) {
             title = RenameUtil.renameDel(title, false);
             title = StrFormatter.format("{} ({})", title, DateUtil.year(tmdb.getDate()));
         }
@@ -212,7 +212,10 @@ public class TmdbUtils {
             String iso31661 = tmdbTitle.getIso31661();
             String type = tmdbTitle.getType();
             String title = tmdbTitle.getTitle();
-            if (!iso31661.equals("JP")) {
+            if (!"JP".equals(iso31661)) {
+                continue;
+            }
+            if (type == null || StrUtil.isBlank(title)) {
                 continue;
             }
             if (List.of("romaji", "romanization").contains(type.toLowerCase())) {

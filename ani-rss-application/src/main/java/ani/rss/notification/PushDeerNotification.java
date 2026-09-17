@@ -36,6 +36,7 @@ public class PushDeerNotification implements BaseNotification {
         String title = StrUtil.blankToDefault(ani.getTitle(), "ani-rss");
 
         return HttpReq.post(apiUrl + "/message/push")
+                .timeout(10_000)
                 .form("pushkey", key.trim())
                 .form("text", title)
                 .form("desp", body)

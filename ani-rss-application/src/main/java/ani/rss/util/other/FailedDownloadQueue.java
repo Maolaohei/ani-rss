@@ -1,5 +1,6 @@
 package ani.rss.util.other;
 
+import ani.rss.commons.FileUtils;
 import ani.rss.commons.GsonStatic;
 import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.io.FileUtil;
@@ -16,6 +17,11 @@ import java.util.Date;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 失败下载条目队列（本地 JSON，手动重试）。
@@ -28,6 +34,19 @@ public final class FailedDownloadQueue {
 
     private static final CopyOnWriteArrayList<FailedItem> ITEMS = new CopyOnWriteArrayList<>();
     private static volatile boolean loaded = false;
+
+    /**
+     * 落盘节流（同 DownloadHistory）：record 高频时合并写盘，list 只读内存保持同步可见。
+     */
+    private static final long SAVE_THROTTLE_MS = 2000L;
+    private static final AtomicLong LAST_SAVE_MS = new AtomicLong(0L);
+    private static final AtomicBoolean SAVE_SCHEDULED = new AtomicBoolean(false);
+    private static final ScheduledExecutorService SAVE_EXECUTOR = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "failed-queue-save");
+        t.setDaemon(true);
+        return t;
+    });
+    private static volatile String LAST_SAVED_JSON;
 
     private FailedDownloadQueue() {
     }
@@ -67,7 +86,7 @@ public final class FailedDownloadQueue {
             String ts = DateUtil.format(new Date(), "yyyyMMddHHmmss");
             File badFile = new File(file.getParentFile(), FILE_NAME + ".bad-" + ts);
             try {
-                FileUtil.move(file, badFile, true);
+                FileUtils.move(file.toPath(), badFile.toPath());
                 log.error("失败队列文件解析失败, 已改名为 [{}] 保留现场; 本次以空失败列表继续", badFile.getName());
             } catch (Exception moveException) {
                 log.error("失败队列文件解析失败, 且改名保留失败(可能被占用): {}", file, moveException);
@@ -83,12 +102,40 @@ public final class FailedDownloadQueue {
         try {
             // 原子写：temp + rename，避免写盘瞬间崩溃/磁盘满留下截断的 json
             File file = file();
+            String json = GsonStatic.toJson(new ArrayList<>(ITEMS));
+            if (json.equals(LAST_SAVED_JSON) && file.exists()) {
+                return;
+            }
             File temp = new File(file.getPath() + ".temp");
-            FileUtil.writeString(GsonStatic.toJson(new ArrayList<>(ITEMS)), temp, StandardCharsets.UTF_8);
-            FileUtil.move(temp, file, true);
+            FileUtil.writeString(json, temp, StandardCharsets.UTF_8);
+            FileUtils.move(temp.toPath(), file.toPath());
+            LAST_SAVED_JSON = json;
+            LAST_SAVE_MS.set(System.currentTimeMillis());
         } catch (Exception e) {
             log.warn("保存失败队列失败: {}", e.getMessage());
         }
+    }
+
+    /**
+     * 节流落盘：距上次不足 2s 则延迟 2s 异步写一次，异步时读当前全量，不丢数据。
+     */
+    private static void saveThrottled() {
+        long now = System.currentTimeMillis();
+        // 文件不存在时立即落盘（首写/换目录/测试隔离），避免跨用例节流窗口吞掉写入
+        if (now - LAST_SAVE_MS.get() < SAVE_THROTTLE_MS && file().exists()) {
+            if (SAVE_SCHEDULED.compareAndSet(false, true)) {
+                SAVE_EXECUTOR.schedule(() -> {
+                    SAVE_SCHEDULED.set(false);
+                    try {
+                        save();
+                    } catch (Exception e) {
+                        log.debug("异步保存失败队列失败: {}", e.getMessage());
+                    }
+                }, SAVE_THROTTLE_MS, TimeUnit.MILLISECONDS);
+            }
+            return;
+        }
+        save();
     }
 
     public static List<FailedItem> list() {
@@ -156,7 +203,7 @@ public final class FailedDownloadQueue {
         while (ITEMS.size() > MAX_SIZE) {
             ITEMS.remove(ITEMS.size() - 1);
         }
-        save();
+        saveThrottled();
     }
 
     private static void ensureLoaded() {
@@ -173,5 +220,8 @@ public final class FailedDownloadQueue {
     static synchronized void resetForTest() {
         ITEMS.clear();
         loaded = true;
+        LAST_SAVED_JSON = null;
+        LAST_SAVE_MS.set(0L);
+        SAVE_SCHEDULED.set(false);
     }
 }

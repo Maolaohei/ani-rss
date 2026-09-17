@@ -179,6 +179,10 @@ let sortTypeList = [
 
 let polling = false
 let stopped = false
+// P1: 轮询令牌 + AbortController（参考 TaskManagerView.pollToken 模式）。
+// 切 Tab/失活时递增 token 并 abort 在途请求，避免过期响应覆盖新 Tab 数据、避免后台常驻轮询。
+let pollToken = 0
+let abortController = null
 
 let torrentsInfos = ref([])
 
@@ -235,16 +239,48 @@ let startPolling = async () => {
     return
   }
   polling = true
-  while (!stopped) {
+  const token = pollToken
+  while (!stopped && token === pollToken) {
+    abortController = new AbortController()
     try {
-      let res = await http.torrentsInfos()
+      let res = await http.torrentsInfos({signal: abortController.signal, silent: true})
+      if (stopped || token !== pollToken) {
+        break
+      }
       let infos = await res.data
-      torrentsInfos.value = sortInfos(infos)
+      // P1: sort 后不再整体赋值，按 hash diff 只替换变化项（复用 Dashboard mergeTorrents 语义），
+      // 未变化的任务沿用旧引用，Vue 不会全量重渲染卡片。key 口径与模板 :key 一致。
+      torrentsInfos.value = mergeTorrents(sortInfos(infos))
     } catch (_) {
+      // 取消/失败都继续下一轮；取消时 token 已变，循环条件会退出
+    }
+    if (stopped || token !== pollToken) {
+      break
     }
     await sleep(3000)
   }
   polling = false
+  // 补启动：pause→resume 发生在旧循环 sleep/在途期间时，resume 的 startPolling 会因 polling=true 直接返回，
+  // 旧循环退出后靠这里补一次，否则轮询就彻底停了
+  if (!stopped && token !== pollToken) {
+    startPolling()
+  }
+}
+
+/**
+ * 按 key 做增量更新：只替换内容真正变化的任务对象，未变的沿用旧引用。
+ * 整体替换会让 Vue 认为每张卡片都变了、每次轮询都全量重渲染。
+ * 与 DashboardView.mergeTorrents 同语义（此处 key 口径与模板 :key 一致：hash || id || name）。
+ */
+const mergeTorrents = list => {
+  const previous = new Map(torrentsInfos.value.map(item => [item.hash || item.id || item.name, item]))
+  return (list || []).map(item => {
+    const old = previous.get(item.hash || item.id || item.name)
+    if (old && JSON.stringify(old) === JSON.stringify(item)) {
+      return old
+    }
+    return item
+  })
 }
 
 let sleep = ms => {
@@ -253,11 +289,16 @@ let sleep = ms => {
 
 const resumePolling = () => {
   stopped = false
+  pollToken++
   startPolling()
 }
 
 const pausePolling = () => {
   stopped = true
+  // 失效当前轮询代次并取消在途请求：在途响应返回后因 token 失配被丢弃，不会覆盖新状态
+  pollToken++
+  abortController?.abort()
+  abortController = null
 }
 
 onActivated(() => {

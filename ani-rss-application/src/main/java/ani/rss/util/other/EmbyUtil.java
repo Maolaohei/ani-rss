@@ -18,8 +18,10 @@ public class EmbyUtil {
 
     /**
      * 扫描媒体库
+     * <p>
+     * P1-8：去 static synchronized，Emby HTTP 调用无需持类锁串行。
      */
-    public static synchronized void refresh(NotificationConfig notificationConfig) {
+    public static void refresh(NotificationConfig notificationConfig) {
         List<String> viewIds = notificationConfig.getEmbyRefreshViewIds();
         List<EmbyViews> views = getViews(notificationConfig);
 
@@ -35,10 +37,12 @@ public class EmbyUtil {
 
     /**
      * 扫描媒体库
+     * <p>
+     * P1-8：去 static synchronized。
      *
      * @param embyViews 媒体库
      */
-    public static synchronized void refresh(EmbyViews embyViews, NotificationConfig notificationConfig) {
+    public static void refresh(EmbyViews embyViews, NotificationConfig notificationConfig) {
         String embyHost = notificationConfig.getEmbyHost();
         String embyApiKey = notificationConfig.getEmbyApiKey();
 
@@ -62,10 +66,12 @@ public class EmbyUtil {
 
     /**
      * 获取媒体库列表
+     * <p>
+     * P1-8：去 static synchronized；解析加空守卫，Items 缺失时返回空列表。
      *
      * @return 媒体库列表
      */
-    public static synchronized List<EmbyViews> getViews(NotificationConfig notificationConfig) {
+    public static List<EmbyViews> getViews(NotificationConfig notificationConfig) {
         String embyHost = notificationConfig.getEmbyHost();
         String embyApiKey = notificationConfig.getEmbyApiKey();
 
@@ -79,14 +85,30 @@ public class EmbyUtil {
                 .thenFunction(res -> {
                     HttpReq.assertStatus(res);
                     JsonObject body = GsonStatic.fromJson(res.body(), JsonObject.class);
-                    return body.get("Items").getAsJsonArray();
+                    // P1-8：空守卫，body/Items 缺失或形态异常时返回空数组
+                    if (body == null) {
+                        return new JsonArray();
+                    }
+                    JsonElement itemsEl = body.get("Items");
+                    if (itemsEl == null || itemsEl.isJsonNull() || !itemsEl.isJsonArray()) {
+                        return new JsonArray();
+                    }
+                    return itemsEl.getAsJsonArray();
                 });
 
         // 遍历媒体库
         for (JsonElement item : items) {
+            if (item == null || item.isJsonNull() || !item.isJsonObject()) {
+                continue;
+            }
             JsonObject itemAsJsonObject = item.getAsJsonObject();
-            String id = itemAsJsonObject.get("Id").getAsString();
-            String name = itemAsJsonObject.get("Name").getAsString();
+            JsonElement idElement = itemAsJsonObject.get("Id");
+            JsonElement nameElement = itemAsJsonObject.get("Name");
+            if (idElement == null || idElement.isJsonNull() || nameElement == null || nameElement.isJsonNull()) {
+                continue;
+            }
+            String id = idElement.getAsString();
+            String name = nameElement.getAsString();
             EmbyViews views = new EmbyViews()
                     .setId(id)
                     .setName(name);

@@ -708,23 +708,30 @@ public class OpenListApi {
      */
     public Optional<OpenListTaskInfo> taskInfo(String tid) {
         try {
-            String safeTid = requireSafeTid(tid);
-            OpenListTaskInfo taskInfo = retryIdempotent("task/info " + safeTid,
-                    () -> postApi("task/offline_download/info?tid=" + safeTid)
-                            .thenFunction(res -> {
-                                HttpReq.assertStatus(res);
-                                JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                                int code = jsonObject.get("code").getAsInt();
-                                if (code != 200 || !jsonObject.has("data") || jsonObject.get("data").isJsonNull()) {
-                                    throw new IllegalStateException("task/info 失败 code=" + code);
-                                }
-                                return GsonStatic.fromJson(jsonObject.get("data").getAsJsonObject(), OpenListTaskInfo.class);
-                            }));
-            return Optional.ofNullable(taskInfo);
+            return taskInfoStrict(tid);
         } catch (Exception e) {
             log.warn("OpenList task/info 调用失败 tid={}: {}", tid, ExceptionUtils.getMessage(e));
             return Optional.empty();
         }
+    }
+
+    /**
+     * P0-3：严格版 task/info，失败抛而非 empty，供写路径使用。
+     */
+    public Optional<OpenListTaskInfo> taskInfoStrict(String tid) {
+        String safeTid = requireSafeTid(tid);
+        OpenListTaskInfo taskInfo = retryIdempotent("task/info " + safeTid,
+                () -> postApi("task/offline_download/info?tid=" + safeTid)
+                        .thenFunction(res -> {
+                            HttpReq.assertStatus(res);
+                            JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
+                            int code = jsonObject.get("code").getAsInt();
+                            if (code != 200 || !jsonObject.has("data") || jsonObject.get("data").isJsonNull()) {
+                                throw new IllegalStateException("task/info 失败 code=" + code);
+                            }
+                            return GsonStatic.fromJson(jsonObject.get("data").getAsJsonObject(), OpenListTaskInfo.class);
+                        }));
+        return Optional.ofNullable(taskInfo);
     }
 
     /**
@@ -736,21 +743,30 @@ public class OpenListApi {
      */
     public List<OpenListTaskInfo> taskUnDoneList() {
         try {
-            return getApi("task/offline_download/undone")
-                    .thenFunction(res -> {
-                        HttpReq.assertStatus(res);
-                        JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                        JsonElement data = jsonObject == null ? null : jsonObject.get("data");
-                        if (data == null || data.isJsonNull()) {
-                            log.warn("OpenList task/undone 返回缺少 data, 按空任务处理");
-                            return List.of();
-                        }
-                        return GsonStatic.fromJsonList(data.getAsJsonArray(), OpenListTaskInfo.class);
-                    });
+            return taskUnDoneListStrict();
         } catch (Exception e) {
             log.warn("OpenList task/undone 调用失败: {}", ExceptionUtils.getMessage(e));
             return List.of();
         }
+    }
+
+    /**
+     * P0-3：严格版未完成任务列表。写路径（adopt/复用判定）必须区分"确实无任务"
+     * 与"查询失败"，失败抛而非返回空，否则一次抖动就会重复提交撞 10008。
+     * 读/展示路径继续用非严格版。
+     */
+    public List<OpenListTaskInfo> taskUnDoneListStrict() {
+        return getApi("task/offline_download/undone")
+                .thenFunction(res -> {
+                    HttpReq.assertStatus(res);
+                    JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
+                    JsonElement data = jsonObject == null ? null : jsonObject.get("data");
+                    if (data == null || data.isJsonNull()) {
+                        log.warn("OpenList task/undone 返回缺少 data, 按空任务处理");
+                        return List.of();
+                    }
+                    return GsonStatic.fromJsonList(data.getAsJsonArray(), OpenListTaskInfo.class);
+                });
     }
 
     /**
@@ -762,21 +778,28 @@ public class OpenListApi {
      */
     public List<OpenListTaskInfo> taskDoneList() {
         try {
-            return getApi("task/offline_download/done")
-                    .thenFunction(res -> {
-                        HttpReq.assertStatus(res);
-                        JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                        JsonElement data = jsonObject == null ? null : jsonObject.get("data");
-                        if (data == null || data.isJsonNull()) {
-                            log.warn("OpenList task/done 返回缺少 data, 按空任务处理");
-                            return List.of();
-                        }
-                        return GsonStatic.fromJsonList(data.getAsJsonArray(), OpenListTaskInfo.class);
-                    });
+            return taskDoneListStrict();
         } catch (Exception e) {
             log.warn("OpenList task/done 调用失败: {}", ExceptionUtils.getMessage(e));
             return List.of();
         }
+    }
+
+    /**
+     * P0-3：严格版已完成任务列表，语义同 {@link #taskUnDoneListStrict()}。
+     */
+    public List<OpenListTaskInfo> taskDoneListStrict() {
+        return getApi("task/offline_download/done")
+                .thenFunction(res -> {
+                    HttpReq.assertStatus(res);
+                    JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
+                    JsonElement data = jsonObject == null ? null : jsonObject.get("data");
+                    if (data == null || data.isJsonNull()) {
+                        log.warn("OpenList task/done 返回缺少 data, 按空任务处理");
+                        return List.of();
+                    }
+                    return GsonStatic.fromJsonList(data.getAsJsonArray(), OpenListTaskInfo.class);
+                });
     }
 
     /**

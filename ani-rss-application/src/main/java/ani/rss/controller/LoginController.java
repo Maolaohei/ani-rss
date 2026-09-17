@@ -7,8 +7,6 @@ import ani.rss.entity.web.ResultCode;
 import ani.rss.util.other.AuthUtil;
 import ani.rss.util.other.ConfigUtil;
 import cn.hutool.core.lang.Assert;
-import cn.hutool.core.thread.ThreadUtil;
-import cn.hutool.core.util.RandomUtil;
 import cn.hutool.crypto.SecureUtil;
 import io.swagger.v3.oas.annotations.Operation;
 import lombok.extern.slf4j.Slf4j;
@@ -60,8 +58,8 @@ public class LoginController extends BaseController {
         }
         AuthUtil.limitLoginAttempts(true);
         log.warn("登陆失败 {} ip: {}", myUsername, ip);
-        // 收敛随机延迟区间, 减少登录失败时对 Tomcat worker 的占用
-        ThreadUtil.sleep(RandomUtil.randomInt(300, 1500));
+        // 登录失败不再随机 sleep：防暴力破解已由 AuthUtil 限流承担，
+        // 失败时 sleep 会长时间占用 Tomcat worker，放大慢速攻击面
         return Result.error("用户名或密码错误");
     }
 

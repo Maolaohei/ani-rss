@@ -84,7 +84,7 @@
         </SettingsItem>
         <SettingsItem label="更新内容">
           <el-scrollbar class="about-scrollbar" :always="true">
-            <div class="markdown-body about-markdown" v-html="md.render(about.markdownBody)"></div>
+            <div class="markdown-body about-markdown" v-html="sanitizedMarkdown"></div>
             <el-alert
                 show-icon
                 :closable="false"
@@ -118,7 +118,7 @@
 
 <script setup>
 import SettingsItem from "@/view/custom/SettingsItem.vue";
-import {onMounted, ref} from "vue";
+import {computed, onMounted, ref} from "vue";
 import {ElMessage, ElText} from "element-plus";
 import {DocumentCopy} from "@element-plus/icons-vue";
 import PopconfirmView from "@/view/custom/PopconfirmView.vue";
@@ -134,7 +134,9 @@ import {authorization, copyText} from "@/js/global.js";
 import * as http from "@/js/http.js";
 
 let md = markdownit({
-  html: true,
+  // P1: 更新日志来自 GitHub release notes（不可信输入），禁用原生 HTML；
+  // 包里无 DOMPurify，改用最小 sanitize（去 script/on* 事件属性/javascript: 链接），虚拟滚动太重不做
+  html: false,
   linkify: true
 })
 
@@ -145,6 +147,20 @@ md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
 }
 
 md.use(MarkdownItGitHubAlerts)
+
+/**
+ * 最小 sanitize：包内无 DOMPurify（不新增依赖），只处理 markdown 渲染后残留的风险点——
+ * script/style/iframe/object/embed 标签、on* 事件属性、javascript:/data: 伪协议链接。
+ * html:false 已转义原文 HTML，本函数是纵深兜底。
+ */
+const sanitizeHtml = html => {
+  let out = String(html || '')
+  out = out.replace(/<\s*\/?\s*(script|style|iframe|object|embed|form|input|button|link|meta)\b[^>]*>/gi, '')
+  out = out.replace(/\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+  out = out.replace(/\s*(href|src)\s*=\s*("|\')\s*javascript:[^"']*("|\')/gi, ' $1="#"')
+  out = out.replace(/\s*(href|src)\s*=\s*("|\')\s*data:text\/html[^"']*("|\')/gi, ' $1="#"')
+  return out
+}
 
 const actionLoading = ref(false)
 
@@ -209,6 +225,8 @@ const about = ref({
   'update': false,
   'markdownBody': ''
 })
+
+const sanitizedMarkdown = computed(() => sanitizeHtml(md.render(about.value?.markdownBody || '')))
 
 onMounted(() => {
   http.about()

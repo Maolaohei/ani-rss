@@ -8,6 +8,7 @@ import cn.hutool.core.io.IoUtil;
 import cn.hutool.core.lang.Assert;
 import cn.hutool.core.thread.ExecutorBuilder;
 import cn.hutool.core.thread.NamedThreadFactory;
+import cn.hutool.core.util.ObjectUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.system.SystemUtil;
 import lombok.extern.slf4j.Slf4j;
@@ -65,7 +66,8 @@ public class ShellNotification implements BaseNotification {
     @Override
     public Boolean send(NotificationConfig notificationConfig, Ani ani, String text, NotificationStatusEnum notificationStatusEnum) {
         String shell = notificationConfig.getShell();
-        int aliveLimit = notificationConfig.getAliveLimit();
+        // 存活上限缺省 10s，并钳制到 [1, 300]，防止非法配置导致无限等待或瞬间超时
+        int aliveLimit = Math.min(300, Math.max(1, ObjectUtil.defaultIfNull(notificationConfig.getAliveLimit(), 10)));
         Assert.notBlank(shell, "shell 不能为空");
 
         // 值清洗：RSS/订阅/BGM 等外部数据在拼入 shell 命令前剥离全部 shell 元字符（防注入主防线）

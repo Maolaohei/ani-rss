@@ -355,6 +355,7 @@ public class AniUtil {
     private static void doSync() {
         File configFile = getAniFile();
         log.debug("保存订阅 {}", configFile);
+        File temp = new File(configFile + ".temp");
         try {
             // 健康分仅为 API 展示字段，落盘前清空，避免污染 ani.v2.json
             for (Ani ani : ANI_LIST) {
@@ -374,7 +375,6 @@ public class AniUtil {
                 return;
             }
 
-            File temp = new File(configFile + ".temp");
             FileUtil.del(temp);
             FileUtil.writeUtf8String(json, temp);
             FileUtils.move(temp.toPath(), configFile.toPath());
@@ -383,6 +383,12 @@ public class AniUtil {
         } catch (Exception e) {
             log.error("保存失败 {}", configFile);
             log.error(e.getMessage(), e);
+        } finally {
+            // 失败残留的半截 temp 必须清理，避免堆积与下次误读
+            try {
+                FileUtil.del(temp);
+            } catch (Exception ignored) {
+            }
         }
     }
 

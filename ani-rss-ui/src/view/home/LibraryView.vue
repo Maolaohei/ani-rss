@@ -109,6 +109,8 @@
 </template>
 
 <script setup>
+// P1: 封面 img 已带 loading="lazy"；虚拟滚动太重不做（媒体库为 el-table 展示，行高固定但总量多为百级，
+// 懒加载封面已解决首屏图片风暴，虚拟化需替换表格组件，暂不做）。
 import {computed, onMounted, ref} from 'vue'
 import {ElMessage} from 'element-plus'
 import * as http from '@/js/http.js'

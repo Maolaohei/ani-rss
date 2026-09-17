@@ -1,5 +1,6 @@
 package ani.rss.notification;
 
+import ani.rss.commons.URLUtils;
 import ani.rss.entity.Ani;
 import ani.rss.entity.Config;
 import ani.rss.entity.NotificationConfig;
@@ -63,6 +64,21 @@ public class WebHookNotification implements BaseNotification {
             return false;
         }
 
+        try {
+            URLUtils.verify(webHookUrl);
+        } catch (Exception e) {
+            log.warn("webhook url 非法: {}", e.getMessage());
+            return false;
+        }
+
+        Method method;
+        try {
+            method = Method.valueOf(webHookMethod);
+        } catch (Exception e) {
+            log.warn("webhook method 非法: {}", webHookMethod);
+            return false;
+        }
+
         Config config = ConfigUtil.CONFIG;
 
         String notificationTemplate = config.getNotificationTemplate();
@@ -95,8 +111,9 @@ public class WebHookNotification implements BaseNotification {
         Map<String, String> headerMap = getHeaderMap(notificationConfig);
 
         HttpRequest httpRequest = HttpReq.get(webHookUrl)
+                .timeout(10_000)
                 .addHeaders(headerMap)
-                .method(Method.valueOf(webHookMethod));
+                .method(method);
 
         log.debug("webhook url: {}", webHookUrl);
 

@@ -3,8 +3,10 @@ package ani.rss.util.other;
 import ani.rss.commons.GsonStatic;
 import ani.rss.entity.Config;
 import ani.rss.entity.web.Result;
+import ani.rss.entity.web.ResultCode;
 import ani.rss.util.basic.HttpReq;
 import cn.hutool.core.lang.Assert;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import lombok.extern.slf4j.Slf4j;
 
@@ -31,8 +33,19 @@ public class AfdianUtil {
                     HttpReq.assertStatus(res);
                     Result<Void> result = new Result<>();
                     JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                    result.setMessage(jsonObject.get("message").getAsString());
-                    result.setCode(jsonObject.get("code").getAsInt());
+                    if (jsonObject == null) {
+                        return result;
+                    }
+                    JsonElement messageElement = jsonObject.get("message");
+                    if (messageElement != null && !messageElement.isJsonNull() && messageElement.isJsonPrimitive()) {
+                        result.setMessage(messageElement.getAsString());
+                    }
+                    JsonElement codeElement = jsonObject.get("code");
+                    if (codeElement != null && !codeElement.isJsonNull() && codeElement.isJsonPrimitive()) {
+                        result.setCode(codeElement.getAsInt());
+                    } else {
+                        result.setCode(ResultCode.HTTP_OK);
+                    }
                     return result;
                 });
     }

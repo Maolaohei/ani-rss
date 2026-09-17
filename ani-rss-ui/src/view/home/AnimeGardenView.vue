@@ -53,6 +53,7 @@
                       <template #title>
                         <div class="flex collapse-title">
                           <img :src="proxyImage(anime['cover'])" class="cover" v-if="anime.cover"
+                               loading="lazy" decoding="async" :alt="anime.name || 'cover'"
                                @click.stop="open(`https://animes.garden/subject/${anime.id}`)">
                           <div class="flex collapse-title">
                             <el-text :truncated="false" line-clamp="1" size="small"

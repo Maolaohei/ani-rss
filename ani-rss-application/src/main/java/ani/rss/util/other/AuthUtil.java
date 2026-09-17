@@ -21,6 +21,8 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
@@ -204,6 +206,28 @@ public class AuthUtil {
 
     /** 登录限流 Map 容量上限：超过后清理过期项 */
     private static final int LOGIN_ATTEMPT_MAX_ENTRIES = 10000;
+
+    /**
+     * P1: 限流 Map 定时清扫（每 1h 清过期项）。此前仅靠"超容量才清 + 读时惰性删"，
+     * 低频攻击 IP 的记录会常驻到容量上限；守护线程兜底回收，简单实现。
+     */
+    private static final ScheduledExecutorService LOGIN_ATTEMPT_CLEANER =
+            Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "login-attempt-cleaner");
+                t.setDaemon(true);
+                return t;
+            });
+
+    static {
+        LOGIN_ATTEMPT_CLEANER.scheduleAtFixedRate(() -> {
+            try {
+                long now = System.currentTimeMillis();
+                LOGIN_ATTEMPTS.entrySet().removeIf(e -> now - e.getValue().firstFailAt >= LOGIN_ATTEMPT_WINDOW_MS);
+            } catch (Exception e) {
+                log.debug("清理登录限流记录失败: {}", ExceptionUtils.getMessage(e));
+            }
+        }, 1, 1, TimeUnit.HOURS);
+    }
 
     /**
      * 限制尝试次数（仅服务 /login 流程）

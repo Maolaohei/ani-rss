@@ -5,6 +5,7 @@ import ani.rss.auth.ViewerPolicy;
 import ani.rss.commons.ExceptionUtils;
 import ani.rss.commons.FileUtils;
 import ani.rss.commons.MavenUtils;
+import ani.rss.commons.URLUtils;
 import ani.rss.config.CronConfig;
 import ani.rss.download.BaseDownload;
 import ani.rss.entity.Config;
@@ -33,6 +34,7 @@ import cn.hutool.core.util.ClassUtil;
 import cn.hutool.core.util.ObjectUtil;
 import cn.hutool.core.util.ReUtil;
 import cn.hutool.core.util.StrUtil;
+import cn.hutool.core.util.URLUtil;
 import cn.hutool.core.util.ZipUtil;
 import cn.hutool.extra.spring.SpringUtil;
 import cn.hutool.http.HttpRequest;
@@ -212,7 +214,15 @@ public class ConfigController extends BaseController {
 
         log.info(url);
 
-        HttpRequest httpRequest = HttpReq.get(url);
+        // P1: SSRF 防护（与 /proxyImage 同规则）+ 5s 超时 + 64KB 截断。
+        try {
+            URLUtils.verify(url);
+            URLUtils.verifyResolveAll(URLUtil.url(url).getHost());
+        } catch (Exception e) {
+            return Result.<ProxyTest>error("非法的代理测试地址: " + e.getMessage());
+        }
+
+        HttpRequest httpRequest = HttpReq.get(url, 5000);
         HttpReq.setProxy(httpRequest, config);
 
         ProxyTest proxyTest = new ProxyTest();
@@ -225,7 +235,12 @@ public class ConfigController extends BaseController {
                         int status = res.getStatus();
                         proxyTest.setStatus(status);
 
-                        String title = Jsoup.parse(res.body())
+                        String body = res.body();
+                        // 代理测试只取 <title>，截断到 64KB 后再解析，防止超大响应打爆内存
+                        if (body != null && body.length() > 65536) {
+                            body = body.substring(0, 65536);
+                        }
+                        String title = Jsoup.parse(body)
                                 .title();
                         proxyTest.setTitle(title);
                     });
@@ -273,6 +288,7 @@ public class ConfigController extends BaseController {
         return Result.error("登录失败：请检查下载器地址、账号与网络连通性。");
     }
 
+    @Auth
     @Operation(summary = "自定义JS")
     @GetMapping("/custom.js")
     public void customJs() throws IOException {
@@ -285,6 +301,7 @@ public class ConfigController extends BaseController {
         write(200, ContentType.JAVASCRIPT, customJs);
     }
 
+    @Auth
     @Operation(summary = "自定义CSS")
     @GetMapping("/custom.css")
     public void customCss() throws IOException {
@@ -345,10 +362,50 @@ public class ConfigController extends BaseController {
             File[] stagedItems = stagingDir.listFiles();
             Assert.isTrue(stagedItems != null && stagedItems.length > 0, "备份包内容为空");
 
-            // 校验通过后才替换: 删除旧的种子记录, 再将暂存内容逐个移动到配置目录
-            FileUtil.del(configDir + "/torrents");
-            for (File item : stagedItems) {
-                FileUtil.move(item, configDir, true);
+            // 解压后二次校验：实际落盘大小超 200MB 则清 staging 并拒绝（防 entry.getSize 伪造）
+            long stagedSize = FileUtil.size(stagingDir);
+            if (stagedSize > 200L * 1024 * 1024) {
+                FileUtil.del(stagingDir);
+                throw new IllegalArgumentException("备份包解压后过大(>200MB)，已拒绝导入");
+            }
+
+            // P0-4：两阶段提交——torrents 改名备份而非直接删除，全量 move 成功后再删 bak；
+            // 任一步失败回滚 bak，避免"已删旧种子 + 新配置半截"的永久丢失窗口。
+            File torrentsDir = new File(configDir, "torrents");
+            File torrentsBak = new File(configDir, "torrents.bak-" + ts);
+            boolean hasTorrentsBak = false;
+            if (torrentsDir.exists()) {
+                FileUtil.move(torrentsDir, torrentsBak, true);
+                hasTorrentsBak = true;
+            }
+            try {
+                for (File item : stagedItems) {
+                    FileUtil.move(item, configDir, true);
+                }
+                // 全成功才删 bak
+                if (hasTorrentsBak) {
+                    FileUtil.del(torrentsBak);
+                }
+            } catch (Exception moveEx) {
+                // 回滚：清掉已搬入的半截文件（仅本次 staged 的顶层项），恢复 torrents
+                for (File item : stagedItems) {
+                    File moved = new File(configDir, item.getName());
+                    // 只删本次搬入且与暂存同名的顶层项，避免误删用户原有文件
+                    if (moved.exists() && !moved.equals(stagingDir)) {
+                        try {
+                            FileUtil.del(moved);
+                        } catch (Exception ignored) {
+                        }
+                    }
+                }
+                if (hasTorrentsBak && !torrentsDir.exists()) {
+                    try {
+                        FileUtil.move(torrentsBak, torrentsDir, true);
+                    } catch (Exception rollbackEx) {
+                        moveEx.addSuppressed(rollbackEx);
+                    }
+                }
+                throw moveEx;
             }
         } catch (Exception e) {
             // 任一步失败: 清理暂存目录并上抛, 现有目录保持原状(种子记录已删的窗口仅在校验通过后)
@@ -376,10 +433,14 @@ public class ConfigController extends BaseController {
      * 校验备份 zip 的条目：仅允许备份白名单内的文件，拒绝绝对路径与 .. 穿越（zip-slip）
      */
     private void verifyZipEntries(InputStream inputStream) {
+        // 导入包总字节上限：防 zip bomb 把磁盘打满（累计未压缩大小超限即拒）
+        final long maxTotalBytes = 200L * 1024 * 1024;
         try (ZipInputStream zipIn = new ZipInputStream(inputStream, StandardCharsets.UTF_8)) {
             ZipEntry entry;
             boolean hasEntry = false;
             int entryCount = 0;
+            long totalBytes = 0L;
+            byte[] buf = new byte[8192];
             while ((entry = zipIn.getNextEntry()) != null) {
                 // 防 zip bomb：条目数上限
                 Assert.isTrue(++entryCount <= 10000, "备份包条目过多");
@@ -398,6 +459,19 @@ public class ConfigController extends BaseController {
                         || normalized.startsWith("files/")
                         || normalized.endsWith("/");
                 Assert.isTrue(allowed, "备份包包含未授权文件: " + name);
+
+                long size = entry.getSize();
+                if (size >= 0) {
+                    totalBytes += size;
+                } else {
+                    // 未知大小：实际读取计数（ZipInputStream 下同时消耗流，校验后需调用方重取流）
+                    int n;
+                    while ((n = zipIn.read(buf)) != -1) {
+                        totalBytes += n;
+                        Assert.isTrue(totalBytes <= maxTotalBytes, "备份包过大(>200MB)，已拒绝导入");
+                    }
+                }
+                Assert.isTrue(totalBytes <= maxTotalBytes, "备份包过大(>200MB)，已拒绝导入");
             }
             Assert.isTrue(hasEntry, "备份包为空");
         } catch (IOException e) {

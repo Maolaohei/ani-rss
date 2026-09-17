@@ -1143,10 +1143,13 @@ public class DownloadService {
 
     /**
      * 下载完成通知
+     * <p>
+     * P1-4：去 synchronized。用 DOWNLOAD_COMPLETE 标签去重保证幂等，
+     * 并发重复进入时只有一个能成功打标签，未抢到者直接返回。
      *
      * @param torrentsInfo
      */
-    public synchronized void notification(TorrentsInfo torrentsInfo) {
+    public void notification(TorrentsInfo torrentsInfo) {
         TorrentsInfo.State state = torrentsInfo.getState();
         String name = torrentsInfo.getName();
 

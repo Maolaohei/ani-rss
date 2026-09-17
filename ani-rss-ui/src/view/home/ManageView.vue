@@ -217,7 +217,7 @@
   </el-dialog>
 </template>
 <script setup>
-import {onUnmounted, ref} from "vue";
+import {onDeactivated, onUnmounted, ref} from "vue";
 import {ElMessage, ElMessageBox, ElText} from "element-plus";
 import DelAniView from "./DelAniView.vue";
 import ImportAniView from "@/view/home/ImportAniView.vue";
@@ -514,6 +514,8 @@ const waitBatchFinish = (label, ids) => {
 }
 
 onUnmounted(stopBatchPolling)
+// P1: 本页被 <KeepAlive> 缓存（仅 unmounted 不会停），失活即停批量轮询，避免后台常驻 3s 一次的 rssJobStatus
+onDeactivated(stopBatchPolling)
 
 defineExpose({show})
 </script>

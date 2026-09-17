@@ -23,6 +23,14 @@ import java.util.stream.Collectors;
 @Service
 public class ClearService {
     /**
+     * clearCover 全树扫描限频：backup/导出每次都会调一次，全量 loopFiles 代价高，
+     * 每天最多一次全树扫描，窗口内直接返回上次结果。
+     */
+    private static final long CLEAR_COVER_INTERVAL_MS = 24L * 60 * 60 * 1000;
+    private static final java.util.concurrent.atomic.AtomicLong LAST_CLEAR_COVER_MS = new java.util.concurrent.atomic.AtomicLong(0L);
+    private static volatile long LAST_CLEAR_COVER_SIZE = 0L;
+
+    /**
      * 清理父级空文件夹
      *
      * @param path
@@ -89,6 +97,12 @@ public class ClearService {
     }
 
     public Long clearCover() {
+        // backup 内调用限频：每天最多一次全树扫描，窗口内直接返回上次结果
+        long now = System.currentTimeMillis();
+        long last = LAST_CLEAR_COVER_MS.get();
+        if (last != 0L && now - last < CLEAR_COVER_INTERVAL_MS) {
+            return LAST_CLEAR_COVER_SIZE;
+        }
         File configDir = ConfigUtil.getConfigDir();
         String configDirStr = FileUtils.getAbsolutePath(configDir);
         File filesDir = new File(configDirStr, "files");
@@ -120,7 +134,10 @@ public class ClearService {
             clearParentFile(file);
         }
 
-        return filesSize + imgSize;
+        long total = filesSize + imgSize;
+        LAST_CLEAR_COVER_SIZE = total;
+        LAST_CLEAR_COVER_MS.set(now);
+        return total;
     }
 
 }

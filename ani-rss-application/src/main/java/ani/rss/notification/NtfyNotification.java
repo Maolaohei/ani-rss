@@ -39,6 +39,7 @@ public class NtfyNotification implements BaseNotification {
         String title = StrUtil.blankToDefault(ani.getTitle(), "ani-rss");
 
         var req = HttpReq.post(serverUrl + "/" + topic)
+                .timeout(10_000)
                 .header("Title", encodeHeader(title))
                 .header("Tags", "ani-rss")
                 .header("Priority", String.valueOf(clampPriority(notificationConfig.getNtfyPriority())))

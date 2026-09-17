@@ -68,7 +68,8 @@
                     <el-collapse-item v-for="it in week.items" :name="it.url">
                       <template #title>
                         <div class="flex collapse-title">
-                          <img :src="proxyImage(it['cover'])" class="cover" @click.stop="open(it.url)">
+                          <img :src="proxyImage(it['cover'])" class="cover" @click.stop="open(it.url)"
+                               loading="lazy" decoding="async" :alt="it.title || 'cover'">
                           <div class="flex collapse-title">
                             <el-text :truncated="false" line-clamp="1" size="small"
                                      class="title-text">

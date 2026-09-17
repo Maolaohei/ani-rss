@@ -63,6 +63,9 @@ public class AniBTService {
                         // data 缺失, 响应异常, 抛出带语义异常而非 NPE
                         throw new IllegalStateException("AniBT 响应缺少 data 字段");
                     }
+                    if (!dataElement.isJsonObject()) {
+                        throw new IllegalStateException("AniBT 响应 data 非对象");
+                    }
                     JsonObject data = dataElement.getAsJsonObject();
                     return GsonStatic.fromJson(data, AniBT.class);
                 });
@@ -121,10 +124,16 @@ public class AniBTService {
                         // data 缺失, 响应异常, 抛出带语义异常而非 NPE
                         throw new IllegalStateException("AniBT 字幕组响应缺少 data 字段");
                     }
+                    if (!dataElement.isJsonObject()) {
+                        throw new IllegalStateException("AniBT 字幕组响应 data 非对象");
+                    }
                     JsonObject data = dataElement.getAsJsonObject();
                     JsonElement groupsElement = data.get("groups");
                     if (Objects.isNull(groupsElement) || groupsElement.isJsonNull()) {
                         // groups 缺失, 返回空列表 (调用方兼容: 控制器直接返回成功空数组)
+                        return new ArrayList<>();
+                    }
+                    if (!groupsElement.isJsonArray()) {
                         return new ArrayList<>();
                     }
                     List<AniBT.Group> groupList = GsonStatic.fromJsonList(groupsElement.getAsJsonArray(), AniBT.Group.class);

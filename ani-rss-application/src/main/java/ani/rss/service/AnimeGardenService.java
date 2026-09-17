@@ -100,7 +100,14 @@ public class AnimeGardenService {
                 .thenFunction(res -> {
                     HttpReq.assertStatus(res);
                     JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                    JsonArray subjects = jsonObject.getAsJsonArray("subjects");
+                    if (jsonObject == null) {
+                        return List.<AnimeGarden.Subject>of();
+                    }
+                    JsonElement subjectsElement = jsonObject.get("subjects");
+                    if (subjectsElement == null || subjectsElement.isJsonNull() || !subjectsElement.isJsonArray()) {
+                        return List.<AnimeGarden.Subject>of();
+                    }
+                    JsonArray subjects = subjectsElement.getAsJsonArray();
                     return GsonStatic.fromJsonList(subjects, AnimeGarden.Subject.class);
                 });
 
@@ -109,10 +116,12 @@ public class AnimeGardenService {
                     String id = subject.getId();
 
                     Double score = Optional.ofNullable(bgmScore.get(id))
+                            .filter(e -> !e.isJsonNull())
                             .map(JsonElement::getAsDouble)
                             .orElse(0.0);
 
                     String cover = Optional.ofNullable(bgmCover.get(id))
+                            .filter(e -> !e.isJsonNull())
                             .map(it -> GsonStatic.fromJson(it, BgmInfo.Images.class))
                             .map(BgmInfo.Images::getSmall)
                             .orElse("");
@@ -172,7 +181,14 @@ public class AnimeGardenService {
                 .thenFunction(res -> {
                     HttpReq.assertStatus(res);
                     JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                    JsonArray resources = jsonObject.getAsJsonArray("resources");
+                    if (jsonObject == null) {
+                        return List.<AnimeGarden.Item>of();
+                    }
+                    JsonElement resourcesElement = jsonObject.get("resources");
+                    if (resourcesElement == null || resourcesElement.isJsonNull() || !resourcesElement.isJsonArray()) {
+                        return List.<AnimeGarden.Item>of();
+                    }
+                    JsonArray resources = resourcesElement.getAsJsonArray();
                     return GsonStatic.fromJsonList(resources, AnimeGarden.Item.class);
                 });
 

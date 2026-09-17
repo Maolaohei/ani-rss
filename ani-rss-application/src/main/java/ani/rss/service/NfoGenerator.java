@@ -1,5 +1,6 @@
 package ani.rss.service;
 
+import ani.rss.commons.FileUtils;
 import cn.hutool.core.date.DatePattern;
 import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.io.FileUtil;
@@ -21,7 +22,6 @@ import java.io.File;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
@@ -231,7 +231,8 @@ public class NfoGenerator {
         FileUtil.mkdir(new File(savePath).getParentFile());
 
         Path saveFile = Path.of(savePath);
-        Path tempFile = Path.of(savePath + ".tmp");
+        // 唯一 tmp 防并发同名覆盖：多集并发落同一目录时固定 .tmp 会互相截断
+        Path tempFile = Path.of(savePath + ".tmp-" + java.util.UUID.randomUUID());
 
         TransformerFactory transformerFactory = TransformerFactory.newInstance();
         Transformer transformer = transformerFactory.newTransformer();
@@ -242,7 +243,7 @@ public class NfoGenerator {
         try (OutputStream outputStream = Files.newOutputStream(tempFile)) {
             StreamResult result = new StreamResult(outputStream);
             transformer.transform(source, result);
-            Files.move(tempFile, saveFile, StandardCopyOption.REPLACE_EXISTING);
+            FileUtils.move(tempFile, saveFile);
         } catch (Exception e) {
             // transform/move 失败: 清理临时文件, 保留既有完好 nfo
             Files.deleteIfExists(tempFile);

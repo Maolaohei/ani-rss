@@ -91,11 +91,13 @@ public class BgmUtil {
      * 取一个 BGM API 令牌，保证全局速率不超过 {@link #BGM_PER_SECOND}。
      * <p>
      * <b>必须在真正发请求之前调用</b>（即 {@code thenFunction}/{@code then} 之前）。
-     * 等待发生在锁内，但最多约 750ms（差 1 个令牌的时间），不会出现长阻塞。
+     * <p>
+     * P1-7：锁内只算 waitMs，锁外 sleep 再循环，避免持锁睡眠阻塞其他线程。
      */
     public static void throttleBgmApi() {
-        synchronized (BGM_RATE_LOCK) {
-            while (true) {
+        while (true) {
+            long waitMs;
+            synchronized (BGM_RATE_LOCK) {
                 long now = System.nanoTime();
                 double elapsedSec = (now - bgmLastRefillNanos) / 1_000_000_000.0;
                 bgmLastRefillNanos = now;
@@ -105,8 +107,9 @@ public class BgmUtil {
                     bgmAvailableTokens -= 1.0;
                     return;
                 }
-                ThreadUtil.sleep(Math.max(1L, resolveTokenWaitMs(bgmAvailableTokens, BGM_PER_SECOND)));
+                waitMs = Math.max(1L, resolveTokenWaitMs(bgmAvailableTokens, BGM_PER_SECOND));
             }
+            ThreadUtil.sleep(waitMs);
         }
     }
 
@@ -257,6 +260,9 @@ public class BgmUtil {
                         }
                     }
                     JsonArray list = jsonObject.getAsJsonArray("list");
+                    if (list == null) {
+                        return new ArrayList<>();
+                    }
                     List<BgmInfo> bgmInfos = GsonStatic.fromJsonList(list, BgmInfo.class);
                     for (BgmInfo bgmInfo : bgmInfos) {
                         Integer season = getSeasonByBgmInfo(bgmInfo);
@@ -482,7 +488,14 @@ public class BgmUtil {
                 }
                 HttpReq.assertStatus(res);
                 JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                return jsonObject.get("rate").getAsInt();
+                if (jsonObject == null) {
+                    return 0;
+                }
+                JsonElement rateElement = jsonObject.get("rate");
+                if (rateElement == null || rateElement.isJsonNull()) {
+                    return 0;
+                }
+                return rateElement.getAsInt();
             });
         }
 
@@ -886,7 +899,12 @@ public class BgmUtil {
                 .thenFunction(res -> {
                     HttpReq.assertStatus(res);
                     JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                    return jsonObject.get("expires").getAsLong() * 1000L;
+                    JsonElement expiresElement = jsonObject == null ? null : jsonObject.get("expires");
+                    if (expiresElement == null || expiresElement.isJsonNull()) {
+                        log.warn("BGM token_status 响应缺少 expires 字段");
+                        return 0L;
+                    }
+                    return expiresElement.getAsLong() * 1000L;
                 });
 
         long currentTimeMillis = System.currentTimeMillis();
@@ -948,8 +966,16 @@ public class BgmUtil {
                 .then(res -> {
                     HttpReq.assertStatus(res);
                     JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                    String accessToken = jsonObject.get("access_token").getAsString();
-                    String refreshToken = jsonObject.get("refresh_token").getAsString();
+                    JsonElement accessTokenElement = jsonObject == null ? null : jsonObject.get("access_token");
+                    JsonElement refreshTokenElement = jsonObject == null ? null : jsonObject.get("refresh_token");
+                    if (accessTokenElement == null || accessTokenElement.isJsonNull()
+                            || refreshTokenElement == null || refreshTokenElement.isJsonNull()
+                            || StrUtil.isBlank(accessTokenElement.getAsString())
+                            || StrUtil.isBlank(refreshTokenElement.getAsString())) {
+                        throw new IllegalStateException("BGM 刷新 token 响应缺少 access_token/refresh_token");
+                    }
+                    String accessToken = accessTokenElement.getAsString();
+                    String refreshToken = refreshTokenElement.getAsString();
                     config.setBgmToken(accessToken)
                             .setBgmRefreshToken(refreshToken);
                 });
@@ -1088,7 +1114,9 @@ public class BgmUtil {
 
         String platform = bgmInfo.getPlatform();
 
-        boolean ova = List.of("OVA", "剧场版").contains(platform.toUpperCase());
+        // P0-6：platform 可空（部分条目无 platform），直接 toUpperCase 必 NPE
+        String platformUpper = platform == null ? "" : platform.toUpperCase();
+        boolean ova = List.of("OVA", "剧场版").contains(platformUpper);
 
         Date date = bgmInfo.getDate();
 

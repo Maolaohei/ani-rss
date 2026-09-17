@@ -1,5 +1,6 @@
 package ani.rss.util.other;
 
+import ani.rss.commons.FileUtils;
 import ani.rss.commons.GsonStatic;
 import ani.rss.entity.vo.RssJobStatus;
 import cn.hutool.core.date.DateUtil;
@@ -12,6 +13,11 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * RSS 调度状态持久化（跨重启保留"上一轮"信息）。
@@ -32,6 +38,20 @@ public final class RssJobStateStore {
      * 失败明细持久化上限
      */
     private static final int FAILED_MAX = 50;
+
+    /**
+     * 全量落盘同样节流 + 内容比对：RSS 轮次结束都会调一次，内容不变时跳过写盘。
+     */
+    private static final long SAVE_THROTTLE_MS = 2000L;
+    private static final AtomicLong LAST_SAVE_MS = new AtomicLong(0L);
+    private static final AtomicBoolean SAVE_SCHEDULED = new AtomicBoolean(false);
+    private static final ScheduledExecutorService SAVE_EXECUTOR = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "rss-job-state-save");
+        t.setDaemon(true);
+        return t;
+    });
+    private static volatile String LAST_SAVED_JSON;
+    private static volatile Snapshot PENDING;
 
     private RssJobStateStore() {
     }
@@ -113,15 +133,43 @@ public final class RssJobStateStore {
         if (snapshot == null) {
             return;
         }
+        // P1节流 robustness：文件不存在（首写/换目录/测试隔离）必须立即落盘，
+        // 否则跨用例的 2s 窗口会让 save-then-load 读到 null。
+        // 生产热路径文件已存在，走下面的合并节流。
+        long now = System.currentTimeMillis();
+        if (now - LAST_SAVE_MS.get() < SAVE_THROTTLE_MS && file().exists()) {
+            PENDING = snapshot;
+            if (SAVE_SCHEDULED.compareAndSet(false, true)) {
+                SAVE_EXECUTOR.schedule(() -> {
+                    SAVE_SCHEDULED.set(false);
+                    try {
+                        Snapshot latest = PENDING;
+                        PENDING = null;
+                        if (latest != null) {
+                            save(latest);
+                        }
+                    } catch (Exception e) {
+                        log.debug("异步保存 RSS 调度状态失败: {}", e.getMessage());
+                    }
+                }, SAVE_THROTTLE_MS, TimeUnit.MILLISECONDS);
+            }
+            return;
+        }
         try {
             List<RssJobStatus.FailedSubscription> failed = snapshot.getFailedSubscriptions();
             if (failed != null && failed.size() > FAILED_MAX) {
                 snapshot.setFailedSubscriptions(new ArrayList<>(failed.subList(0, FAILED_MAX)));
             }
+            String json = GsonStatic.toJson(snapshot);
             File file = file();
+            if (json.equals(LAST_SAVED_JSON) && file.exists()) {
+                return;
+            }
             File temp = new File(file.getPath() + ".temp");
-            FileUtil.writeString(GsonStatic.toJson(snapshot), temp, StandardCharsets.UTF_8);
-            FileUtil.move(temp, file, true);
+            FileUtil.writeString(json, temp, StandardCharsets.UTF_8);
+            FileUtils.move(temp.toPath(), file.toPath());
+            LAST_SAVED_JSON = json;
+            LAST_SAVE_MS.set(System.currentTimeMillis());
         } catch (Exception e) {
             log.debug("保存 RSS 调度状态失败: {}", e.getMessage());
         }
@@ -142,7 +190,7 @@ public final class RssJobStateStore {
             String ts = DateUtil.format(new Date(), "yyyyMMddHHmmss");
             File bad = new File(file.getParentFile(), FILE_NAME + ".bad-" + ts);
             try {
-                FileUtil.move(file, bad, true);
+                FileUtils.move(file.toPath(), bad.toPath());
                 log.warn("RSS 调度状态解析失败, 已改名为 [{}] 保留现场", bad.getName());
             } catch (Exception ignored) {
                 log.warn("RSS 调度状态解析失败且改名保留失败: {}", file);
@@ -153,5 +201,13 @@ public final class RssJobStateStore {
 
     private static File file() {
         return new File(ConfigUtil.getConfigDir(), FILE_NAME);
+    }
+
+    /** 测试隔离：清节流态（与 DownloadHistory/FailedDownloadQueue 对齐）。 */
+    static synchronized void resetForTest() {
+        LAST_SAVED_JSON = null;
+        LAST_SAVE_MS.set(0L);
+        PENDING = null;
+        SAVE_SCHEDULED.set(false);
     }
 }

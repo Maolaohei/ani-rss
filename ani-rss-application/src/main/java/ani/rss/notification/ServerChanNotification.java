@@ -91,6 +91,7 @@ public class ServerChanNotification implements BaseNotification {
         }
 
         return HttpReq.post(serverChanUrl)
+                .timeout(10_000)
                 .body(body)
                 .thenFunction(HttpResponse::isOk);
     }

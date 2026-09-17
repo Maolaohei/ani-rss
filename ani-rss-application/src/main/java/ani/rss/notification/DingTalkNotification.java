@@ -49,6 +49,7 @@ public class DingTalkNotification implements BaseNotification {
         ));
 
         return HttpReq.post(url)
+                .timeout(10_000)
                 .body(payload)
                 .thenFunction(HttpResponse::isOk);
     }

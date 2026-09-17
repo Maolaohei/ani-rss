@@ -161,6 +161,10 @@ public class FileController extends BaseController {
     /**
      * 处理文件
      *
+     * <p>P1 说明：Range 直传保持同步阻塞写（与 servlet 线程绑定）。
+     * {@code response.setBufferSize(40960)} 与拷贝缓冲 40960 对齐，减少 underlying 输出抖动；
+     * 更大的改动（async / NIO 零拷贝 sendfile）不在本组范围，列明未做。
+     *
      * @param filename 文件名
      */
     private void doFile(String filename) {
@@ -230,6 +234,8 @@ public class FileController extends BaseController {
             if (hasRange) {
                 long length = end - start + 1;
                 response.setStatus(206);
+                // 与 IoUtil.copy 缓冲同为 40KB，避免小 buffer 高频 flush
+                response.setBufferSize(40960);
                 @Cleanup
                 OutputStream out = response.getOutputStream();
                 @Cleanup

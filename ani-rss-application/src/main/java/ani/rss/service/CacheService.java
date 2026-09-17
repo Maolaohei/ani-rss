@@ -112,7 +112,12 @@ public class CacheService {
         JsonObject jsonObject = new JsonObject();
         try {
             jsonObject = HttpReq.get("https://cache.wushuo.top/bgm/cover")
+                    .timeout(1000 * 5)
                     .thenFunction(res -> {
+                        int status = res.getStatus();
+                        if (status == 404) {
+                            return new JsonObject();
+                        }
                         HttpReq.assertStatus(res);
                         return GsonStatic.fromJson(res.body(), JsonObject.class);
                     });

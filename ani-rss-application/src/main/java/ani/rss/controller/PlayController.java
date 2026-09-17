@@ -185,40 +185,121 @@ public class PlayController extends BaseController {
             if (ArrayUtil.isEmpty(files)) {
                 return playItems;
             }
-            for (File itFile : files) {
-                playItems.addAll(getPlayItem(itFile, visited, depth + 1));
+            // P1: 单目录一次 listFiles，内存分组。原先每个视频文件都会在
+            // getSubtitlesByVideo 内再 listFiles 一次（N 个视频 = N+1 次 IO）。
+            // 本目录的视频直接用本次结果在内存里配字幕，只递归子目录。
+            List<File> subDirs = new ArrayList<>();
+            List<File> videoFiles = new ArrayList<>();
+            List<File> subtitleFiles = new ArrayList<>();
+            for (File f : files) {
+                if (f.isDirectory()) {
+                    subDirs.add(f);
+                    continue;
+                }
+                if (isVideoCandidate(f)) {
+                    videoFiles.add(f);
+                    continue;
+                }
+                if (isSubtitleCandidate(f)) {
+                    subtitleFiles.add(f);
+                }
             }
+            for (File subDir : subDirs) {
+                playItems.addAll(getPlayItem(subDir, visited, depth + 1));
+            }
+            for (File videoFile : videoFiles) {
+                playItems.add(buildPlayItem(videoFile, subtitlesFor(videoFile, subtitleFiles)));
+            }
+            // 去重复
+            playItems = CollUtil.distinct(playItems, PlayItem::getTitle, false);
             return playItems;
         }
 
-        // 视频文件大小
-        long videoFileLength = file.length();
-
-        if (videoFileLength < 1024 * 1024 * 20) {
-            // 视频文件小于 20MB 跳过
+        if (!isVideoCandidate(file)) {
+            // 非视频文件（过小/无扩展名/非视频格式）：沿用原逻辑直接跳过
             return playItems;
         }
 
-        String extName = FileUtil.extName(file);
-        if (StrUtil.isBlank(extName)) {
-            // 扩展名为空直接跳过
-            return playItems;
-        }
-        if (!FileUtils.isVideoFormat(extName)) {
-            // 过滤出视频文件
-            return playItems;
-        }
-
-        // 查找同层级的字幕文件
+        // 单文件入口（如外部直接传入视频文件）：同层仍需一次 listFiles；目录批量入口已走内存分组
         List<PlayItem.Subtitles> subtitles = getSubtitlesByVideo(file);
 
+        PlayItem playItem = buildPlayItem(file, subtitles);
+        playItems.add(playItem);
+
+        // 去重复
+        playItems = CollUtil.distinct(playItems, PlayItem::getTitle, false);
+
+        // 按照集数排序
+        return playItems;
+    }
+
+    /**
+     * 视频候选：大小/扩展名/格式三道闸（与原 getPlayItem 叶子分支条件一致）
+     */
+    private static boolean isVideoCandidate(File file) {
+        if (file.length() < 1024 * 1024 * 20) {
+            return false;
+        }
+        String extName = FileUtil.extName(file);
+        if (StrUtil.isBlank(extName)) {
+            return false;
+        }
+        return FileUtils.isVideoFormat(extName);
+    }
+
+    /**
+     * 外挂字幕候选：真实文件 + ass/srt（与 getSubtitlesByVideo 过滤一致，浏览器仅支持这两种）
+     */
+    private static boolean isSubtitleCandidate(File file) {
+        if (!file.isFile()) {
+            return false;
+        }
+        String ext = FileUtil.extName(file);
+        if (StrUtil.isBlank(ext)) {
+            return false;
+        }
+        return List.of("ass", "srt").contains(ext);
+    }
+
+    /**
+     * 内存分组：用已列出的同目录字幕文件为视频配字幕，不做任何 IO
+     */
+    private static List<PlayItem.Subtitles> subtitlesFor(File videoFile, List<File> subtitleFiles) {
+        String videoMainName = FileUtil.mainName(videoFile);
+        if (StrUtil.isBlank(videoMainName) || subtitleFiles.isEmpty()) {
+            return new ArrayList<>();
+        }
+        List<PlayItem.Subtitles> subtitles = new ArrayList<>();
+        for (File sub : subtitleFiles) {
+            String subMainName = FileUtil.mainName(sub);
+            if (StrUtil.isBlank(subMainName)) {
+                continue;
+            }
+            if (!subMainName.startsWith(videoMainName)) {
+                continue;
+            }
+            String mainName = FileUtil.mainName(sub.getName());
+            String absolutePath = FileUtils.getAbsolutePath(sub);
+            subtitles.add(new PlayItem.Subtitles()
+                    .setName(mainName)
+                    .setHtml(mainName.toUpperCase())
+                    .setUrl(absolutePath)
+                    .setType(FileUtil.extName(sub)));
+        }
+        return CollUtil.distinct(subtitles, PlayItem.Subtitles::getName, true);
+    }
+
+    /**
+     * 由视频文件 + 字幕列表组装 PlayItem（含 S01E01 正则解析，与原逻辑一致）
+     */
+    private static PlayItem buildPlayItem(File file, List<PlayItem.Subtitles> subtitles) {
         String videoFileName = file.getName();
+        String extName = FileUtil.extName(file);
         long lastModified = file.lastModified();
         String formatSize = FileUtils.formatSize(file);
         String absolutePath = FileUtils.getAbsolutePath(file);
 
         PlayItem playItem = new PlayItem();
-        playItems.add(playItem);
         playItem.setFilename(absolutePath)
                 .setName(videoFileName)
                 .setTitle(videoFileName)
@@ -237,15 +318,12 @@ public class PlayController extends BaseController {
                     .setEpisode(Double.parseDouble(episode));
         }
 
-        // 去重复
-        playItems = CollUtil.distinct(playItems, PlayItem::getTitle, false);
-
-        // 按照集数排序
-        return playItems;
+        return playItem;
     }
 
     /**
-     * 根据视频文件找到同层级的字幕
+     * 根据视频文件找到同层级的字幕（单文件入口：同目录一次 listFiles，无二次 IO）。
+     * 目录批量入口（getPlayItem 目录分支）已改为内存分组，不走本方法。
      *
      * @param videoFile 视频文件
      * @return 字幕列表

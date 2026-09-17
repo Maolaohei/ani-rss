@@ -46,6 +46,7 @@ public class WeComNotification implements BaseNotification {
         ));
 
         return HttpReq.post(webhook.trim())
+                .timeout(10_000)
                 .body(payload)
                 .thenFunction(HttpResponse::isOk);
     }

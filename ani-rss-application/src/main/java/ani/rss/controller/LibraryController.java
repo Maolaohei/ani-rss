@@ -33,7 +33,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 本地媒体库浏览。
@@ -248,6 +252,13 @@ public class LibraryController extends BaseController {
     private static volatile long CACHE_AT = 0L;
 
     /**
+     * P1 单飞扫描：并发请求共用同一个 in-flight Future，未完成直接等它（最多 10s），
+     * 超时/失败则回退 stale 缓存。IO 全在 Future 属主线程内执行，锁外 IO，无 synchronized 临界区。
+     */
+    private static final AtomicReference<CompletableFuture<List<LibraryItem>>> SCAN_FUTURE = new AtomicReference<>();
+    private static final long SCAN_WAIT_MS = 10_000L;
+
+    /**
      * 失效缓存（订阅增删改后调用）
      */
     public static void invalidate() {
@@ -341,18 +352,73 @@ public class LibraryController extends BaseController {
     }
 
     /**
-     * 扫描媒体库（带 60 秒缓存）
+     * 扫描媒体库（带 60 秒缓存 + 单飞：并发共用一个 in-flight Future，最多等 10s，否则回退 stale 缓存）
      */
     private List<LibraryItem> scan(boolean force) {
         long now = System.currentTimeMillis();
         if (!force && CACHE_AT > 0 && now - CACHE_AT < CACHE_TTL_MS) {
             return CACHE;
         }
-        synchronized (LibraryController.class) {
-            if (!force && CACHE_AT > 0 && System.currentTimeMillis() - CACHE_AT < CACHE_TTL_MS) {
+        // 有扫描正在跑：直接等它，最多等 10s；等不到就回退 stale 缓存（可能为空）
+        CompletableFuture<List<LibraryItem>> inflight = SCAN_FUTURE.get();
+        if (inflight != null && !inflight.isDone()) {
+            try {
+                return inflight.get(SCAN_WAIT_MS, TimeUnit.MILLISECONDS);
+            } catch (TimeoutException e) {
+                log.debug("媒体库扫描仍在进行，等待 {}ms 超时，回退 stale 缓存", SCAN_WAIT_MS);
+                return CACHE;
+            } catch (Exception e) {
+                // 扫描失败：stale 缓存兜底，属主线程会负责清理 SCAN_FUTURE
+                if (!CACHE.isEmpty()) {
+                    return CACHE;
+                }
+                // 无 stale 可回退：继续向下尝试自己成为属主
+            }
+        }
+        CompletableFuture<List<LibraryItem>> mine = new CompletableFuture<>();
+        // 抢属主失败说明并发者刚建好 Future，转去等它
+        if (!SCAN_FUTURE.compareAndSet(inflight != null && inflight.isDone() ? null : inflight, mine)
+                && !SCAN_FUTURE.compareAndSet(null, mine)) {
+            CompletableFuture<List<LibraryItem>> winner = SCAN_FUTURE.get();
+            if (winner != null && winner != mine) {
+                try {
+                    return winner.get(SCAN_WAIT_MS, TimeUnit.MILLISECONDS);
+                } catch (Exception e) {
+                    return CACHE;
+                }
+            }
+        }
+        try {
+            //  double-check：成为属主后缓存可能已被上一轮填好
+            long recheck = System.currentTimeMillis();
+            if (!force && CACHE_AT > 0 && recheck - CACHE_AT < CACHE_TTL_MS) {
+                List<LibraryItem> cached = CACHE;
+                mine.complete(cached);
+                return cached;
+            }
+            // 锁外 IO：doScan 内全是磁盘/网盘 IO，不持任何锁
+            List<LibraryItem> items = doScan();
+            CACHE = new CopyOnWriteArrayList<>(items);
+            CACHE_AT = System.currentTimeMillis();
+            mine.complete(CACHE);
+            return CACHE;
+        } catch (Exception e) {
+            mine.completeExceptionally(e);
+            // 扫描异常回退 stale 缓存，避免并发等待者空手而归
+            if (!CACHE.isEmpty()) {
                 return CACHE;
             }
-            List<LibraryItem> items = new ArrayList<>();
+            throw e instanceof RuntimeException re ? re : new RuntimeException(e);
+        } finally {
+            SCAN_FUTURE.compareAndSet(mine, null);
+        }
+    }
+
+    /**
+     * 实际扫描（无锁，调用方保证单飞）。原 synchronized 块内逻辑原样下移。
+     */
+    private List<LibraryItem> doScan() {
+        List<LibraryItem> items = new ArrayList<>();
             // 网盘扫描总预算：网盘 API 全局限流 300ms/次且递归列举，订阅多时逐条查
             // 会把首屏拖到几十秒。超预算的订阅保持"未确认"（与改造前一致的"不存在"）。
             // 结果仍走 60 秒缓存，正常刷新不会重复付这个代价。
@@ -388,10 +454,7 @@ public class LibraryController extends BaseController {
                     .comparingInt((LibraryItem i) -> i.getVideoCount() > 0 ? 0 : (i.isUnknown() ? 1 : 2))
                     .thenComparing(Comparator.comparingLong(
                             (LibraryItem i) -> i.getLastModify() == null ? 0L : i.getLastModify()).reversed()));
-            CACHE = new CopyOnWriteArrayList<>(items);
-            CACHE_AT = System.currentTimeMillis();
-            return CACHE;
-        }
+            return items;
     }
 
     private LibraryItem scanOne(Ani ani, long cloudDeadline) {

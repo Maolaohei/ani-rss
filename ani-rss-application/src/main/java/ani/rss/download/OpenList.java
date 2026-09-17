@@ -1620,10 +1620,12 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     }
 
     /**
-     * 校验文件是否出现在 savePath 顶层，返回缺失名单
+     * 校验文件是否出现在 savePath 顶层，返回缺失名单。
+     * P0-3：必须用 fsListStrict——失败抛而非"全部缺失"。非严格版一次抖动
+     * 就会返回空列表，调用方会误判"全部缺失"→归位失败/重复提交。
      */
     private List<String> verifyTopLevelNames(String savePath, Set<String> expectedNames) {
-        Set<String> topLevelNames = fsList(savePath, true).stream()
+        Set<String> topLevelNames = api.fsListStrict(savePath, true).stream()
                 .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
                 .map(OpenListFileInfo::getName)
                 .filter(Objects::nonNull)
@@ -2791,6 +2793,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
 
     /**
      * 优先返回进行中任务；否则返回任意匹配 tid。
+     * P0-3：用 Strict 列表——查询失败抛而非"无任务"，否则一次抖动就会认不出
+     * Running 任务而重复提交撞 10008。调用方（提交路径）应将异常视为"未知"，本轮跳过。
      */
     private String findExistingTaskIdPreferActive(String infoHash) {
         if (StrUtil.isBlank(infoHash)) {
@@ -2798,8 +2802,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         }
         String key = infoHash.toLowerCase(Locale.ROOT);
         List<OpenListTaskInfo> tasks = new ArrayList<>();
-        tasks.addAll(taskUnDoneList());
-        tasks.addAll(taskDoneList());
+        tasks.addAll(api.taskUnDoneListStrict());
+        tasks.addAll(api.taskDoneListStrict());
 
         String anyTid = null;
         for (OpenListTaskInfo task : tasks) {
@@ -2906,9 +2910,11 @@ public class OpenList implements BaseDownload, OfflineDownloader {
      * @return 可复用的进行中 tid；无则 null
      */
     private String adoptOrCleanResidualTasks(String infoHash) {
+        // P0-3：Strict 语义——列表查不到就抛，不拿空列表当"无残留"。
+        // 空列表会让调用方误以为无 Running 任务而重复提交。
         List<OpenListTaskInfo> tasks = new ArrayList<>();
-        tasks.addAll(taskDoneList());
-        tasks.addAll(taskUnDoneList());
+        tasks.addAll(api.taskDoneListStrict());
+        tasks.addAll(api.taskUnDoneListStrict());
 
         String runningTid = null;
         for (OpenListTaskInfo task : tasks) {

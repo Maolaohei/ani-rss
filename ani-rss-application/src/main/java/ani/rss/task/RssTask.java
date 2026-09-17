@@ -20,6 +20,7 @@ import ani.rss.util.other.RssJobStateStore;
 import ani.rss.util.other.TaskFailureHumanizer;
 import ani.rss.util.other.TorrentUtil;
 import cn.hutool.core.io.FileUtil;
+import cn.hutool.core.thread.NamedThreadFactory;
 import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.core.util.ObjectUtil;
 import cn.hutool.core.util.StrUtil;
@@ -253,6 +254,11 @@ public class RssTask implements BaseTask {
     private static final long FALLBACK_MAX_DOWNLOAD_DURATION_MS = TimeUnit.MINUTES.toMillis(90);
     /** 在离线超时之上留一点收尾缓冲（分钟） */
     private static final long DOWNLOAD_LOCK_BUFFER_MINUTES = 10L;
+    /**
+     * P0-1：单订阅 future 等待上限 5 分钟。单个订阅卡在不可中断 IO 时不得拖住整轮，
+     * 超时取消该订阅并计失败；全局收尾仍由 shutdownAndAwaitPool 的 5 分钟 deadline 兜底。
+     */
+    private static final long PER_SUBSCRIPTION_TIMEOUT_MS = TimeUnit.MINUTES.toMillis(5);
     /**
      * 订阅间并行度：同一订阅由 DownloadService 按 id 串行，这里限制整体并发。
      * <p>
@@ -933,7 +939,8 @@ public class RssTask implements BaseTask {
             // 因此"本季在追"的高优先级订阅会先被扫描，订阅量大时不必等全量扫完。
             List<Ani> ordered = sortByPriority(enabled);
             int poolSize = resolveParallelism(ConfigUtil.CONFIG, ordered.size());
-            pool = Executors.newFixedThreadPool(poolSize);
+            // P1-5：命名 daemon 工厂，便于排查且不阻塞 JVM 退出
+            pool = Executors.newFixedThreadPool(poolSize, new NamedThreadFactory("rss-sub", true));
             RssJobState.activePool.set(pool);
             List<Future<?>> futures = new ArrayList<>(ordered.size());
 
@@ -1035,13 +1042,23 @@ public class RssTask implements BaseTask {
                 ThreadUtil.sleep(50);
             }
 
-            for (Future<?> future : futures) {
+            for (int futureIndex = 0; futureIndex < futures.size(); futureIndex++) {
+                Future<?> future = futures.get(futureIndex);
                 if (!isActive(loop)) {
                     RssJobState.jobMessage.set("取消中...");
                     break;
                 }
                 try {
-                    future.get();
+                    // P0-1：单订阅卡死不得拖住整轮。subscriptionTimeout 上限 5 分钟，
+                    // 超时则取消该订阅、计失败，继续下一订阅；收尾仍走 shutdownAndAwaitPool。
+                    future.get(PER_SUBSCRIPTION_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+                } catch (TimeoutException e) {
+                    future.cancel(true);
+                    RssJobState.subscriptionFailed.incrementAndGet();
+                    Ani failedAni = futureIndex < ordered.size() ? ordered.get(futureIndex) : null;
+                    String title = failedAni == null ? ("订阅#" + futureIndex) : failedAni.getTitle();
+                    log.error("{} 单订阅执行超时（{}ms），已取消并计为失败", title, PER_SUBSCRIPTION_TIMEOUT_MS);
+                    recordSubscriptionFailure(failedAni, "单订阅执行超时");
                 } catch (CancellationException e) {
                     if (!RssJobState.cancelRequested.get()) {
                         log.warn("RSS 子任务被取消: {}", e.getMessage());
@@ -1295,6 +1312,8 @@ public class RssTask implements BaseTask {
         while (!pool.isTerminated()) {
             if (System.currentTimeMillis() >= deadline) {
                 log.warn("等待 RSS 线程池退出超时（累计 5 分钟），放弃等待并继续收尾 generation={}", generation);
+                // P1-5：deadline 退出前再 shutdownNow 一次，唤醒卡在可中断阻塞上的 worker
+                pool.shutdownNow();
                 break;
             }
             try {

@@ -42,7 +42,10 @@ public class TelegramNotification implements BaseNotification {
         return send(notificationConfig, ani, text, notificationStatusEnum);
     }
 
-    public static synchronized Map<String, String> getUpdates(NotificationConfig notificationConfig) {
+    /**
+     * P1-9：去 synchronized。方法内无共享可变状态（局部 map + 当次请求的 HTTP 调用），无需持类锁。
+     */
+    public static Map<String, String> getUpdates(NotificationConfig notificationConfig) {
         String telegramBotToken = notificationConfig.getTelegramBotToken();
         if (StrUtil.isBlank(telegramBotToken)) {
             return Map.of();
@@ -52,25 +55,34 @@ public class TelegramNotification implements BaseNotification {
         String url = StrFormatter.format("{}/bot{}/getUpdates", telegramApiHost, telegramBotToken);
         Map<String, String> map = new HashMap<>();
         return HttpReq.get(url)
+                .timeout(10_000)
                 .thenFunction(res -> {
                     JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
                     JsonElement result = jsonObject.get("result");
-                    if (Objects.isNull(result)) {
+                    if (Objects.isNull(result) || result.isJsonNull() || !result.isJsonArray()) {
                         return map;
                     }
                     result.getAsJsonArray()
                             .asList()
                             .stream()
+                            .filter(JsonElement::isJsonObject)
                             .map(JsonElement::getAsJsonObject)
                             .map(o -> o.getAsJsonObject("message"))
                             .filter(Objects::nonNull)
                             .map(o -> o.getAsJsonObject("chat"))
                             .filter(Objects::nonNull)
-                            .forEach(o ->
-                                    map.put(
-                                            o.get("type").getAsString() + ": " + buildUsername(o),
-                                            o.get("id").getAsString()
-                                    )
+                            .forEach(o -> {
+                                        JsonElement typeElement = o.get("type");
+                                        JsonElement idElement = o.get("id");
+                                        if (Objects.isNull(typeElement) || typeElement.isJsonNull()
+                                                || Objects.isNull(idElement) || idElement.isJsonNull()) {
+                                            return;
+                                        }
+                                        map.put(
+                                                typeElement.getAsString() + ": " + buildUsername(o),
+                                                idElement.getAsString()
+                                        );
+                                    }
                             );
                     return map;
                 });
@@ -122,7 +134,7 @@ public class TelegramNotification implements BaseNotification {
             // 未启用图片
             Map<String, Object> body = new HashMap<>();
             body.put("chat_id", telegramChatId);
-            if (telegramTopicId > -1) {
+            if (ObjectUtil.defaultIfNull(telegramTopicId, -1) > -1) {
                 body.put("message_thread_id", telegramTopicId);
             }
             body.put("text", notificationTemplate);
@@ -130,6 +142,7 @@ public class TelegramNotification implements BaseNotification {
                 body.put("parse_mode", telegramFormat);
             }
             return HttpReq.post(url)
+                    .timeout(10_000)
                     .body(GsonStatic.toJson(body))
                     .thenFunction(HttpResponse::isOk);
         }
@@ -151,13 +164,14 @@ public class TelegramNotification implements BaseNotification {
         String url = StrFormatter.format("{}/bot{}/sendPhoto", telegramApiHost, telegramBotToken);
 
         HttpRequest request = HttpReq.post(url)
+                .timeout(10_000)
                 .contentType(ContentType.MULTIPART)
                 .form("chat_id", telegramChatId)
                 .form("caption", notificationTemplate)
                 .form("photo", photo)
                 .form("parse_mode", telegramFormat);
 
-        if (telegramTopicId > -1) {
+        if (ObjectUtil.defaultIfNull(telegramTopicId, -1) > -1) {
             request.form("message_thread_id", telegramTopicId);
         }
 

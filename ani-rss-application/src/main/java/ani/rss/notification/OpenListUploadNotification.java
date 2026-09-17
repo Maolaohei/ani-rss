@@ -373,12 +373,14 @@ public class OpenListUploadNotification implements BaseNotification {
 
     /**
      * post api
+     * <p>
+     * P1-10：去 synchronized + 删除固定 sleep(2000)。限流不应靠持锁睡眠实现，
+     * 请求构造本身无共享可变状态，并发安全。
      *
      * @param action 操作
      * @return HttpReq
      */
-    public synchronized HttpRequest postApi(String action) {
-        ThreadUtil.sleep(2000);
+    public HttpRequest postApi(String action) {
         String openListUploadHost = notificationConfig.getOpenListUploadHost();
         String openListUploadApiKey = notificationConfig.getOpenListUploadApiKey();
         return HttpReq.post(openListUploadHost + "/api/" + action)

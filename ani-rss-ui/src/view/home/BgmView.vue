@@ -15,7 +15,7 @@
         <el-table-column label="封面" width="120">
           <template #default="it">
             <img :alt="list[it.$index]['name']" :src="proxyImage(list[it.$index]['images']['large'])" height="100px"
-                 width="78px">
+                 width="78px" loading="lazy" decoding="async">
           </template>
         </el-table-column>
         <el-table-column label="名称" width="200">

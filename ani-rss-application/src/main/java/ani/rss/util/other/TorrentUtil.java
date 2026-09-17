@@ -27,7 +27,9 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -62,8 +64,10 @@ public class TorrentUtil {
 
     /**
      * 等待同一在途查询的上限：等待方绝不无限期挂起，超时按"查询失败"处理。
+     * P0-5：60s 会钉死 Tomcat worker（前端每 3s 轮询），收敛到 10s；超时优先回退
+     * 过期缓存（stale-while-revalidate），无缓存才抛异常，避免把等待者钉满。
      */
-    private static final long MAX_TORRENTS_COALESCE_WAIT_MS = 60_000L;
+    private static final long MAX_TORRENTS_COALESCE_WAIT_MS = 10_000L;
 
     /**
      * 获取任务列表（带缓存，5秒内重复调用直接返回缓存）
@@ -122,12 +126,24 @@ public class TorrentUtil {
             List<TorrentsInfo> result = future.get(MAX_TORRENTS_COALESCE_WAIT_MS, TimeUnit.MILLISECONDS);
             return result == null ? new ArrayList<>() : new ArrayList<>(result);
         } catch (ExecutionException e) {
+            // P0-5：上游失败时有过期缓存先顶上，避免前端/轮询被一次抖动打成 500
+            List<TorrentsInfo> stale = cachedTorrents;
+            if (stale != null) {
+                log.warn("下载器查询失败，回退过期缓存（{} 条）", stale.size());
+                return new ArrayList<>(stale);
+            }
             Throwable cause = e.getCause();
             if (cause instanceof RuntimeException re) {
                 throw re;
             }
             throw new IllegalStateException("等待下载器任务列表失败", cause);
         } catch (TimeoutException e) {
+            List<TorrentsInfo> stale = cachedTorrents;
+            if (stale != null) {
+                log.warn("等待下载器任务列表超时（{}ms），回退过期缓存（{} 条）",
+                        MAX_TORRENTS_COALESCE_WAIT_MS, stale.size());
+                return new ArrayList<>(stale);
+            }
             throw new IllegalStateException(
                     "等待下载器任务列表超时（" + MAX_TORRENTS_COALESCE_WAIT_MS + "ms）", e);
         } catch (InterruptedException e) {
@@ -152,6 +168,21 @@ public class TorrentUtil {
         torrentsInFlight.set(null);
         cachedTorrents = null;
         cacheExpireTime = 0;
+    }
+
+    /**
+     * 已 mkdir 的目录缓存：getTorrentDir/getPendingTorrentDir 是高频调用，
+     * FileUtil.mkdir 每次都要 stat+mkdir 系统调用，命中缓存直接跳过。
+     */
+    private static final Set<String> MKDIR_CACHE = ConcurrentHashMap.newKeySet();
+
+    private static void mkdirCached(File dir) {
+        String path = FileUtils.getAbsolutePath(dir);
+        if (MKDIR_CACHE.contains(path)) {
+            return;
+        }
+        FileUtil.mkdir(dir);
+        MKDIR_CACHE.add(path);
     }
 
     /**
@@ -187,7 +218,7 @@ public class TorrentUtil {
                 torrents = new File(StrFormatter.format("{}/torrents/{}/{}", configDir, s, title));
             }
         }
-        FileUtil.mkdir(torrents);
+        mkdirCached(torrents);
         return torrents;
     }
 
@@ -241,7 +272,7 @@ public class TorrentUtil {
         } else {
             dir = new File(StrFormatter.format("{}/torrents/.pending/{}/Season {}", configDir, title, season));
         }
-        FileUtil.mkdir(dir);
+        mkdirCached(dir);
         return dir;
     }
 
@@ -401,22 +432,42 @@ public class TorrentUtil {
     }
 
     /**
+     * 登录成功缓存：成功后 60s 内直接返回，避免每次轮询都串行登录下载器。
+     * P1-1：login 不再 static synchronized，改双检缓存（简单实现）。
+     */
+    private static final Object LOGIN_LOCK = new Object();
+    private static volatile long loginSuccessExpire = 0L;
+
+    /**
      * 登录 qBittorrent
      *
      * @return
      */
-    public static synchronized Boolean login() {
+    public static Boolean login() {
         Config config = ConfigUtil.CONFIG;
         String downloadPath = config.getDownloadPathTemplate();
         if (StrUtil.isBlank(downloadPath)) {
             log.warn("下载位置未设置");
             return false;
         }
-        try {
-            return DOWNLOAD.login(ConfigUtil.CONFIG);
-        } catch (Exception e) {
-            log.error("下载工具登录失败: {}", e.getMessage());
-            return false;
+        // P1-1：双检成功缓存，命中直接返回
+        if (System.currentTimeMillis() < loginSuccessExpire) {
+            return true;
+        }
+        synchronized (LOGIN_LOCK) {
+            if (System.currentTimeMillis() < loginSuccessExpire) {
+                return true;
+            }
+            try {
+                boolean ok = DOWNLOAD.login(ConfigUtil.CONFIG);
+                if (ok) {
+                    loginSuccessExpire = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(60);
+                }
+                return ok;
+            } catch (Exception e) {
+                log.error("下载工具登录失败: {}", e.getMessage());
+                return false;
+            }
         }
     }
 
@@ -456,12 +507,15 @@ public class TorrentUtil {
 
     /**
      * 删除已完成任务
+     * <p>
+     * P1-2：去方法级 synchronized，sleep(500)+重试保持在锁外。
+     * 下载器侧删除幂等，并发重复删同一任务安全。
      *
      * @param torrentsInfo 任务
      * @param forcedDelete 强制删除
      * @param deleteFiles  删除本地文件
      */
-    public static synchronized Boolean delete(TorrentsInfo torrentsInfo, Boolean forcedDelete, Boolean deleteFiles) {
+    public static Boolean delete(TorrentsInfo torrentsInfo, Boolean forcedDelete, Boolean deleteFiles) {
         Config config = ConfigUtil.CONFIG;
         Boolean delete = config.getDelete();
 
@@ -506,10 +560,12 @@ public class TorrentUtil {
 
     /**
      * 删除已完成任务
+     * <p>
+     * P1-2：配套去同步（委托的三参方法已去 synchronized）。
      *
      * @param torrentsInfo
      */
-    public static synchronized Boolean delete(TorrentsInfo torrentsInfo) {
+    public static Boolean delete(TorrentsInfo torrentsInfo) {
         return delete(torrentsInfo, false, false);
     }
 
@@ -549,10 +605,12 @@ public class TorrentUtil {
     }
 
     /**
-     * 类锁保护的短临界区: 同步调用一次 DOWNLOAD.rename 并读取结果(A4)。
-     * 多轮退避等待已在锁外; 对外行为与原 rename 保持兼容(调用方 RenameTask 不改)。
+     * 单次 rename 下发。
+     * <p>
+     * P1-3：去掉类锁。调用方 RenameTask 已串行，per-hash 改名由下载器侧保证，
+     * 无需再用类锁保护 RenameCacheUtil 短临界区之外的网络调用。
      */
-    private static synchronized Boolean renameOnce(TorrentsInfo torrentsInfo) {
+    private static Boolean renameOnce(TorrentsInfo torrentsInfo) {
         return DOWNLOAD.rename(torrentsInfo);
     }
 

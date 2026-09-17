@@ -418,10 +418,10 @@ public class ConfigUtil {
         DownloadService.invalidateDownloadPathIndex();
         File configFile = getConfigFile();
         log.debug("保存配置 {}", configFile);
+        File temp = new File(configFile + ".temp");
         try {
             ConfigUtil.format(CONFIG);
             String json = GsonStatic.toJson(CONFIG);
-            File temp = new File(configFile + ".temp");
             FileUtil.del(temp);
             FileUtil.writeUtf8String(json, temp);
             FileUtils.move(temp.toPath(), configFile.toPath());
@@ -432,6 +432,12 @@ public class ConfigUtil {
             log.error("保存失败 {}", configFile);
             log.error(e.getMessage(), e);
             return false;
+        } finally {
+            // 写盘失败残留的半截 temp 必须清理，否则下次 load/sync 可能误读
+            try {
+                FileUtil.del(temp);
+            } catch (Exception ignored) {
+            }
         }
     }
 
@@ -604,44 +610,62 @@ public class ConfigUtil {
     }
 
     public static void backup(OutputStream outputStream) {
-        File stagingDir = null;
-        List<File> backupFiles = List.of();
-
-        synchronized (ConfigUtil.class) {
-            // 清理残余封面
+        // clearCover 是全树扫描的 IO 重操作，且与打包内容无强一致性要求，移出锁外；
+        // 内部自带每天一次限频（见 ClearService），这里失败也不影响备份。
+        try {
             ClearService clearService = SpringUtil.getBean(ClearService.class);
             clearService.clearCover();
+        } catch (Exception e) {
+            log.debug("备份前清理封面跳过: {}", e.getMessage());
+        }
 
-            File configDir = getConfigDir();
-            String ts = DateUtil.format(new Date(), "yyyyMMddHHmmss");
-            stagingDir = new File(new File(configDir, "backup"), ".staging-" + ts + "-" + RandomUtil.randomString(6));
+        // 备份前对 database.db 做 WAL checkpoint，把 WAL 并入主库后再快照，
+        // 否则拷贝到的 db + -wal/-shm 不配套，恢复后可能丢最近几笔。失败忽略。
+        checkpointDatabase();
 
-            try {
-                FileUtil.mkdir(stagingDir);
-                List<File> staged = new ArrayList<>();
-                for (String name : List.of(
-                        "files", "torrents", "database.db",
-                        AniUtil.FILE_NAME, ConfigUtil.FILE_NAME
-                )) {
-                    File src = new File(configDir, name);
-                    if (!src.exists()) {
-                        continue;
-                    }
-                    File dst = new File(stagingDir, name);
-                    // 文件与目录统一快照到暂存目录, 锁内避免读到被并发修改的半截文件
-                    FileUtil.copy(src, dst, true);
-                    staged.add(dst);
+        // 调用方容忍并发：导出只是读快照，打包期间 config/ani 被并发修改时，
+        // 最坏只是本次 zip 里混入新旧各半（暂存拷贝保证单文件不截断），下次导出即一致；
+        // 因此本方法不再整体 synchronized，只在锁内做清单快照。
+        final List<String> names = List.of(
+                "files", "torrents", "database.db",
+                AniUtil.FILE_NAME, ConfigUtil.FILE_NAME
+        );
+        final File configDir = getConfigDir();
+        final List<File> sources;
+        synchronized (ConfigUtil.class) {
+            // 锁内只做清单快照（存在性检查），拷贝放锁外，避免长时间 IO 阻塞 sync/load
+            List<File> list = new ArrayList<>();
+            for (String name : names) {
+                File src = new File(configDir, name);
+                if (src.exists()) {
+                    list.add(src);
                 }
-                // 落盘已改 compact（P1-12，体积 -31%），但导出的 json 是用户会直接打开看的，
-                // 这里用格式化实例把暂存副本重写一遍，两边的收益都拿到
-                prettifyStaged(stagingDir, AniUtil.FILE_NAME);
-                prettifyStaged(stagingDir, ConfigUtil.FILE_NAME);
-                backupFiles = staged;
-            } catch (Exception e) {
-                // 快照失败: 清理暂存目录后上抛, 不产出半截备份
-                FileUtil.del(stagingDir);
-                throw new RuntimeException("备份快照失败: " + e.getMessage(), e);
             }
+            sources = List.copyOf(list);
+        }
+
+        String ts = DateUtil.format(new Date(), "yyyyMMddHHmmss");
+        File stagingDir = new File(new File(configDir, "backup"), ".staging-" + ts + "-" + RandomUtil.randomString(6));
+
+        List<File> backupFiles;
+        try {
+            FileUtil.mkdir(stagingDir);
+            List<File> staged = new ArrayList<>();
+            for (File src : sources) {
+                File dst = new File(stagingDir, src.getName());
+                // 锁外逐个拷贝：单文件拷贝仍可能与写盘并发，但 temp+move 的写方保证源文件要么旧全本要么新全本
+                FileUtil.copy(src, dst, true);
+                staged.add(dst);
+            }
+            // 落盘已改 compact（P1-12，体积 -31%），但导出的 json 是用户会直接打开看的，
+            // 这里用格式化实例把暂存副本重写一遍，两边的收益都拿到
+            prettifyStaged(stagingDir, AniUtil.FILE_NAME);
+            prettifyStaged(stagingDir, ConfigUtil.FILE_NAME);
+            backupFiles = staged;
+        } catch (Exception e) {
+            // 快照失败: 清理暂存目录后上抛, 不产出半截备份
+            FileUtil.del(stagingDir);
+            throw new RuntimeException("备份快照失败: " + e.getMessage(), e);
         }
 
         try {
@@ -657,6 +681,25 @@ public class ConfigUtil {
             // 无论打包成功与否都清理暂存目录
             FileUtil.del(stagingDir);
             IoUtil.close(outputStream);
+        }
+    }
+
+    /**
+     * 备份前把 database.db 的 WAL 并入主库，失败忽略（仅备份路径使用）。
+     */
+    private static void checkpointDatabase() {
+        try {
+            File db = new File(getConfigDir(), "database.db");
+            if (!db.exists()) {
+                return;
+            }
+            Class.forName("org.sqlite.JDBC");
+            try (java.sql.Connection connection = java.sql.DriverManager.getConnection("jdbc:sqlite:" + db.getAbsolutePath());
+                 java.sql.Statement statement = connection.createStatement()) {
+                statement.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+            }
+        } catch (Exception e) {
+            log.debug("database WAL checkpoint 跳过: {}", e.getMessage());
         }
     }
 

@@ -77,13 +77,16 @@ public class NotificationUtil {
 
     /**
      * 发送通知
+     * <p>
+     * P1-11：去 synchronized。实际发送已投递到单线程 EXECUTOR_SERVICE 队列，
+     * 入队本身线程安全，无需持类锁串行整个分发循环。
      *
      * @param config
      * @param ani
      * @param text
      * @param notificationStatusEnum
      */
-    public static synchronized void send(Config config, Ani ani, String text, NotificationStatusEnum notificationStatusEnum) {
+    public static void send(Config config, Ani ani, String text, NotificationStatusEnum notificationStatusEnum) {
         Boolean isMessage = ani.getMessage();
 
         if (!isMessage) {

@@ -8,7 +8,6 @@ import ani.rss.service.AniLocks;
 import ani.rss.service.DownloadService;
 import ani.rss.util.other.ConfigUtil;
 import ani.rss.util.other.TorrentUtil;
-import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.core.util.ObjectUtil;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
@@ -33,7 +32,8 @@ public class RenameTask implements BaseTask {
         int renameSleepSeconds = ObjectUtil.defaultIfNull(config.getRenameSleepSeconds(), 10);
 
         if (!TorrentUtil.login()) {
-            ThreadUtil.sleep(renameSleepSeconds * 1000L);
+            // P1-6：可中断等待，停止请求直接返回
+            sleepInterruptibly(loop, renameSleepSeconds * 1000L);
             return;
         }
         try {
@@ -66,6 +66,9 @@ public class RenameTask implements BaseTask {
             String message = ExceptionUtils.getMessage(e);
             log.error(message, e);
         }
-        ThreadUtil.sleep(renameSleepSeconds * 1000L);
+        // P1-6：可中断等待，false 直接 return
+        if (!sleepInterruptibly(loop, renameSleepSeconds * 1000L)) {
+            return;
+        }
     }
 }
