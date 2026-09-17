@@ -26,9 +26,11 @@ jobs:
           # 只取 UPDATE.md 里当前版本那一节作为 Release body。
           # 整份 UPDATE.md 有近 600 行历史（含 3.2.x fork 各版），全塞进 Release 页没法看。
           # 用 index() 而不是正则：版本号里的点会被当元字符，"3.4.7" 能匹配到 "3x4y7"。
+          # ver 带 v 前缀（如 v3.4.11）而小节标题不带，匹配时两种都认。
           # started 用来吃掉小节标题后的首行空行，避免 body 以空行开头。
           awk -v ver="$version" '
-            index($0, "## " ver " 增量") == 1 { found = 1; next }
+            BEGIN { ver_nov = ver; sub(/^v/, "", ver_nov) }
+            index($0, "## " ver " 增量") == 1 || index($0, "## " ver_nov " 增量") == 1 { found = 1; next }
             found && index($0, "## ") == 1 { exit }
             found { if (!started && $0 ~ /^[[:space:]]*$/) next; started = 1; print }
           ' UPDATE.md > release_body.md
