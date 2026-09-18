@@ -381,20 +381,32 @@ public class DoctorController extends BaseController {
         String key = "localStateCache";
         String label = "本地状态快照缓存";
         long start = System.currentTimeMillis();
+        return timed(DoctorCheck.ok(key, label, localStateCacheEvidence()), start);
+    }
+
+    /**
+     * 自检页「本地状态快照缓存」的展示文案。
+     * <p>
+     * 抽成 package-private 纯函数是为了能测：{@link LocalStateCache} 的每个计数器都必须在
+     * 这里露面，否则等于"埋了指标没人看"。曾漏过「增量追加」——而增量追加正是网盘 TTL 敢用
+     * 24h 的前提，看不见它就无法判断追加链路是否真在工作（若它一直是 0，说明每集仍在走
+     * 整份失效 + 重列，网盘 API 消耗会悄悄回到改造前的量级）。
+     */
+    static String localStateCacheEvidence() {
         long hit = LocalStateCache.getHit();
         long miss = LocalStateCache.getMiss();
-        String evidence = StrUtil.format(
+        return StrUtil.format(
                 "条目 {}（上限 {}），命中 {}/{}（{}%），实际构建 {} 次，请求合并 {} 次，过期 {} 次，"
-                        + "构建中被失效丢弃 {} 次；本地 TTL {}s / 网盘 TTL {}s",
+                        + "构建中被失效丢弃 {} 次，增量追加 {} 次；本地 TTL {}s / 网盘 TTL {}s",
                 LocalStateCache.size(), LocalStateCache.resolveCapacity(),
                 hit, hit + miss, Math.round(LocalStateCache.getHitRate() * 100.0),
                 LocalStateCache.getBuildCount(),
                 LocalStateCache.getCoalesced(),
                 LocalStateCache.getExpiredCount(),
                 LocalStateCache.getInvalidatedDropCount(),
+                LocalStateCache.getAppendedCount(),
                 LocalStateCache.resolveTtlMs(LocalStateCache.Source.LOCAL_DISK) / 1000L,
                 LocalStateCache.resolveTtlMs(LocalStateCache.Source.CLOUD_API) / 1000L);
-        return timed(DoctorCheck.ok(key, label, evidence), start);
     }
 
     private static DoctorCheck timed(DoctorCheck check, long start) {
