@@ -367,9 +367,27 @@ public class TorrentUtil {
             appendEpisodeToLocalState(ani, item, downloadPath);
             return;
         }
-        FileUtil.move(pending, target, true);
+        FileUtil.move(pending, promotedTarget(ani, pending), true);
         log.info("离线任务完成, 种子记录落盘 {}", item.getReName());
         appendEpisodeToLocalState(ani, item, downloadPath);
+    }
+
+    /**
+     * 提升时正式记录该落到哪个文件。
+     * <p>
+     * <b>不能</b>直接用 {@link #getTorrent}：它按"当前表示"算名字，而订阅源在磁力链与
+     * .torrent 直链之间切换时，算出的扩展名会和待完成标记不一致。下载器是按扩展名分派的
+     * （见 {@code qBittorrent} / {@code Transmission} / {@code Aria2} 的 {@code extName} 分支）：
+     * {@code .txt} 走"内容当 URL/磁力链"，其余走"当种子二进制上传"。把装着磁力链文本的
+     * {@code .txt} 搬成 {@code .torrent}，提交必然被下载器判为坏种。
+     * <p>
+     * 所以按标记<b>自身的</b>文件名换目录即可 —— 两边都是 {@code {infoHash}.{txt|torrent}}，
+     * 而 {@link #getTorrent} 会同时认这两个扩展名，落盘后仍能被找到。
+     * <p>
+     * 前提：调用方已确认 {@link #getTorrent} 的目标不存在，故此处同名文件也必然不存在。
+     */
+    private static File promotedTarget(Ani ani, File pending) {
+        return new File(getTorrentDir(ani), pending.getName());
     }
 
     /**

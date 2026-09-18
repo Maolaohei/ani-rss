@@ -34,11 +34,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@code DownloadService.itemDownloaded} 的"文件在本地"分支，RSS <b>每轮 × 每集</b>都会打。
  * 拿「下载种子」计数会严重虚高。
  * <p>
- * 本用例钉住三件事：
+ * 本用例钉住四件事：
  * <ol>
  *   <li>记录已存在 → 复用，<b>不打</b>「下载种子」；</li>
  *   <li>记录不存在 → 打「下载种子」并写入内容（不能为了消音把真日志也弄丢）；</li>
- *   <li>正式记录与待完成标记的解析都要能扛住"磁力链 ↔ .torrent 直链"的表示切换。</li>
+ *   <li>正式记录与待完成标记的解析都要能扛住"磁力链 ↔ .torrent 直链"的表示切换；</li>
+ *   <li>提升时记录的扩展名必须跟随标记自身（下载器按 {@code extName} 分派提交方式）。</li>
  * </ol>
  * 顺带断言记录不被删除：若哪天有人把幂等短路拆掉，这条 URL 会真的被请求、失败后
  * {@code writeTorrentFile} 的 catch 会 {@code FileUtil.del} 掉记录 —— 那是数据丢失。
@@ -206,5 +207,37 @@ class TorrentUtilSaveTorrentTest {
         assertTrue(record.exists() && pending.exists());
         assertFalse(record.getAbsolutePath().equals(pending.getAbsolutePath()),
                 "正式记录与待完成标记不得指向同一文件，否则待完成语义会被绕过");
+    }
+
+    // ---------------- 提升：扩展名必须跟随标记自身 ----------------
+
+    /**
+     * 下载器是按扩展名分派的（{@code qBittorrent:279} 起：{@code "txt".equals(extName)} 才走
+     * "内容当 URL/磁力链"，否则走"当种子二进制上传"）。所以提升时若沿用 {@code getTorrent}
+     * 按"当前表示"算出的名字，磁力链文本就可能被搬成 {@code .torrent}，提交必被下载器判为坏种。
+     */
+    @Test
+    @DisplayName("提升时按标记自身扩展名落盘：磁力链 .txt 不会被搬成 .torrent")
+    void promote_keeps_pending_extension_after_representation_switch() {
+        Ani ani = ani();
+        Item item = item(MAGNET);
+
+        File pending = TorrentUtil.saveTorrentPending(ani, item);
+        assertTrue(pending.exists(), "前置条件：待完成标记已写出");
+        assertTrue(pending.getName().endsWith(".txt"), "前置条件：磁力链表示应落到 .txt");
+
+        // 离线完成时表示已切换成 .torrent 直链
+        item.setTorrent(UNREACHABLE);
+        clearLog();
+
+        TorrentUtil.promoteTorrent(ani, item, "/115/动漫/追番/测试番剧/Season 1");
+
+        File record = TorrentUtil.getTorrent(ani, item);
+        assertTrue(record.exists(), "应已提升为正式记录");
+        assertTrue(record.getName().endsWith(".txt"),
+                "记录扩展名必须跟随标记自身，否则下载器会按 extName 把它当种子二进制上传: "
+                        + record.getName());
+        assertEquals(MAGNET, FileUtil.readUtf8String(record), "记录内容应是磁力链");
+        assertFalse(pending.exists(), "提升后待完成标记应已移走");
     }
 }
