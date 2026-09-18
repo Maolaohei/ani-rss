@@ -287,32 +287,63 @@ public class TorrentUtil {
         String infoHash = item.getInfoHash();
         File pendingDir = getPendingTorrentDir(ani);
         String torrent = item.getTorrent();
+
+        // 与 getTorrent 保持同一口径：已存在的标记优先复用，不按"当前表示"重算文件名。
+        // 订阅源在磁力链与 .torrent 直链之间切换是常事，若只按当前表示取名字，
+        // 切换后就会"找不到"已经写下的标记 —— 表现是重复提交离线任务，
+        // 且 promoteTorrent 因找不到标记而跳过提升，记录永远不落盘、下轮再提交。
+        File txtFile = new File(pendingDir, infoHash + ".txt");
+        File torrentFile = new File(pendingDir, infoHash + ".torrent");
+
+        if (txtFile.exists()) {
+            return txtFile;
+        }
+        if (torrentFile.exists()) {
+            return torrentFile;
+        }
+
         if (ReUtil.contains(StringEnum.MAGNET_REG, torrent)
                 || ReUtil.contains(StringEnum.ED2K_REG, torrent)) {
-            return new File(pendingDir, infoHash + ".txt");
+            return txtFile;
         }
-        return new File(pendingDir, infoHash + ".torrent");
+        return torrentFile;
     }
 
     /**
      * 下载种子文件
+     * <p>
+     * 记录已存在时直接复用，<b>不打"下载种子"日志</b>。原先这条 info 打在下方的幂等检查
+     * <i>之前</i>，于是「本地已存在 → 跳过下载」这条每轮都会走的正常路径也会记成一次下载，
+     * 日志读起来像在反复重下，用 "下载种子" 计数更是严重虚高。
+     * 真正的下载动作由 {@link #writeTorrentFile} 在确认要写之后才记
+     * （成功另有"种子下载完成"）。
      *
      * @param item
      */
     public static File saveTorrent(Ani ani, Item item) {
+        File saveTorrentFile = getTorrent(ani, item);
+        if (saveTorrentFile.exists()) {
+            return saveTorrentFile;
+        }
         log.info("下载种子 {}", item.getReName());
-        return writeTorrentFile(getTorrent(ani, item), item);
+        return writeTorrentFile(saveTorrentFile, item);
     }
 
     /**
      * 下载种子文件到待完成标记位置(OpenList 提交时使用, 完成前不算已下载)
+     * <p>
+     * 与 {@link #saveTorrent} 同理：标记已存在说明本轮无需再提交，不打日志。
      *
      * @param ani
      * @param item
      */
     public static File saveTorrentPending(Ani ani, Item item) {
+        File saveTorrentFile = getPendingTorrent(ani, item);
+        if (saveTorrentFile.exists()) {
+            return saveTorrentFile;
+        }
         log.info("下载种子(待完成标记) {}", item.getReName());
-        return writeTorrentFile(getPendingTorrent(ani, item), item);
+        return writeTorrentFile(saveTorrentFile, item);
     }
 
     /**
