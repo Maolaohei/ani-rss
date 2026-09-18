@@ -444,7 +444,7 @@ public class ConfigUtil {
     /**
      * F6-4 配置变更联动：这些字段决定「本地状态判定」的<b>输入或口径</b>，任一变化都必须
      * 让已缓存的判定结果作废，否则用户改完设置仍会看到旧结果（最长
-     * {@code cloudStateCacheTtlSeconds} = 300s 才自然过期）。
+     * {@code cloudStateCacheTtlSeconds} = 86400s 才自然过期）。
      * <ul>
      *   <li>{@code downloadPathTemplate} / {@code ovaDownloadPathTemplate}：下载目录整体位移，
      *       旧快照指向的路径已不是这个订阅的目录；</li>
@@ -851,7 +851,9 @@ public class ConfigUtil {
             config.setLocalStateCacheTtlSeconds(60);
         }
         if (config.getCloudStateCacheTtlSeconds() == null) {
-            config.setCloudStateCacheTtlSeconds(300);
+            // 网盘快照默认 24 小时：离线归位成功走增量追加（LocalStateCache.appendEpisode），
+            // 结构性变更走主动失效，不再依赖短 TTL 自愈。
+            config.setCloudStateCacheTtlSeconds(86400);
         }
         // ---- F7-5 每轮预算 ----
         // 默认 = 启用订阅数 × 1（每个订阅至少一次列举）。这里拿不到订阅数，

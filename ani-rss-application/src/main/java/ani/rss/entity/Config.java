@@ -936,11 +936,17 @@ public class Config implements Serializable {
     private Integer localStateCacheTtlSeconds;
 
     /**
-     * 网盘「本地状态快照」缓存时长（秒）。
+     * 网盘「本地状态快照」缓存时长（秒）。默认 24 小时。
      * <p>
      * 网盘列举是<b>真金白银</b>的 API 调用，TTL 应显著长于本地磁盘：
      * 同一轮里预览、媒体库、RSS 主流程会反复问同一个订阅"这一集到底在不在"，
      * 没有这层缓存就会变成同一份数据被列举 N 次。
+     * <p>
+     * 默认取 24 小时是有前提的——快照不靠过期自愈：离线归位成功会增量追加本集
+     * （{@code LocalStateCache.appendEpisode}），删除/洗版/模板变更会主动失效。
+     * TTL 只作兜底对账间隔，回收带外变更（用户在网盘手动增删等）留下的偏差。
+     * 附带好处：绝大多数 RSS 轮次直接命中缓存、不发请求，也就没有
+     * "列举失败被当成目录为空 → 删记录重下"的风险窗口。
      */
     @Schema(description = "网盘状态缓存时长(秒)")
     private Integer cloudStateCacheTtlSeconds;

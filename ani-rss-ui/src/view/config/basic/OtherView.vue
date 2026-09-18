@@ -210,9 +210,9 @@
       </div>
       <div class="num-field">
         <el-text class="num-label" size="small">网盘缓存</el-text>
-        <el-input-number v-model="props.config['cloudStateCacheTtlSeconds']" :min="30" :max="3600" :step="30"
-                         controls-position="right" placeholder="默认 300"/>
-        <el-text class="num-hint" size="small" type="info">秒，默认 300</el-text>
+        <el-input-number v-model="props.config['cloudStateCacheTtlSeconds']" :min="30" :max="86400" :step="300"
+                         controls-position="right" placeholder="默认 86400"/>
+        <el-text class="num-hint" size="small" type="info">秒，默认 86400（24 小时）</el-text>
       </div>
       <div class="num-field">
         <el-text class="num-label" size="small">单轮预算</el-text>
@@ -236,6 +236,14 @@
           「本地存在」的判定结果会按订阅缓存：预览、媒体库、RSS 扫描、手动搜索共用同一份快照，
           同一轮内同一订阅的网盘列举次数不超过 1 次。本地磁盘遍历便宜、缓存可以短一些；
           网盘列举是真金白银的 API 调用，缓存应显著更长。缓存只在内存中，重启后从空开始重建。
+        </el-text>
+      </div>
+      <div class="margin-top-4">
+        <el-text class="mx-1" size="small">
+          网盘缓存默认 24 小时，前提是它不靠过期自愈：某一集离线归位成功时会增量并入快照（不重新列举），
+          删除、洗版、模板变更会主动失效。缓存时长在这里的角色是「兜底对账间隔」——
+          只用来回收带外变更（在网盘上手动增删文件、重启后离线任务自行完成）留下的偏差。
+          把它调小不会更准，只会让每轮扫描都真实列举一次网盘。
         </el-text>
       </div>
       <div class="margin-top-4">

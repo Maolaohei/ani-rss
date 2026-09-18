@@ -9,7 +9,9 @@ import lombok.extern.slf4j.Slf4j;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -149,12 +151,31 @@ public final class LocalStateCache {
     }
 
     // ---- 配置常量 ----
+    /**
+     * 本地磁盘快照 TTL。本地遍历很便宜，保持短 TTL 让"手动往下载目录放文件"这类
+     * 带外变更能及时被看到；改名完成时也有 invalidateByDownloadPath 主动失效兜着。
+     */
     static final int DEFAULT_LOCAL_TTL_SECONDS = 60;
     static final int MIN_LOCAL_TTL_SECONDS = 10;
     static final int MAX_LOCAL_TTL_SECONDS = 3600;
-    static final int DEFAULT_CLOUD_TTL_SECONDS = 300;
+    /**
+     * 网盘快照 TTL：默认 24 小时。
+     * <p>
+     * 长 TTL 成立的前提是快照<b>不再靠过期来自愈</b>：
+     * <ul>
+     *   <li>离线归位成功 → {@link #appendEpisode} 增量并入本集（不重列）；</li>
+     *   <li>删除/洗版/模板变更 → {@link #invalidate} / {@link #invalidateByDownloadPath} 主动失效。</li>
+     * </ul>
+     * TTL 在这里的角色退化成"兜底对账间隔"——只为回收那些带外变更
+     * （用户在网盘上手动增删、应用重启后离线任务自行完成）留下的偏差。
+     * <p>
+     * 顺带解决了一个更要紧的问题：TTL 短意味着每轮 RSS 都要真实列举网盘，
+     * 而每次列举都有"查询失败 → 被当成目录为空 → 删记录重下"的风险窗口。
+     * TTL 拉长后，绝大多数轮次直接命中缓存，压根不发请求。
+     */
+    static final int DEFAULT_CLOUD_TTL_SECONDS = 86_400;
     static final int MIN_CLOUD_TTL_SECONDS = 30;
-    static final int MAX_CLOUD_TTL_SECONDS = 3600;
+    static final int MAX_CLOUD_TTL_SECONDS = 86_400;
     /**
      * LRU 容量下限。订阅很少时也要留够，避免"订阅 1 个却每 2 次就淘汰"。
      */
@@ -191,6 +212,10 @@ public final class LocalStateCache {
     private static final AtomicLong buildCount = new AtomicLong(0L);
     private static final AtomicLong expiredCount = new AtomicLong(0L);
     private static final AtomicLong invalidatedDropCount = new AtomicLong(0L);
+    /**
+     * 增量追加成功次数（离线归位成功时把本集并入快照）。越高说明越少走整份重列。
+     */
+    private static final AtomicLong appendedCount = new AtomicLong(0L);
 
     /**
      * 缓存键：{@code aniId|sha1(downloadPath)}。
@@ -355,6 +380,50 @@ public final class LocalStateCache {
     }
 
     /**
+     * 增量追加集数条目到已构建的快照（离线归位成功时调用）。
+     * <p>
+     * 为什么不直接失效后重列：网盘列举是最贵的一步（限流 + 单轮预算），而"某一集刚刚落地"
+     * 是<b>已知</b>的增量事实，没必要为它把整份索引打掉重新列举。更要紧的是，失效重列会把
+     * "列举失败"这条路径重新拉回每轮必经——而查询失败一旦被当成"目录里什么都没有"，
+     * 就会演变成删记录重下。
+     * <p>
+     * 语义约束：
+     * <ul>
+     *   <li>快照不存在时 <b>no-op</b>（不创建"只有一集"的残缺快照，下次构建会列举出全量）；</li>
+     *   <li><b>只增不减</b>：删除/洗版/模板变更等结构性变更仍必须走
+     *       {@link #invalidate} / {@link #invalidateByDownloadPath}；</li>
+     *   <li>{@code builtAt} 保持不变 —— TTL 因此仍是"距上次真实列举"的时长，
+     *       追加不会让一份陈旧快照无限续命；</li>
+     *   <li>{@code complete} 保持不变 —— 追加已知存在的条目，并不能让被截断的列举
+     *       变得可以断言"不存在"。</li>
+     * </ul>
+     *
+     * @return 是否成功追加（快照不存在 / 无新增 / 期间被失效 时返回 false）
+     */
+    public static boolean appendEpisode(String aniId, String downloadPath, Collection<String> keys) {
+        if (StrUtil.isBlank(aniId) || keys == null || keys.isEmpty()) {
+            return false;
+        }
+        String cacheKey = key(aniId, downloadPath);
+        Snapshot existing = CACHE.get(cacheKey);
+        if (existing == null) {
+            return false;
+        }
+        Set<String> merged = new HashSet<>(existing.episodeIndex());
+        if (!merged.addAll(keys)) {
+            // 一个都没新增：本集早已在索引里，无需改写
+            return false;
+        }
+        // CAS：构建期间的失效、并发失效都不能被这次追加覆盖掉
+        Snapshot appended = new Snapshot(merged, existing.source(), existing.builtAt(), existing.complete());
+        if (!CACHE.replace(cacheKey, existing, appended)) {
+            return false;
+        }
+        appendedCount.incrementAndGet();
+        return true;
+    }
+
+    /**
      * 整体失效：订阅列表增删、下载路径模板/重命名开关变更时使用。
      * <p>
      * 这类变更会同时影响所有订阅的下载路径，逐订阅失效既慢又容易漏，直接换代更可靠。
@@ -383,6 +452,7 @@ public final class LocalStateCache {
         buildCount.set(0L);
         expiredCount.set(0L);
         invalidatedDropCount.set(0L);
+        appendedCount.set(0L);
     }
 
     public static int size() {
@@ -434,6 +504,14 @@ public final class LocalStateCache {
     }
 
     /**
+     * 增量追加成功次数。与 {@link #getBuildCount()}（真实列举次数）对照看，
+     * 追加占比越高说明越少为"某一集刚落地"付出整份重列的代价。
+     */
+    public static long getAppendedCount() {
+        return appendedCount.get();
+    }
+
+    /**
      * 缓存命中率。无样本时返回 0 而非 NaN，避免前端显示 {@code NaN%}
      */
     public static double getHitRate() {
@@ -454,6 +532,7 @@ public final class LocalStateCache {
                 "build", getBuildCount(),
                 "expired", getExpiredCount(),
                 "invalidatedDrop", getInvalidatedDropCount(),
+                "appended", getAppendedCount(),
                 "hitRate", getHitRate()
         );
     }

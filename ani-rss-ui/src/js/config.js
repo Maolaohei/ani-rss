@@ -44,8 +44,9 @@ export let configData = {
     "quiescentConfirmTimes": 2,
     "quiescentTimeoutMinutes": 30,
     // 结果缓存：订阅级本地状态快照 TTL（本地磁盘便宜、网盘贵）
+    // 网盘默认 24h：归位成功走增量追加、结构性变更走主动失效，不再靠短 TTL 自愈
     "localStateCacheTtlSeconds": 60,
-    "cloudStateCacheTtlSeconds": 300,
+    "cloudStateCacheTtlSeconds": 86400,
     // 每轮网盘 API 预算（留空 = 启用订阅数 × 1，硬上限 200）与列举文件数上限
     "openListApiBudgetPerRound": null,
     "cloudListMaxFiles": 5000,

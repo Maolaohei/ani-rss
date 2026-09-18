@@ -319,10 +319,11 @@ public class TorrentUtil {
      * OpenList 离线完成后, 将待完成标记提升为正式种子记录。
      * 无待完成标记时(已完成提升/进程重启等)不新建正式记录, 避免误判已下载。
      *
-     * @param ani
-     * @param item
+     * @param downloadPath 下载目录（网盘路径）。用于把本集<b>增量追加</b>进订阅级快照，
+     *                     而不是整份失效后重新列举网盘——列举是最贵的一步，
+     *                     而"这一集刚落地"是已知的增量事实。
      */
-    public static void promoteTorrent(Ani ani, Item item) {
+    public static void promoteTorrent(Ani ani, Item item, String downloadPath) {
         File pending = getPendingTorrent(ani, item);
         if (!pending.exists()) {
             log.debug("无待完成标记, 跳过提升 {}", item.getReName());
@@ -332,12 +333,30 @@ public class TorrentUtil {
         if (target.exists()) {
             // 正式记录已存在(如提升过), 清理 pending 即可
             FileUtil.del(pending);
+            appendEpisodeToLocalState(ani, item, downloadPath);
             return;
         }
         FileUtil.move(pending, target, true);
         log.info("离线任务完成, 种子记录落盘 {}", item.getReName());
-        // 离线文件已归位到下载目录：该订阅的本地状态快照立即失效（F2-6）
-        LocalStateCache.invalidate(ani);
+        appendEpisodeToLocalState(ani, item, downloadPath);
+    }
+
+    /**
+     * 离线归位成功：把本集并入订阅级「本地状态快照」。
+     * <p>
+     * 快照不存在时 {@link LocalStateCache#appendEpisode} 是 no-op（下次构建会列举出全量），
+     * 所以这里不需要兜底失效。真正的结构性变更（删除/洗版/模板变更）仍走 invalidate。
+     */
+    private static void appendEpisodeToLocalState(Ani ani, Item item, String downloadPath) {
+        try {
+            Set<String> keys = RenameUtil.episodeIndexKeys(ani, item);
+            if (!keys.isEmpty()) {
+                LocalStateCache.appendEpisode(ani == null ? null : ani.getId(), downloadPath, keys);
+            }
+        } catch (Exception e) {
+            // 追加失败只影响缓存新鲜度，不影响已落盘的记录，下一轮列举会自然收敛
+            log.debug("追加本地状态快照失败 {}: {}", item.getReName(), e.getMessage());
+        }
     }
 
     /**

@@ -352,7 +352,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             Boolean ok = awaitAndFinalize(ctx, ani, item, savePath);
             if (Boolean.TRUE.equals(ok)) {
                 try {
-                    TorrentUtil.promoteTorrent(ani, item);
+                    TorrentUtil.promoteTorrent(ani, item, savePath);
                 } catch (Exception e) {
                     // 文件可能已落盘, 下轮 itemDownloaded 会恢复记录
                     log.error("提升种子记录失败(文件可能已落盘) {}: {}", ctx.reName, ExceptionUtils.getMessage(e));
@@ -1175,14 +1175,9 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             return false;
         }
 
-        // renameMap 目标名冲突检测
-        Set<String> targetNames = new HashSet<>();
-        for (Map.Entry<String, String> entry : renameMap.entrySet()) {
-            if (!targetNames.add(entry.getValue())) {
-                log.error("重命名目标冲突: {} -> {} (已存在)", entry.getKey(), entry.getValue());
-                throw new IllegalStateException("重命名目标文件名冲突: " + entry.getValue());
-            }
-        }
+        // 目标名去重：撞名时退回原名避让，绝不抛异常
+        // （抛异常会让"文件其实已落盘"的集被判离线失败 → 清 pending → 下轮重下 → 死循环）
+        dedupeRenameTargets(renameMap);
 
         // 按原始路径分组，处理文件可能分布在多个子目录的情况
         Map<String, List<String>> pathToNames = new HashMap<>();
@@ -1439,6 +1434,69 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             }
         }
         return new EpisodeScanResult(videoList, subtitleList, openListFileInfos, cloudSourceDirs, false);
+    }
+
+    /**
+     * 目标名去重：保证 renameMap 的 value 互不相同，撞名时让后来者避让。
+     * <p>
+     * 为什么不能再像以前那样直接抛 {@code IllegalStateException}：目标名撞车最常见的成因是
+     * 「同一集在网盘上有两份文件」（上一轮重复下单的产物、同集多语言版本），
+     * 而这恰恰发生在<b>文件其实已经落盘</b>的时候。抛异常会让整集被判"离线失败"，
+     * 清掉 pending 后下一轮再重下、再撞名，形成无限循环且每轮往网盘多堆一份文件。
+     * <p>
+     * 避让优先级：
+     * <ol>
+     *   <li>当前名已等于目标名的条目（恒等映射）优先——它本来就在正确位置，不该被改写；</li>
+     *   <li>其余撞名者退回自己的原名；</li>
+     *   <li>原名也被占用时加序号后缀。</li>
+     * </ol>
+     * 恒等映射是 no-op（重命名阶段会跳过），但仍留在 map 里，供移动阶段判定"无需移动"。
+     */
+    static void dedupeRenameTargets(Map<String, String> renameMap) {
+        if (renameMap.size() < 2) {
+            return;
+        }
+        Set<String> taken = new HashSet<>();
+        // 第一遍：已在目标位置的条目占位（它们是"正确结果"，优先级最高）
+        for (Map.Entry<String, String> entry : renameMap.entrySet()) {
+            if (Objects.equals(entry.getKey(), entry.getValue())) {
+                taken.add(entry.getValue());
+            }
+        }
+        // 第二遍：其余条目按源名排序后依次认领，撞名则避让（排序只为让结果可复现）
+        List<String> sources = new ArrayList<>(renameMap.keySet());
+        sources.sort(Comparator.naturalOrder());
+        for (String src : sources) {
+            String target = renameMap.get(src);
+            if (Objects.equals(src, target)) {
+                continue;
+            }
+            if (taken.add(target)) {
+                continue;
+            }
+            String fallback = uniqueRenameName(src, taken);
+            log.warn("重命名目标冲突, 退回原名避免互相覆盖: {} -> {} (原目标 {})", src, fallback, target);
+            renameMap.put(src, fallback);
+        }
+    }
+
+    /**
+     * 取一个未被占用的文件名：优先原名，被占用则加序号后缀（{@code 主名.2.扩展名}）。
+     * 命中的名字会登记进 {@code taken}。
+     */
+    private static String uniqueRenameName(String base, Set<String> taken) {
+        if (taken.add(base)) {
+            return base;
+        }
+        String main = FileUtil.mainName(base);
+        String ext = FileUtil.extName(base);
+        for (int i = 2; i <= 99; i++) {
+            String candidate = StrUtil.isBlank(ext) ? main + "." + i : main + "." + i + "." + ext;
+            if (taken.add(candidate)) {
+                return candidate;
+            }
+        }
+        return base;
     }
 
     /**
@@ -1831,13 +1889,25 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         if (StrUtil.isBlank(finalRenameBase)) {
             return RelocateResult.NOT_FOUND;
         }
+        // 熔断冷却期：本轮不发任何网盘请求，直接回报「无法判断」。
+        // 绝不能返回 NOT_FOUND —— 调用方会把"没查到"当成"确认没有"，进而删记录重下。
+        if (OpenListApi.isListingCoolingDown()) {
+            log.debug("归位对账跳过: 网盘接口冷却中（剩余 {}ms） {}",
+                    OpenListApi.listingCooldownRemainingMs(), item.getReName());
+            return RelocateResult.UNVERIFIABLE;
+        }
         List<Double> episodeRange = item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty()
                 ? item.getEpisodeRange()
                 : (item.getEpisode() != null ? List.of(item.getEpisode()) : List.of());
         // 季数守卫：优先用订阅季数，reName 无 SxxExx 时回退
         Integer expectedSeason = ani.getSeason() != null ? ani.getSeason() : expectedSeasonOf(finalRenameBase);
         try {
-            List<OpenListFileInfo> files = findFiles(savePath).stream()
+            // 必须用严格版列举：宽容版 findFiles 会把异常吞成空列表，
+            // 于是"网盘查询失败"在这一层就被伪装成"目录里什么都没有"，
+            // 归位对账便一路走到 NOT_FOUND —— 调用方据此删记录重下。
+            // 2026-09-18 日志里「递归列出网盘目录失败 …TLS handshake timeout」紧跟着
+            // 「归位对账未找到」就是这个链条。
+            List<OpenListFileInfo> files = api.findFilesStrict(savePath).stream()
                     .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
                     .toList();
             String saveNorm = trimTrailingSlash(savePath);
@@ -1852,7 +1922,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             List<OpenListFileInfo> source = new ArrayList<>(files.stream()
                     .filter(f -> !Objects.equals(trimTrailingSlash(f.getPath()), saveNorm))
                     .toList());
-            List<OpenListFileInfo> cloudFiles = findCloudDownloadFiles();
+            List<OpenListFileInfo> cloudFiles = findCloudDownloadFilesStrict();
             String cloudDirForGuard = resolveCloudDownloadDir();
             List<String> cloudTitleTokens = titleTokensOf(ani, item);
             Set<String> cloudSourceDirs = new HashSet<>();
@@ -1915,6 +1985,9 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             boolean isCollection = item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty();
             Map<String, String> renameMap = buildEpisodeRenameMap(
                     videoList, subtitleList, finalRenameBase, isCollection, ani.getSeason());
+            // 归位对账同样要避让：这里的 fsBatchRename 没有冲突检测，
+            // 撞名会直接覆盖网盘上已就位的同名文件（数据丢失，比抛异常更严重）
+            dedupeRenameTargets(renameMap);
 
             // 按源目录分组：重命名 + 移动到顶层
             Map<String, List<String>> pathToNames = new LinkedHashMap<>();
@@ -1973,8 +2046,12 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             log.info("归位对账完成: {} 已移动到顶层", item.getReName());
             return RelocateResult.RELOCATED;
         } catch (Exception e) {
-            log.warn("归位对账失败 {}: {}", item.getReName(), ExceptionUtils.getMessage(e));
-            return RelocateResult.NOT_FOUND;
+            // 对账没能跑完（列举失败/冷却/超时/移动校验异常）≠ 文件不存在。
+            // 必须回报 UNVERIFIABLE 让调用方保留记录；返回 NOT_FOUND 会被读成"确认没有"，
+            // 一次网盘抖动就会演变成"删记录 + 整季重新下单"。
+            log.warn("归位对账无法完成（网盘不可用或异常），本轮保留记录 {}: {}",
+                    item.getReName(), ExceptionUtils.getMessage(e));
+            return RelocateResult.UNVERIFIABLE;
         }
     }
 
@@ -2132,6 +2209,33 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         } catch (Exception e) {
             log.debug("扫描 115 云下载目录失败 {}: {}", cloudDir, ExceptionUtils.getMessage(e));
             return List.of();
+        }
+    }
+
+    /**
+     * 严格版云下载目录扫描：查询失败抛出，而不是静默返回空列表。
+     * <p>
+     * 归位对账必须用严格版——把"查不到"当成"没有"，会让一次网盘抖动直接变成
+     * "确认本集不存在"，进而删记录重下（见 {@link RelocateResult#UNVERIFIABLE}）。
+     * <p>
+     * 例外：目录本就不存在（未配置 / 115 尚未生成）是"确实没有云下载目录"这一事实，
+     * 不是查询失败，按空列表处理，避免把正常场景也拖进"存疑"。
+     */
+    private List<OpenListFileInfo> findCloudDownloadFilesStrict() {
+        String cloudDir = resolveCloudDownloadDir();
+        if (StrUtil.isBlank(cloudDir)) {
+            return List.of();
+        }
+        try {
+            api.invalidateFindFilesCache(cloudDir);
+            return findFiles(cloudDir);
+        } catch (Exception e) {
+            String message = ExceptionUtils.getMessage(e);
+            if (OpenListApi.isDirNotFoundMessage(message)) {
+                log.debug("云下载目录不存在 {}: {}", cloudDir, message);
+                return List.of();
+            }
+            throw new IllegalStateException("云下载目录列举失败 " + cloudDir + ": " + message, e);
         }
     }
 

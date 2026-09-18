@@ -6,6 +6,7 @@ import ani.rss.entity.BgmInfo;
 import ani.rss.entity.Config;
 import ani.rss.entity.Item;
 import ani.rss.enums.StringEnum;
+import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.lang.Opt;
 import cn.hutool.core.lang.func.Func1;
 import cn.hutool.core.lang.func.LambdaUtil;
@@ -153,6 +154,82 @@ public class RenameUtil {
             return true;
         }
         return "movie".equalsIgnoreCase(mediaType);
+    }
+
+    /**
+     * 集数索引是否按「剧场版 / 旧版 OVA 主名」口径（{@code M:}）构建。
+     * <p>
+     * 与 {@code DownloadService.buildEpisodeIndexResult} 的 movieStyle 判定必须一致：
+     * 两边不一致会让索引键与查询键对不上，表现为"明明下载了却一直重下"。
+     */
+    public static boolean isMovieStyle(Ani ani) {
+        boolean ovaLegacy = Boolean.TRUE.equals(ani.getOva()) && !isNamingV2(ani);
+        return isMovie(ani) || ovaLegacy;
+    }
+
+    /**
+     * 将文件路径/文件名换算成集数索引条目并加入 {@code index}。
+     *
+     * @param filePathOrName 文件路径或文件名（带扩展名，按最后一个点截断取主名）
+     * @see #addMainNameToEpisodeIndex(Set, String, boolean)
+     */
+    public static void addFileToEpisodeIndex(Set<String> index, String filePathOrName, boolean movieStyle) {
+        addMainNameToEpisodeIndex(index, FileUtil.mainName(filePathOrName), movieStyle);
+    }
+
+    /**
+     * 按「主名」（已剥掉扩展名）加入集数索引条目。
+     * <p>
+     * 索引口径的<b>唯一实现</b>：{@code movieStyle} 用 {@code M:主名}，普通番剧用
+     * {@code season:episode}（如 {@code 2:1.0}——集数是 double，键里保留小数位，
+     * 查询侧同样是 {@code "2:" + episode}），解析不出季集的文件不入索引。
+     * <p>
+     * 为什么必须单点实现：构建索引（列举网盘/本地目录）与增量追加（离线归位成功）两条路径
+     * 必须产出完全一致的键，否则追加进去的条目永远匹配不上，等于没追加。
+     * <p>
+     * 之所以要单独提供"主名"入口：{@code item.getReName()} 本身就是主名（不含扩展名），
+     * 若交给 {@link FileUtil#mainName} 再截断一次，「S01E01.5」这种半集会被误当成扩展名截掉，
+     * 索引里落成 {@code 2:1} 而查询用 {@code 2:1.5}，永远匹配不上。
+     */
+    public static void addMainNameToEpisodeIndex(Set<String> index, String mainName, boolean movieStyle) {
+        if (index == null || StrUtil.isBlank(mainName)) {
+            return;
+        }
+        mainName = mainName.trim().toUpperCase();
+        if (movieStyle) {
+            index.add("M:" + mainName);
+            return;
+        }
+        if (!ReUtil.contains(StringEnum.SEASON_REG, mainName)) {
+            return;
+        }
+        String seasonStr = ReUtil.get(StringEnum.SEASON_REG, mainName, 1);
+        String episodeStr = ReUtil.get(StringEnum.SEASON_REG, mainName, 2);
+        if (StrUtil.isBlank(seasonStr) || StrUtil.isBlank(episodeStr)) {
+            return;
+        }
+        try {
+            int s = Integer.parseInt(seasonStr);
+            double e = Double.parseDouble(episodeStr);
+            // 统一规范化，匹配时 O(1) 查找
+            index.add(s + ":" + e);
+        } catch (Exception ignored) {
+        }
+    }
+
+    /**
+     * 某一集「落地后」应出现在集数索引里的键（通常 0 或 1 个）。
+     * <p>
+     * 用于离线归位成功时<b>增量维护</b>订阅级快照：把本集直接追加进已构建的索引，
+     * 而不是整份失效后重新列举网盘。省下的正是最贵的那次列举。
+     */
+    public static Set<String> episodeIndexKeys(Ani ani, Item item) {
+        Set<String> keys = new HashSet<>();
+        if (ani == null || item == null || StrUtil.isBlank(item.getReName())) {
+            return keys;
+        }
+        addMainNameToEpisodeIndex(keys, item.getReName(), isMovieStyle(ani));
+        return keys;
     }
 
     /**

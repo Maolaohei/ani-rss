@@ -24,7 +24,15 @@ public interface OfflineDownloader {
         /** 子目录中存在本集文件且已成功重命名/移动到顶层 */
         RELOCATED,
         /** 本集文件本就完整位于顶层，无需处理 */
-        ALREADY_AT_TOP
+        ALREADY_AT_TOP,
+        /**
+         * 无法判断：网盘列举失败/熔断冷却中/对账过程中抛异常。
+         * <p>
+         * 必须与 {@link #NOT_FOUND} 严格区分——{@code NOT_FOUND} 是"查过了，确实没有"，
+         * 而本值只是"这次没查成"。调用方<b>不得</b>据此删除种子记录或重新下载，
+         * 否则一次网盘抖动就会把整季的记录清掉并重新下单。
+         */
+        UNVERIFIABLE
     }
 
     /**

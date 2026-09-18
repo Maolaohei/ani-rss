@@ -375,8 +375,8 @@ class LocalStateCacheTest {
 
     @Test
     void stats_exposes_all_counters() {
-        assertEquals(8, LocalStateCache.stats().size(),
-                "诊断摘要应包含 size/hit/miss/coalesced/build/expired/invalidatedDrop/hitRate");
+        assertEquals(9, LocalStateCache.stats().size(),
+                "诊断摘要应包含 size/hit/miss/coalesced/build/expired/invalidatedDrop/appended/hitRate");
     }
 
     @Test
@@ -387,9 +387,11 @@ class LocalStateCacheTest {
         assertEquals(30_000L, LocalStateCache.resolveTtlMs(LocalStateCache.Source.CLOUD_API),
                 "网盘 TTL 下限 30s");
 
-        ConfigUtil.CONFIG.setLocalStateCacheTtlSeconds(99999).setCloudStateCacheTtlSeconds(99999);
-        assertEquals(3600_000L, LocalStateCache.resolveTtlMs(LocalStateCache.Source.LOCAL_DISK));
-        assertEquals(3600_000L, LocalStateCache.resolveTtlMs(LocalStateCache.Source.CLOUD_API));
+        ConfigUtil.CONFIG.setLocalStateCacheTtlSeconds(99999).setCloudStateCacheTtlSeconds(999999);
+        assertEquals(3600_000L, LocalStateCache.resolveTtlMs(LocalStateCache.Source.LOCAL_DISK),
+                "本地 TTL 上限 1h");
+        assertEquals(86_400_000L, LocalStateCache.resolveTtlMs(LocalStateCache.Source.CLOUD_API),
+                "网盘 TTL 上限 24h（默认值即上限）");
     }
 
     @Test
@@ -398,5 +400,17 @@ class LocalStateCacheTest {
         assertTrue(LocalStateCache.resolveTtlMs(LocalStateCache.Source.CLOUD_API)
                         > LocalStateCache.resolveTtlMs(LocalStateCache.Source.LOCAL_DISK),
                 "网盘列举是真金白银的 API 调用，缓存应比本地磁盘更久");
+    }
+
+    /**
+     * 网盘缓存默认 24h：这是"离线归位成功走增量追加、结构性变更走主动失效"的配套约定。
+     * 若有人把默认值改回分钟级，就等于让每轮 RSS 都真实列举一次网盘——
+     * 而那正是"列举失败被当成目录为空 → 删记录重下"的风险窗口。
+     */
+    @Test
+    void cloud_ttl_defaults_to_24_hours() {
+        ConfigUtil.CONFIG.setLocalStateCacheTtlSeconds(null).setCloudStateCacheTtlSeconds(null);
+        assertEquals(86_400_000L, LocalStateCache.resolveTtlMs(LocalStateCache.Source.CLOUD_API),
+                "网盘缓存默认应为 24 小时");
     }
 }

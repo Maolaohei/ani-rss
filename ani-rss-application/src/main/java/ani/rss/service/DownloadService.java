@@ -168,49 +168,35 @@ public class DownloadService {
                     // 记录有效性校验: 下载器有对应任务 或 本地有对应文件 才视为已下载;
                     // OpenList/Alist: 下载目录是网盘虚拟路径, 本地文件不可见且任务列表恒空,
                     // 先归位对账, 对账未确认再兜底检查, 兜底也没找到才清理记录触发重新下载
-                    boolean recordValid;
+                    //
+                    // 判定必须是三态：VALID / ABSENT(确认没有) / UNVERIFIABLE(查不到)。
+                    // 只有 ABSENT 才允许删记录重下——把"查不到"读成"确认没有"，
+                    // 会让一次网盘抖动直接演变成"删记录 + 整季重新下单"。
+                    Presence presence;
                     if (!Boolean.TRUE.equals(config.getRename())) {
-                        recordValid = true;
+                        presence = Presence.VALID;
                     } else if (isOpenListTool() && TorrentUtil.DOWNLOAD instanceof OfflineDownloader offline) {
-                        String failKey = FailedDownloadQueue.keyOf(ani.getId(), item.getInfoHash(), reName);
-                        boolean alreadyQueued = FailedDownloadQueue.list().stream()
-                                .anyMatch(f -> Objects.equals(f.getId(), failKey));
-                        if (alreadyQueued) {
-                            // 失败队列已有本集记录: 跳过二次对账, 直接兜底校验, 避免每轮重复对账
-                            recordValid = itemDownloaded(ani, item, true, localEpisodeIndex);
-                            if (recordValid) {
-                                // 文件已实际就位(如手动归位/上轮重下成功): 清掉过期失败记录
-                                FailedDownloadQueue.remove(failKey);
-                            }
-                        } else {
-                            // 周期对账（仅离线工具）：记录存在但文件滞留子目录/云下载目录时自动归位到顶层，
-                            // 修复「显示已存在但文件不在预期位置」且无任何自动纠正机制的问题。
-                            OfflineDownloader.RelocateResult relocated = null;
-                            try {
-                                relocated = offline.relocateEpisodeFiles(ani, item, savePath);
-                            } catch (Exception e) {
-                                log.warn("离线归位对账失败 {}: {}", reName, ExceptionUtils.getMessage(e));
-                                recordRelocateFailure(ani, item, e);
-                            }
-                            if (relocated == OfflineDownloader.RelocateResult.RELOCATED
-                                    || relocated == OfflineDownloader.RelocateResult.ALREADY_AT_TOP) {
-                                recordValid = true;
-                            } else {
-                                // 对账没找到/失败：兜底检查（下载器任务 + 网盘视频文件按需检查）
-                                recordValid = itemDownloaded(ani, item, true, localEpisodeIndex);
-                                if (!recordValid) {
-                                    log.warn("归位对账未找到且兜底检查无文件，清理过期种子记录并重新下载 {}", reName);
-                                    if (relocated != null) {
-                                        recordRelocateFailure(ani, item, new IllegalStateException(
-                                                "归位对账未发现本集文件(" + relocated + ")"));
-                                    }
-                                }
-                            }
-                        }
+                        presence = resolveOpenListPresence(ani, item, reName, savePath, offline, localEpisodeIndex);
                     } else {
-                        recordValid = itemDownloaded(ani, item, true, localEpisodeIndex);
+                        // 本地型下载器：索引已在订阅级预构建，失败路径极少；保持原有布尔语义
+                        presence = itemDownloaded(ani, item, true, localEpisodeIndex)
+                                ? Presence.VALID : Presence.ABSENT;
                     }
-                    if (recordValid) {
+                    if (presence == Presence.UNVERIFIABLE) {
+                        // 网盘不可用/查询失败：既不能断言"有"也不能断言"没有"。
+                        // 保留记录、本轮不重下——网盘恢复后会发现文件本来就在。
+                        log.info("本地状态无法确认（网盘不可用），本轮保留记录不重下 {}", reName);
+                        RssTask.countRoundLocalState(LocalState.UNKNOWN);
+                        continue;
+                    }
+                    if (presence == Presence.RETRY_EXHAUSTED) {
+                        // 连续失败已达上限：保留种子记录以"停推"，等用户在失败列表手动重试
+                        log.warn("本集连续下载失败已达 {} 次，停止自动重推（条目保留在失败队列，可手动重试） {}",
+                                MAX_OPENLIST_AUTO_RETRY_ATTEMPTS, reName);
+                        RssTask.countRoundLocalState(LocalState.UNKNOWN);
+                        continue;
+                    }
+                    if (presence.valid()) {
                         // 主RSS记录被"备用RSS占位"证据命中: 登记待清除, 按未下载继续走流程,
                         // 实现主RSS替换。否则备用RSS先下载过的集会被"种子记录已存在/本地文件已存在"永久锁死。
                         // 注意这里只登记不删除(见 pendingStandbyPlaceholder 声明处)。
@@ -1508,33 +1494,166 @@ public class DownloadService {
     static final int DEFAULT_CLOUD_LIST_MAX_FILES = 5000;
 
     /**
+     * OpenList 路径同一集自动重推次数上限。
+     * <p>
+     * 与网盘 API 熔断阈值（{@code openListFailThreshold=3}）取同一口径：连续失败 3 次
+     * 就停止自动重推，条目保留在失败队列由用户手动重试。少了这道闸门，一个持久失败
+     * （坏种/超时/重命名冲突）会被 RSS 每轮重推一次，每次都往网盘堆一份新产物。
+     */
+    static final int MAX_OPENLIST_AUTO_RETRY_ATTEMPTS = 3;
+
+    /**
      * 将文件名加入本地索引: movieStyle 用 M: 主名, 普通番剧用 season:episode
+     * <p>
+     * 实现已收敛到 {@link RenameUtil#addFileToEpisodeIndex} —— 离线归位成功时的增量追加
+     * 必须与这里产出完全一致的键，两处各写一份必然漂移。
      */
     private static void addFileToIndex(Set<String> index, String filePath, boolean movieStyle) {
-        String mainName = FileUtil.mainName(new File(filePath));
-        if (StrUtil.isBlank(mainName)) {
-            return;
+        RenameUtil.addFileToEpisodeIndex(index, filePath, movieStyle);
+    }
+
+    /**
+     * 「本地存在」三态判定。
+     * <p>
+     * 为什么必须与 {@link #itemDownloaded} 的布尔语义分开：那个回答的是"要不要跳过下载"，
+     * 把"查不到"与"确实没有"一起压成 false（保守重下）；而本枚举用于回答
+     * "要不要删掉种子记录"，把两者合并就会让一次网盘抖动演变成
+     * "删记录 + 整季重新下单"——查不到只能说明没查成，不能说明没有。
+     */
+    enum Presence {
+        /** 文件确实在（含已在下载器任务列表中） */
+        EXISTS,
+        /** 查过了，确认没有 */
+        ABSENT,
+        /** 无法判断：网盘列举失败 / 熔断冷却中 / 索引不完整 */
+        UNVERIFIABLE,
+        /** 连续失败次数已达上限，停止自动重推（保留在失败队列等手动重试） */
+        RETRY_EXHAUSTED,
+        /** 记录有效但无需下载动作（未开启重命名时的信任记录语义） */
+        VALID;
+
+        /**
+         * 是否算作「记录有效」（跳过下载）。{@link #EXISTS} 与 {@link #VALID} 同义，
+         * 分开只是为了让日志读起来知道"为什么有效"。
+         */
+        boolean valid() {
+            return this == VALID || this == EXISTS;
         }
-        mainName = mainName.trim().toUpperCase();
-        if (movieStyle) {
-            index.add("M:" + mainName);
-            return;
+    }
+
+    /**
+     * OpenList 路径的「记录是否有效」判定（三态）。
+     * <p>
+     * 判定顺序：失败队列 → 熔断冷却 → 归位对账 → 兜底校验。
+     * 任一环节"没能查成"都返回 {@link Presence#UNVERIFIABLE}，由调用方保留记录。
+     */
+    private Presence resolveOpenListPresence(Ani ani, Item item, String reName, String savePath,
+                                            OfflineDownloader offline, Set<String> localEpisodeIndex) {
+        String failKey = FailedDownloadQueue.keyOf(ani.getId(), item.getInfoHash(), reName);
+        FailedDownloadQueue.FailedItem queued = FailedDownloadQueue.list().stream()
+                .filter(f -> Objects.equals(f.getId(), failKey))
+                .findFirst()
+                .orElse(null);
+        if (queued != null) {
+            // 失败队列已有本集记录: 跳过二次对账, 直接兜底校验, 避免每轮重复对账
+            Presence verified = verifyPresence(ani, item, localEpisodeIndex);
+            if (verified == Presence.EXISTS) {
+                // 文件已实际就位(如手动归位/上轮重下成功): 清掉过期失败记录
+                FailedDownloadQueue.remove(failKey);
+                return verified;
+            }
+            // 连续失败上限：避免真失败(坏种/超时/持久冲突)时每轮无限重推，
+            // 每次都往网盘堆一份新产物。条目保留在失败队列，可由用户手动重试。
+            int attempts = queued.getAttempts() == null ? 0 : queued.getAttempts();
+            if (verified == Presence.ABSENT && attempts >= MAX_OPENLIST_AUTO_RETRY_ATTEMPTS) {
+                return Presence.RETRY_EXHAUSTED;
+            }
+            return verified;
         }
-        if (!ReUtil.contains(StringEnum.SEASON_REG, mainName)) {
-            return;
+        // 熔断冷却期：本轮不发网盘请求，直接"无法判断"（不删记录、不重下）
+        if (OpenListApi.isListingCoolingDown()) {
+            return Presence.UNVERIFIABLE;
         }
-        String seasonStr = ReUtil.get(StringEnum.SEASON_REG, mainName, 1);
-        String episodeStr = ReUtil.get(StringEnum.SEASON_REG, mainName, 2);
-        if (StrUtil.isBlank(seasonStr) || StrUtil.isBlank(episodeStr)) {
-            return;
-        }
+        // 周期对账（仅离线工具）：记录存在但文件滞留子目录/云下载目录时自动归位到顶层，
+        // 修复「显示已存在但文件不在预期位置」且无任何自动纠正机制的问题。
+        OfflineDownloader.RelocateResult relocated = null;
         try {
-            int s = Integer.parseInt(seasonStr);
-            double e = Double.parseDouble(episodeStr);
-            // 统一规范化，匹配时 O(1) 查找
-            index.add(s + ":" + e);
-        } catch (Exception ignored) {
+            relocated = offline.relocateEpisodeFiles(ani, item, savePath);
+        } catch (Exception e) {
+            log.warn("离线归位对账失败 {}: {}", reName, ExceptionUtils.getMessage(e));
+            recordRelocateFailure(ani, item, e);
         }
+        // 对账已确认归位成功 / 本就位于顶层：直接采信，不必再跑一次兜底列举
+        if (relocated == OfflineDownloader.RelocateResult.RELOCATED
+                || relocated == OfflineDownloader.RelocateResult.ALREADY_AT_TOP) {
+            return Presence.EXISTS;
+        }
+        // 对账没能跑完：既不能说文件在，也不能说文件不在。保留记录，本轮不重下。
+        if (relocated == OfflineDownloader.RelocateResult.UNVERIFIABLE) {
+            return Presence.UNVERIFIABLE;
+        }
+        // 对账确认没找到：兜底检查（网盘视频文件按需检查；离线工具的任务列表恒空）
+        Presence fallback = verifyPresence(ani, item, localEpisodeIndex);
+        Presence combined = combineFallback(relocated, fallback);
+        if (combined == Presence.ABSENT) {
+            log.warn("归位对账未找到且兜底检查确认无文件，清理过期种子记录并重新下载 {}", reName);
+            if (relocated != null) {
+                recordRelocateFailure(ani, item, new IllegalStateException(
+                        "归位对账未发现本集文件(" + relocated + ")"));
+            }
+        } else if (combined == Presence.UNVERIFIABLE) {
+            log.info("归位对账未找到，但兜底检查未能完成（网盘不可用），本轮保留记录不重下 {}", reName);
+        }
+        return combined;
+    }
+
+    /**
+     * 「归位对账结果 + 兜底校验结果」→ 最终判定的完整决策表。
+     * <p>
+     * 抽成纯函数是为了能直接固化这张表。表里任何一格把"没查成"错判成"确认没有"，
+     * 代价都是整季种子记录被删并重新下单——2026-09-18 线上事故的直接成因。
+     * 关键一格：{@code NOT_FOUND + UNVERIFIABLE → UNVERIFIABLE}，<b>不是</b> ABSENT。
+     */
+    static Presence combineFallback(OfflineDownloader.RelocateResult relocated, Presence fallback) {
+        if (relocated == OfflineDownloader.RelocateResult.RELOCATED
+                || relocated == OfflineDownloader.RelocateResult.ALREADY_AT_TOP) {
+            return Presence.EXISTS;
+        }
+        if (relocated == OfflineDownloader.RelocateResult.UNVERIFIABLE) {
+            return Presence.UNVERIFIABLE;
+        }
+        return fallback == null ? Presence.UNVERIFIABLE : fallback;
+    }
+
+    /**
+     * 「本地存在」三态校验：区分"确实没有"与"查不到"。
+     * <p>
+     * 与 {@link #itemDownloaded} 的区别是失败不降级：列举抛异常、索引被截断时
+     * 返回 {@link Presence#UNVERIFIABLE} 而非 ABSENT，调用方据此避免破坏性动作。
+     *
+     * @param localEpisodeIndex 预构建索引；为 null 时按需走订阅级快照缓存
+     */
+    private Presence verifyPresence(Ani ani, Item item, Set<String> localEpisodeIndex) {
+        if (localEpisodeIndex != null) {
+            return matchesEpisodeIndex(ani, item, localEpisodeIndex) ? Presence.EXISTS : Presence.ABSENT;
+        }
+        EpisodeIndex index;
+        try {
+            index = cachedEpisodeIndex(ani, getDownloadPath(ani));
+        } catch (Exception e) {
+            log.warn("构建集数索引失败，本地状态无法确认（本轮不删记录、不重下） {}: {}",
+                    item.getReName(), ExceptionUtils.getMessage(e));
+            return Presence.UNVERIFIABLE;
+        }
+        if (matchesEpisodeIndex(ani, item, index.index())) {
+            return Presence.EXISTS;
+        }
+        if (!index.complete()) {
+            // 列举被截断：只能确认"存在"，不能断言"不存在"
+            log.info("集数索引不完整（列举被截断），无法断言本集不存在 {}", item.getReName());
+            return Presence.UNVERIFIABLE;
+        }
+        return Presence.ABSENT;
     }
 
     /**
