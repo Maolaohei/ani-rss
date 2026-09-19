@@ -5,7 +5,7 @@
     <parent>
         <groupId>ani.rss</groupId>
         <artifactId>ani-rss</artifactId>
-        <version>3.4.14</version>
+        <version>3.4.15</version>
     </parent>
 
     <artifactId>ani-rss-application</artifactId>
@@ -30,10 +30,26 @@
             <id>tmdb-api</id>
             <url>https://raw.github.com/wushuo894/tmdb-api/mvn-repo</url>
         </repository>
-        <!-- jlibtorrent（磁力链接元数据解析）不发布到 Maven Central -->
+        <!--
+            jlibtorrent（磁力链接元数据解析）只发在 FrostWire 自己的 Maven 仓库，不在 Central。
+
+            必须显式声明 checksumPolicy=fail：该站点对"不存在的 artifact"返回 302 → HTML 200（不是 404），
+            默认的 warn 策略会把这段 HTML 当成 POM 收下并写进本地仓库，之后：
+              [WARNING] The POM for <artifact> is invalid, transitive dependencies (if any) will not be available
+            ——静默丢掉该依赖的<b>全部传递依赖</b>。v3.4.14 首次发版就踩了这个坑：springdoc 的
+            common/webmvc-api/swagger-ui/webjars 与 hibernate-validator 全被丢掉，
+            运行时 `FileNotFoundException: .../SwaggerUiConfigProperties.class` 直接启动失败。
+            fail 策略下这种"假 200"会被判校验失败并丢弃，Maven 回落到 Central 取真件。
+        -->
         <repository>
             <id>frostwire-maven</id>
             <url>https://dl.frostwire.com/maven</url>
+            <releases>
+                <checksumPolicy>fail</checksumPolicy>
+            </releases>
+            <snapshots>
+                <enabled>false</enabled>
+            </snapshots>
         </repository>
     </repositories>
 

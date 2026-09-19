@@ -22,6 +22,43 @@
 
 ---
 
+## 3.4.15 增量（2026-09）
+
+### P0 修复：v3.4.14 启动失败（依赖被静默丢弃）
+
+**现象**：v3.4.14 启动即崩，`java.lang.IllegalStateException: Unable to read meta-data for class org.springdoc.core.properties.SwaggerUiConfigProperties` ← `FileNotFoundException: class path resource [...] cannot be opened because it does not exist`。
+
+**根因**：新增的 FrostWire Maven 仓库（jlibtorrent 只发布在那里）对**不存在的 artifact 返回 302 → HTML 200**，而不是 404。Maven 默认的 `checksumPolicy=warn` 会把这段 HTML 当成 POM 收下并缓存，于是：
+
+```
+[WARNING] Could not validate integrity of download from https://dl.frostwire.com/maven/org/neo4j/...
+org.eclipse.aether.transfer.ChecksumFailureException: Checksum validation failed, expected '<!DOCTYPE' ...
+[FATAL] Non-parseable POM .../neo4j-bolt-connection-bom-10.1.1.pom: end tag name </head> must be the same as start tag <meta>
+[WARNING] The POM for org.springdoc:springdoc-openapi-starter-webmvc-ui:jar:3.0.3 is invalid,
+          transitive dependencies (if any) will not be available
+```
+
+`springdoc-openapi-starter-webmvc-ui` 的**有效模型**因被污染的 import BOM 而构建失败，其**全部传递依赖**被静默丢弃——发布包里少 8 个 jar：
+
+| | v3.4.13 | v3.4.14（坏） | v3.4.15 |
+| --- | --- | --- | --- |
+| `BOOT-INF/lib` jar 数 | 115 | 113 | **120** |
+| springdoc | common + webmvc-api + ui | **只有 ui** | common + webmvc-api + ui |
+| validation 链 | spring-boot-validation + hibernate-validator + jboss-logging | **全无** | 全有 |
+| swagger / webjars | swagger-ui + webjars-locator-lite | **全无** | 全有 |
+
+**修复**：给 FrostWire 仓库显式加 `checksumPolicy=fail`（并禁用 snapshots）。这种"假 200"会被判为校验失败而被丢弃，Maven 回落到 Central 取真件；真正来自 FrostWire 的 jlibtorrent 有正规 `.sha1`，不受影响。
+
+**验证**（隔离空仓库全量重建，等同 CI 冷启动）：
+
+- 修复前：`invalid POM` + `Non-parseable POM` 各 1 条，fat jar 只有 `springdoc-...-ui`；
+- 修复后：两条告警清零，`neo4j-bolt-connection-bom` 改为从 central 取得（`_remote.repositories` 记录 `>central=`），fat jar 120 个 jar（上述 8 个全部回归）；
+- 本机实跑发布形态：`Started AniRssApplication in 5.129 seconds`、Tomcat 端口监听、`GET /` 返回 200 与 `ANI-RSS` 首页标题。
+
+> 注意：v3.4.14 的构建缓存里可能残留被污染的 POM。CI 的 Maven 缓存 key 含 `**/pom.xml` 哈希，本次改动会自然失效重建；**本地如遇同样报错，删除 `~/.m2/repository/org/neo4j/bolt` 与 `~/.m2/repository/org/springdoc` 后重试即可**。
+
+---
+
 ## 3.4.14 增量（2026-09）
 
 ### 结果缓存统一为「天」
