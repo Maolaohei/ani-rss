@@ -305,6 +305,11 @@ public class DownloadService {
             }
 
             // 仅在主RSS更新后删除备用RSS
+            // 本轮只做两件可回退的事：登记待删任务 + 剥掉本地集数索引（否则下方
+            // itemDownloaded 会因备用文件仍在而拦下主RSS，替换永远无法发生）。
+            // 真正的删除推迟到主RSS提交成功之后（见下方 downloadAccepted 分支）：
+            // 主提交失败时备用任务与文件原样保留，不再出现"备已删、主未到"的空窗。
+            TorrentsInfo legacyStandbyRss = null;
             if (delete && master && deleteStandbyRSSOnly) {
                 TorrentsInfo standbyRSS = torrentsInfos
                         .stream()
@@ -325,6 +330,8 @@ public class DownloadService {
                             return tags.contains(TorrentsTags.BACK_RSS.getValue()) ||
                                     !tags.contains(ani.getSubgroup());
                         })
+                        // 不能命中刚提交的主RSS版本（同集数、同目录，靠名字无法区分）
+                        .filter(torrentsInfo -> !isSameHash(torrentsInfo, hash))
                         .findFirst()
                         .orElse(null);
 
@@ -334,15 +341,9 @@ public class DownloadService {
                         // 未完成重命名
                         continue;
                     }
-                    if (!TorrentUtil.delete(standbyRSS, false, true)) {
-                        log.debug("备用RSS可能还未做种完成 {}", standbyRSS.getName());
-                        // 删除失败或者不允许删除
-                        continue;
-                    }
-                    torrentsInfos.remove(standbyRSS);
-                    // 「仅在主RSS更新后删除备用RSS」的语义是删除任务与文件:
-                    // 文件同步清除并移除本轮集数索引, 否则下方 itemDownloaded 仍会
-                    // 因本地文件存在拦截主RSS下载, 替换永远无法发生
+                    // 只登记不删除：删除推迟到主RSS提交成功之后。
+                    // 索引仍在本轮剥掉：否则 itemDownloaded 会因备用文件存在拦下主RSS。
+                    legacyStandbyRss = standbyRSS;
                     stripLocalEpisodeIndex(localEpisodeIndex, ani, item);
                 }
             }
@@ -351,8 +352,8 @@ public class DownloadService {
             if (torrentsInfos
                     .stream()
                     .anyMatch(torrentsInfo ->
-                            // hash 相同
-                            torrentsInfo.getHash().equals(hash))) {
+                            // hash 相同（忽略大小写：下载器回的 hash 大小写不保证，本地 hash 恒小写）
+                            isSameHash(torrentsInfo, hash))) {
                 log.info("已有下载任务 hash:{} name:{}", hash, reName);
                 RssTask.countRoundLocalState(LocalState.EXISTS);
                 if (master && !is5) {
@@ -430,19 +431,16 @@ public class DownloadService {
                 continue;
             }
 
-            // 到这里才真正要下载了, 此时清除「备用RSS占位」才是安全的:
-            // 上面任一闸门 continue 都不会走到这里, 占位文件得以保留。
-            if (pendingStandbyPlaceholder != null) {
-                removeStandbyPlaceholderTorrent(ani, item, torrentsInfos, localEpisodeIndex, pendingStandbyPlaceholder);
-            }
+            // 洗版清扫必须按"提交前目录里本来有什么"来清：主/备用同一模板重命名后可能完全同名，
+            // 提交之后就再也分不出"刚下好的主版本"与"待清理的备版本"，只能按快照清理。
+            Set<String> preExistingFiles = needsStandbySweep(item)
+                    ? snapshotExistingFiles(savePath)
+                    : null;
 
-            deleteStandbyRss(ani, item);
-
+            // 占位清除推迟到主RSS提交成功之后: 上面任一闸门 continue / 提交失败都不删占位, 主失败时备用文件得以保留。
             if (!AniUtil.getAniList().contains(ani)) {
                 return;
             }
-
-            sync = true;
 
             // 结构化事件: 开始下载(与 DOWNLOAD_END 成对, 便于外部程序对账)
             Map<String, Object> startEvent = new LinkedHashMap<>();
@@ -455,7 +453,41 @@ public class DownloadService {
             startEvent.put("master", master);
             EventWebhookUtil.emit(EventTypeEnum.DOWNLOAD_START, ani, startEvent);
 
-            download(ani, item, savePath, saveTorrent);
+            boolean downloadAccepted = download(ani, item, savePath, saveTorrent);
+            if (!downloadAccepted) {
+                // 提交/离线失败：本轮不算下载成功——不占并发配额、不记已下载集数、
+                // 不推进 lastDownloadTime、也绝不清理备用。失败信息与 DOWNLOAD_FAILED
+                // 事件已由 download() 内部落库，这里只把本地状态记成"存疑"。
+                log.warn("下载未提交成功, 本轮保留备用RSS与种子记录, 不做洗版清理 {}", reName);
+                RssTask.countRoundLocalState(LocalState.UNKNOWN);
+                continue;
+            }
+
+            // 主RSS已提交成功, 此时清理备用才是安全的; 清理异常不得中断本轮剩余条目
+            try {
+                if (pendingStandbyPlaceholder != null) {
+                    removeStandbyPlaceholderTorrent(ani, item, torrentsInfos, localEpisodeIndex, pendingStandbyPlaceholder);
+                }
+            } catch (Exception e) {
+                log.warn("清除备用RSS占位失败(不影响主RSS下载) {}: {}", reName, ExceptionUtils.getMessage(e));
+            }
+            try {
+                // 同一任务可能已被上面的占位清除删掉：避免重复下发删除（第二次必然失败并刷日志）
+                if (legacyStandbyRss != null && legacyStandbyRss != pendingStandbyPlaceholder
+                        && TorrentUtil.delete(legacyStandbyRss, false, true)) {
+                    torrentsInfos.remove(legacyStandbyRss);
+                }
+            } catch (Exception e) {
+                log.warn("删除备用RSS任务失败(不影响主RSS下载) {}: {}", reName, ExceptionUtils.getMessage(e));
+            }
+            try {
+                deleteStandbyRss(ani, item, hash, preExistingFiles);
+            } catch (Exception e) {
+                log.warn("备用RSS洗版清理失败(不影响主RSS下载) {}: {}", reName, ExceptionUtils.getMessage(e));
+            }
+
+            sync = true;
+
             RssTask.countRoundLocalState(LocalState.ABSENT);
 
             if (master && !is5) {
@@ -681,7 +713,22 @@ public class DownloadService {
                 Boolean.TRUE.equals(standbyRss), Boolean.TRUE.equals(delete), Boolean.TRUE.equals(coexist));
     }
 
-    public void deleteStandbyRss(Ani ani, Item item) {
+    /**
+     * 仅在主RSS更新后：清理同集的备用RSS任务与文件（洗版替换的收尾）。
+     * <p>
+     * 相对旧实现的两处收紧，都是为了适配"先提交、成功才清理"的新时序：
+     * <ol>
+     *   <li>只删带「备用RSS」标签的任务，并用 {@code excludeHash} 排除刚提交成功的主RSS版本——
+     *       主/备同集数、同目录，重命名后连文件名都可能一致，靠名字无法区分；</li>
+     *   <li>文件只清 {@code preExistingFiles}（主RSS提交前拍下的目录快照）里的那些——
+     *       提交之后新落地的文件属于主版本，绝不能按 SxxExx 一扫了之。
+     *       传 {@code null} 表示不清理文件（宁可不删，也不能误删主版本）。</li>
+     * </ol>
+     *
+     * @param excludeHash      刚提交成功的主RSS infoHash，可为空
+     * @param preExistingFiles 主RSS提交前该下载目录的文件名快照，可为空（为空则不清理文件）
+     */
+    public void deleteStandbyRss(Ani ani, Item item, String excludeHash, Set<String> preExistingFiles) {
         Config config = ConfigUtil.CONFIG;
         Boolean standbyRss = config.getStandbyRss();
         Boolean coexist = config.getCoexist();
@@ -698,6 +745,12 @@ public class DownloadService {
 
         if (coexist) {
             // 开启多字幕组共存将不会进行洗版
+            return;
+        }
+
+        // 「仅在主RSS更新后删除备用RSS」的前提是"正在下载的确实是主RSS版本"：
+        // 备用条目下载时不得反过来清掉主RSS的任务与文件。
+        if (!Boolean.TRUE.equals(item.getMaster())) {
             return;
         }
 
@@ -723,16 +776,35 @@ public class DownloadService {
                     if (!ReUtil.contains(StringEnum.SEASON_REG, name)) {
                         return false;
                     }
+                    // 刚提交成功的主RSS版本不能删：与备用同集数、同目录，靠名字无法区分
+                    if (isSameHash(torrentsInfo, excludeHash)) {
+                        return false;
+                    }
+                    // 本方法的语义是"删除备用RSS"：只认带备用标签的任务。
+                    // 无标签的历史任务不再被顺手删掉——它很可能就是主RSS自己的任务。
+                    List<String> tags = torrentsInfo.getTags();
+                    if (tags == null || !tags.contains(TorrentsTags.BACK_RSS.getValue())) {
+                        return false;
+                    }
                     String s = ReUtil.get(StringEnum.SEASON_REG, name, 0);
-                    return s.equalsIgnoreCase(episode);
+                    return s != null && s.equalsIgnoreCase(episode);
                 })
                 .findFirst()
                 .ifPresent(standbyRSS ->
                         TorrentUtil.delete(standbyRSS, true, true)
                 );
 
+        if (preExistingFiles == null) {
+            // 没有提交前快照就不碰文件：避免把刚落地的主RSS版本误删
+            return;
+        }
+
         File[] files = FileUtils.listFiles(downloadPath);
         for (File file : files) {
+            // 只清提交前就已存在的文件（主版本可能是同名的新文件）
+            if (!preExistingFiles.contains(file.getName())) {
+                continue;
+            }
             String fileMainName = FileUtil.mainName(file);
             if (StrUtil.isBlank(fileMainName)) {
                 continue;
@@ -794,7 +866,54 @@ public class DownloadService {
         return TorrentUtil.isOfflineTool();
     }
 
-    public void download(Ani ani, Item item, String savePath, File torrentFile) {
+    /**
+     * 是否同一 infoHash（忽略大小写）。
+     * <p>
+     * 本地 {@code hash} 来自 {@code FileUtil.mainName(torrent).toLowerCase()} 恒为小写，
+     * 而下载器回的 {@code getHash()} 大小写不保证（Transmission 常回大写），
+     * 直接 {@code equals} 会失配 —— 表现为"已有下载任务"认不出、重复推送。
+     */
+    static boolean isSameHash(TorrentsInfo torrentsInfo, String hash) {
+        if (torrentsInfo == null || StrUtil.isBlank(hash)) {
+            return false;
+        }
+        String h = torrentsInfo.getHash();
+        return h != null && h.equalsIgnoreCase(hash);
+    }
+
+    /**
+     * 是否需要做「备用RSS洗版清扫」。闸门与 {@link #deleteStandbyRss} 保持一致，
+     * 用于决定要不要在主RSS提交前拍目录快照（快照本身很便宜，但没必要时不做 IO）。
+     */
+    private boolean needsStandbySweep(Item item) {
+        Config config = ConfigUtil.CONFIG;
+        return Boolean.TRUE.equals(config.getDelete())
+                && Boolean.TRUE.equals(config.getStandbyRss())
+                && !Boolean.TRUE.equals(config.getCoexist())
+                && Boolean.TRUE.equals(item.getMaster())
+                && ReUtil.contains(StringEnum.SEASON_REG, item.getReName());
+    }
+
+    /**
+     * 拍下目录内现有文件名快照：洗版清扫只清这些文件（见 {@link #deleteStandbyRss}）。
+     * 读取失败时返回空集，等价于"本次不清理文件"，绝不误删。
+     */
+    private Set<String> snapshotExistingFiles(String downloadPath) {
+        Set<String> names = new HashSet<>();
+        try {
+            for (File file : FileUtils.listFiles(downloadPath)) {
+                if (file != null) {
+                    names.add(file.getName());
+                }
+            }
+        } catch (Exception e) {
+            log.warn("读取下载目录失败, 本次不清理备用RSS文件 {}: {}",
+                    downloadPath, ExceptionUtils.getMessage(e));
+        }
+        return names;
+    }
+
+    public boolean download(Ani ani, Item item, String savePath, File torrentFile) {
         ani = ObjectUtil.clone(ani);
 
         String name = item.getReName();
@@ -807,7 +926,9 @@ public class DownloadService {
 
         if (!torrentFile.exists()) {
             log.error("种子下载出现问题 {} {}", name, FileUtils.getAbsolutePath(torrentFile));
-            return;
+            // 这条早期返回原先不落库，会让 DOWNLOAD_START 悬空；补一条失败记录
+            recordDownloadFailure(ani, item, name + " 种子记录缺失，无法提交下载");
+            return false;
         }
         // 不再固定 sleep；仅在推送失败重试时退避
         savePath = FileUtils.getAbsolutePath(savePath);
@@ -843,10 +964,10 @@ public class DownloadService {
                     // OpenList: 提交即受理——等待/提升/失败处理已移交 OpenList 独立长任务池，
                     // pending 标记保持到离线真正完成，预览不会误判"已下载"
                     if (openListTool) {
-                        return;
+                        return true;
                     }
                     TorrentUtil.refreshTorrentsCache();
-                    return;
+                    return true;
                 }
                 // OpenList/Alist 返回 false：多为 10008 等待、任务 Failed/取消、离线工具侧失败
                 // 不等于坏种；占用已在 OpenList 内部按 hash 清理/释放
@@ -858,7 +979,7 @@ public class DownloadService {
                             TaskFailureHumanizer.formatNotify(name, raw),
                             NotificationStatusEnum.ERROR);
                     TorrentUtil.deletePendingTorrent(ani, item);
-                    return;
+                    return false;
                 }
             } catch (ani.rss.download.OfflineTimeoutException e) {
                 // 超时 != 坏种：不删种子、不报疑似坏种；占用已在 OpenList 内清理
@@ -870,7 +991,7 @@ public class DownloadService {
                         TaskFailureHumanizer.formatNotify(name, message),
                         NotificationStatusEnum.ERROR);
                 TorrentUtil.deletePendingTorrent(ani, item);
-                return;
+                return false;
             } catch (Exception e) {
                 String message = ExceptionUtils.getMessage(e);
                 log.error(message, e);
@@ -891,7 +1012,7 @@ public class DownloadService {
                     TaskFailureHumanizer.formatNotify(name, raw),
                     NotificationStatusEnum.ERROR);
             TorrentUtil.deletePendingTorrent(ani, item);
-            return;
+            return false;
         }
 
         // 删除下载失败的种子, 下次轮询仍会重试
@@ -903,8 +1024,8 @@ public class DownloadService {
         NotificationUtil.send(ConfigUtil.CONFIG, ani,
                 TaskFailureHumanizer.formatNotify(name, raw),
                 NotificationStatusEnum.ERROR);
+        return false;
     }
-
     private void recordDownloadFailure(Ani ani, Item item, String rawMessage) {
         try {
             String hash = item == null ? null : item.getInfoHash();
