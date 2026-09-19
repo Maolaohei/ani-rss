@@ -25,6 +25,8 @@ import org.eclipse.bittorrent.TorrentFile;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -355,6 +357,21 @@ public class TorrentUtil {
      *                     而"这一集刚落地"是已知的增量事实。
      */
     public static void promoteTorrent(Ani ani, Item item, String downloadPath) {
+        promoteTorrent(ani, item, downloadPath, null);
+    }
+
+    /**
+     * 离线归位成功后的提升：记录落盘 + 把<b>真正归位的集</b>并入订阅级快照。
+     * <p>
+     * {@code resolvedEpisodeKeys} 非空时优先用它，而不用 {@code item} 的
+     * {@code episodeRange}：合集/整季包一旦被判定完成，用 range 会把<b>全部</b>集数都标成
+     * 已下载——哪怕这次只归位了其中一部分（"下载器报部分成功"的典型后果），
+     * 剩下的集会被缓存伪装成已下载而永久漏下。
+     *
+     * @param resolvedEpisodeKeys 本次真正归位的文件对应的快照键；null/空 = 回退 item 口径
+     */
+    public static void promoteTorrent(Ani ani, Item item, String downloadPath,
+                                      Collection<String> resolvedEpisodeKeys) {
         File pending = getPendingTorrent(ani, item);
         if (!pending.exists()) {
             log.debug("无待完成标记, 跳过提升 {}", item.getReName());
@@ -364,12 +381,12 @@ public class TorrentUtil {
         if (target.exists()) {
             // 正式记录已存在(如提升过), 清理 pending 即可
             FileUtil.del(pending);
-            appendEpisodeToLocalState(ani, item, downloadPath);
+            appendEpisodeToLocalState(ani, item, downloadPath, resolvedEpisodeKeys);
             return;
         }
         FileUtil.move(pending, promotedTarget(ani, pending), true);
         log.info("离线任务完成, 种子记录落盘 {}", item.getReName());
-        appendEpisodeToLocalState(ani, item, downloadPath);
+        appendEpisodeToLocalState(ani, item, downloadPath, resolvedEpisodeKeys);
     }
 
     /**
@@ -397,8 +414,15 @@ public class TorrentUtil {
      * 所以这里不需要兜底失效。真正的结构性变更（删除/洗版/模板变更）仍走 invalidate。
      */
     private static void appendEpisodeToLocalState(Ani ani, Item item, String downloadPath) {
+        appendEpisodeToLocalState(ani, item, downloadPath, null);
+    }
+
+    private static void appendEpisodeToLocalState(Ani ani, Item item, String downloadPath,
+                                                  Collection<String> resolvedEpisodeKeys) {
         try {
-            Set<String> keys = RenameUtil.episodeIndexKeys(ani, item);
+            Set<String> keys = resolvedEpisodeKeys == null || resolvedEpisodeKeys.isEmpty()
+                    ? RenameUtil.episodeIndexKeys(ani, item)
+                    : new LinkedHashSet<>(resolvedEpisodeKeys);
             if (!keys.isEmpty()) {
                 LocalStateCache.appendEpisode(ani == null ? null : ani.getId(), downloadPath, keys);
             }
@@ -440,6 +464,11 @@ public class TorrentUtil {
             }
             FileUtil.walkFiles(pendingRoot, f -> {
                 if (!f.isFile()) {
+                    return;
+                }
+                // 计划快照（P4）刻意保留：启动后由 OpenList.recoverOfflinePlans() 做一次
+                // "文件其实早下完了"的补救，比对完自己删。
+                if (OfflinePlanStore.isPlanFile(f)) {
                     return;
                 }
                 String rel = pendingRoot.toPath().relativize(f.toPath()).toString();

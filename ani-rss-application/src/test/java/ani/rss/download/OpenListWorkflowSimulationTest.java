@@ -382,6 +382,14 @@ class OpenListWorkflowSimulationTest {
         volatile boolean multiFileSeed = false;
         /** true: add_offline_download 返回 10008（任务已存在，模拟 115 云端去重残留） */
         volatile boolean forceDuplicateAdd = false;
+        /** 新增离线任务的状态码：默认 2=Succeeded；改成 1=Running 可模拟"任务一直跑着但文件已齐" */
+        volatile int taskState = 2;
+        volatile int taskProgress = 100;
+        /**
+         * true: 重命名只改主名、保留原扩展名 —— 115（经 AList）的真实行为
+         * （实测：x.bin 请求改成 y.mkv，结果得到 y.bin）
+         */
+        volatile boolean preserveExtOnRename = false;
         /** 记录 fs/list 被访问过的路径（验证兜底路径真实触发） */
         final java.util.Set<String> fsListCalls = ConcurrentHashMap.newKeySet();
 
@@ -588,8 +596,17 @@ class OpenListWorkflowSimulationTest {
                         String srcDir = str(req, "src_dir");
                         for (JsonElement el : req.getAsJsonArray("rename_objects")) {
                             JsonObject obj = el.getAsJsonObject();
-                            renameEntry(srcDir, obj.get("src_name").getAsString(),
-                                    obj.get("new_name").getAsString());
+                            String srcName = obj.get("src_name").getAsString();
+                            String newName = obj.get("new_name").getAsString();
+                            if (preserveExtOnRename) {
+                                // 115：只改主名，扩展名跟随原文件
+                                String srcExt = srcName.contains(".")
+                                        ? srcName.substring(srcName.lastIndexOf('.') + 1) : "";
+                                int dot = newName.lastIndexOf('.');
+                                String newMain = dot < 0 ? newName : newName.substring(0, dot);
+                                newName = srcExt.isEmpty() ? newMain : newMain + "." + srcExt;
+                            }
+                            renameEntry(srcDir, srcName, newName);
                         }
                         return ok(data -> {
                         });
@@ -627,8 +644,8 @@ class OpenListWorkflowSimulationTest {
                         JsonObject task = new JsonObject();
                         task.addProperty("id", tid);
                         task.addProperty("name", "offline-" + magnet.substring(magnet.length() - 40));
-                        task.addProperty("state", 2); // Succeeded
-                        task.addProperty("progress", 100);
+                        task.addProperty("state", taskState);
+                        task.addProperty("progress", taskProgress);
                         tasks.put(tid, task);
                         JsonObject t = new JsonObject();
                         t.addProperty("id", tid);

@@ -7,18 +7,26 @@ import ani.rss.entity.*;
 import ani.rss.enums.NotificationStatusEnum;
 import ani.rss.enums.StringEnum;
 import ani.rss.task.RssTask;
+import ani.rss.service.LocalStateCache;
+import ani.rss.util.other.AniUtil;
 import ani.rss.util.other.ConfigUtil;
 import ani.rss.util.other.DownloadHistory;
 import ani.rss.util.other.FailedDownloadQueue;
 import ani.rss.util.other.NotificationUtil;
+import ani.rss.util.other.OfflinePlanStore;
 import ani.rss.util.other.RenameUtil;
 import ani.rss.util.other.TaskFailureHumanizer;
 import ani.rss.util.other.TempDirResidualPolicy;
+import ani.rss.util.other.MagnetTorrentUtil;
+import ani.rss.util.other.TorrentPlanMatcher;
+import ani.rss.util.other.TorrentPlanUtil;
 import ani.rss.util.other.TorrentUtil;
 import cn.hutool.core.date.DateTime;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.lang.Assert;
 import cn.hutool.core.text.StrFormatter;
+import cn.hutool.core.thread.ExecutorBuilder;
+import cn.hutool.core.thread.NamedThreadFactory;
 import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.core.util.ObjectUtil;
 import cn.hutool.core.util.ReUtil;
@@ -28,6 +36,7 @@ import cn.hutool.http.Method;
 import com.google.gson.JsonObject;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.eclipse.bittorrent.TorrentFile;
 import org.springframework.stereotype.Service;
 
 import java.io.File;
@@ -35,7 +44,9 @@ import java.util.*;
 import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.TimeUnit;
@@ -70,6 +81,23 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 return thread;
             },
             new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
+
+    /**
+     * 期望文件计划的后台解析线程。
+     * <p>
+     * 磁力链要先把元数据抓下来才能得到文件清单（最长等 60s，见
+     * {@link MagnetTorrentUtil#resolve}），绝不能放在"提交即受理"的提交路径上，
+     * 也不能占住等诗线程——否则一次冷门种子会把整个离线流水线拖慢。
+     * 单线程 + 有界队列：解析本身已 `synchronized` 串行，多线程无意义；
+     * 队列满时直接丢弃本次计划（功能退化为旧启发式，不影响下载）。
+     */
+    private static final ExecutorService PLAN_RESOLVE_POOL = ExecutorBuilder.create()
+            .setCorePoolSize(1)
+            .setMaxPoolSize(1)
+            .setWorkQueue(new LinkedBlockingQueue<>(64))
+            .setThreadFactory(new NamedThreadFactory("openlist-plan-resolve", true))
+            .setHandler(new ThreadPoolExecutor.DiscardPolicy())
+            .build();
 
     /**
      * 提交中去重：防止同一 infoHash 被重复提交到 OpenList
@@ -296,6 +324,75 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 .setEpisode(episodes.isEmpty() ? null : episodes.get(0));
     }
 
+    /**
+     * 本地能解析时直接构建期望文件计划（纯本地、无网络）。
+     * <p>
+     * 合集入口已经有预览计划，直接沿用，不重复解析。
+     * 磁力链记录（{@code .txt}，内容是 magnet/直链文本）不是种子二进制，
+     * 交给 {@link #schedulePlanResolve} 在后台拓元数据——提交路径上不能等网络。
+     *
+     * @return 计划条目；不可用时返回空列表（调用方回退旧启发式）
+     */
+    static List<Item> buildPlanFromTorrentFile(File torrentFile, Ani ani, Item item, List<Item> collectionPlan) {
+        try {
+            if (collectionPlan != null && !collectionPlan.isEmpty()) {
+                return collectionPlan;
+            }
+            if (torrentFile == null || !torrentFile.isFile() || torrentFile.length() <= 0) {
+                return List.of();
+            }
+            if ("txt".equalsIgnoreCase(FileUtil.extName(torrentFile))) {
+                return List.of();
+            }
+            TorrentFile parsed = new TorrentFile(torrentFile);
+            List<Item> full = TorrentPlanUtil.build(parsed, ani);
+            return TorrentPlanUtil.filterEpisodes(full, TorrentPlanUtil.expectedEpisodesOf(item));
+        } catch (Exception e) {
+            log.debug("构建期望文件计划失败(回退扫目录推断) {}: {}",
+                    item == null ? null : item.getReName(), ExceptionUtils.getMessage(e));
+            return List.of();
+        }
+    }
+
+    /**
+     * 后台把磁力链换成种子文件并算出计划，成功后回写 {@code ctx.plan}。
+     * <p>
+     * 只在独立线程池执行：{@link MagnetTorrentUtil#resolve} 最长等 60s，
+     * 不能阻塞提交路径、也不能阻塞离线等待。拿不到就保持为空，
+     * 全链路自动回退到旧的"扫目录 + 文件名猜集数"。
+     */
+    private static void schedulePlanResolve(OfflineDownloadContext ctx, Ani ani, Item item, String savePath) {
+        String magnet = ctx.magnet;
+        if (!MagnetTorrentUtil.isMagnet(magnet)) {
+            return;
+        }
+        try {
+            PLAN_RESOLVE_POOL.submit(() -> {
+                try {
+                    // 先查缓存（不触网），未命中才真抓元数据
+                    File resolved = MagnetTorrentUtil.resolveCached(magnet);
+                    if (resolved == null) {
+                        resolved = MagnetTorrentUtil.resolve(magnet);
+                    }
+                    TorrentFile parsed = new TorrentFile(resolved);
+                    List<Item> full = TorrentPlanUtil.build(parsed, ani);
+                    List<Item> plan = TorrentPlanUtil.filterEpisodes(full, TorrentPlanUtil.expectedEpisodesOf(item));
+                    if (!plan.isEmpty()) {
+                        ctx.plan = plan;
+                        OfflinePlanStore.save(ctx.infoHash, ani == null ? null : ani.getId(), savePath,
+                                ctx.tempDirName, ctx.finalRenameBase, plan);
+                        log.info("磁力元数据解析完成, 已启用计划归位 {} 项: {}", plan.size(), ctx.reName);
+                    }
+                } catch (Throwable e) {
+                    log.debug("后台解析磁力元数据失败(回退扫目录推断) {}: {}",
+                            ctx.reName, e.toString());
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            log.debug("计划解析队列已满, 本次不启用计划归位: {}", ctx.reName);
+        }
+    }
+
     private Boolean downloadInternal(Ani ani, Item item, String savePath, File torrentFile, List<Item> collectionPlan) {
         savePath = ReUtil.replaceAll(savePath, "^[A-z]:", "");
 
@@ -317,6 +414,15 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         synchronized (lock) {
             OfflineDownloadContext ctx = submitOffline(ani, item, savePath, magnet, hashKey);
             ctx.collectionPlan = collectionPlan;
+            // 期望文件计划：本地能解析就直接算（纯本地、无网络）；磁力链记录交给后台线程抓元数据
+            ctx.plan = buildPlanFromTorrentFile(torrentFile, ani, item, collectionPlan);
+            if (ctx.plan.isEmpty()) {
+                schedulePlanResolve(ctx, ani, item, savePath);
+            } else {
+                // P4: 快照落盘，重启后可直接补救（不必等下一轮 RSS 扫目录反推）
+                OfflinePlanStore.save(ctx.infoHash, ani == null ? null : ani.getId(), savePath,
+                        ctx.tempDirName, ctx.finalRenameBase, ctx.plan);
+            }
             if (ctx.shortCircuit) {
                 return ctx.shortCircuitResult;
             }
@@ -352,7 +458,12 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             Boolean ok = awaitAndFinalize(ctx, ani, item, savePath);
             if (Boolean.TRUE.equals(ok)) {
                 try {
-                    TorrentUtil.promoteTorrent(ani, item, savePath);
+                    // 精确标记：计划可用时只标记"真正归位的文件"对应的集，
+                    // 而不是 item 的整个 episodeRange（否则部分成功会被整段标成已下载）
+                    Collection<String> resolvedKeys = ctx.finalizedItems == null || ctx.finalizedItems.isEmpty()
+                            ? null
+                            : TorrentPlanUtil.episodeIndexKeys(ani, ctx.finalizedItems);
+                    TorrentUtil.promoteTorrent(ani, item, savePath, resolvedKeys);
                 } catch (Exception e) {
                     // 文件可能已落盘, 下轮 itemDownloaded 会恢复记录
                     log.error("提升种子记录失败(文件可能已落盘) {}: {}", ctx.reName, ExceptionUtils.getMessage(e));
@@ -434,6 +545,23 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         final String magnet;
         /** 合集预览计划(添加合集入口非空): 收尾按计划归位而非按单集/合集模板重命名 */
         List<Item> collectionPlan;
+        /**
+         * 期望文件计划（种子元数据 + 订阅规则，见 {@link TorrentPlanUtil}）。
+         * <p>
+         * 空/null = 不可用（磁力元数据没拿到、ed2k、种子解析失败），一律回退旧的
+         * "扫目录 + 文件名猜集数" 启发式。非空时充当两件事：
+         * <ul>
+         *   <li><b>完成判定</b>：计划内视频按字节数全部到位即可收尾，不等下载器自报状态
+         *       （115 经常出现"报部分成功/一直 Running，其实文件全在"）；</li>
+         *   <li><b>归位依据</b>：重命名/移动按计划条目来，字幕配对不再靠猜。</li>
+         * </ul>
+         * 后台解析线程会回写（磁力链需要先抓元数据，不能在等待线程上阻塞）。
+         */
+        volatile List<Item> plan;
+        /** 计划内未到位的视频（P3："部分成功"可见化，写入失败队列） */
+        volatile List<Item> planMissingVideos;
+        /** 本次真正归位的计划条目（供精确标记完成；null/空=走旧口径标记 item 的 episodeRange） */
+        volatile List<Item> finalizedItems;
 
         String tid;            // 可变：10008 时切换/清空
         long retry;
@@ -678,6 +806,9 @@ public class OpenList implements BaseDownload, OfflineDownloader {
      */
     private void releaseOfflinePlaceholder(String infoHash, String tid, boolean claimedInFlight,
                                            Boolean delete, boolean newlySubmittedTid) {
+        // 等待阶段结束（成功/失败/取消）→ 计划快照使命结束。
+        // 若进程在这之前崩溃，快照会留着，由启动恢复流程处理。
+        OfflinePlanStore.delete(infoHash);
         // 仅清理本线程占用的 inFlight，避免误删其它线程标记
         if (claimedInFlight) {
             inFlightTasks.remove(infoHash);
@@ -897,6 +1028,18 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                     clearDuplicateMagnet(infoHash);
                     return false;
                 }
+                // P1: 计划内文件（视频）按字节数全部到位即可收尾，不等下载器自报状态。
+                // 115 常见"任务一直 Running / 报部分成功，其实文件全在"，
+                // 旧的"等 SUCCESS 或等超时终检"会让这类集白等到超时。
+                // 计划不可用（磁力元数据未抓到 / ed2k / 解析失败）时本块直接跳过，行为与旧版一致。
+                if (ctx.plan != null && !ctx.plan.isEmpty()) {
+                    EpisodeScanResult planScan = planScan(ctx, path, savePath, tempDownloadDir, expectedEpisodes, titleTokens);
+                    if (planScan != null) {
+                        log.info("计划内视频已全部就位（按字节数比对），不再等待下载器状态 {}", reName);
+                        clearDuplicateMagnet(infoHash);
+                        return finalizeFromScan(ctx, ani, item, savePath, planScan);
+                    }
+                }
                 // 卡住重提会更新 ctx.tid，循环顶部同步局部 tid
                 tid = ctx.tid;
                 if (tid != null) {
@@ -1023,7 +1166,9 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                     if (hasEpisodeVideos(path, tempDirName, expectedEpisodes)
                         || hasEpisodeVideos(savePath, finalRenameBase, expectedEpisodes)
                         || !findCloudDownloadEpisodeVideos(
-                                expectedEpisodes, expectedSeason, titleTokens).isEmpty()) {
+                                expectedEpisodes, expectedSeason, titleTokens).isEmpty()
+                        || planScan(ctx, path, savePath, tempDownloadDir, expectedEpisodes,
+                                titleTokens, false) != null) {
                         log.info("本集资源已就绪，OpenList 任务状态异常但文件可用，继续后处理 {}", reName);
                         clearDuplicateMagnet(infoHash);
                         break;
@@ -1127,6 +1272,15 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 if (!scan.videoList().isEmpty()) {
                     return finalizeFromScan(ctx, ani, item, savePath, scan);
                 }
+                // P2: 旧启发式按集数认不出文件（115 改名/无集数）时，计划能认领就直接归位：
+                // 这是"任务报成功/失败但文件其实在"的另一半——没有计划只能等到宽限期结束判失败
+                EpisodeScanResult byPlan = planScan(ctx, path, savePath, tempDownloadDir,
+                        expectedEpisodes, titleTokens, false);
+                if (byPlan != null) {
+                    log.info("任务已结束，旧口径未识别出本集文件，按计划认领并归位 {}", reName);
+                    clearDuplicateMagnet(infoHash);
+                    return finalizeFromScan(ctx, ani, item, savePath, byPlan);
+                }
                 if (System.currentTimeMillis() >= fileGraceDeadlineMs) {
                     return false;
                 }
@@ -1157,121 +1311,36 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     private Boolean finalizeFromScan(OfflineDownloadContext ctx, Ani ani, Item item, String savePath,
                                      EpisodeScanResult scan) {
         String reName = ctx.reName;
-        List<OpenListFileInfo> videoList = scan.videoList();
-        List<OpenListFileInfo> subtitleList = scan.subtitleList();
         List<OpenListFileInfo> openListFileInfos = scan.openListFileInfos();
         Set<String> cloudSourceDirs = new HashSet<>(scan.cloudSourceDirs());
 
         Boolean rename = config.getRename();
-        Map<String, String> renameMap = ctx.collectionPlan != null
-                ? buildCollectionPlanRenameMap(ctx.collectionPlan, scan, ctx.finalRenameBase)
-                : buildEpisodeRenameMap(
-                        videoList, subtitleList, ctx.finalRenameBase, ctx.isCollection, ani.getSeason());
-        if (renameMap.isEmpty()) {
+        List<ResolvedFile> resolved = resolveFiles(ctx, ani, scan);
+        if (resolved.isEmpty()) {
             // 无任何可归位文件: 判失败并保留临时目录, 避免"空归位→清临时目录→误报完成"把产物一并清掉
             log.error("归位失败: 未匹配到任何可移动文件, 保留临时目录 {} tempDir={} videos={} plan={}",
-                    reName, ctx.tempDirName, videoList.size(),
-                    ctx.collectionPlan == null ? -1 : ctx.collectionPlan.size());
+                    reName, ctx.tempDirName, scan.videoList().size(),
+                    ctx.plan == null ? -1 : ctx.plan.size());
             return false;
         }
 
         // 目标名去重：撞名时退回原名避让，绝不抛异常
         // （抛异常会让"文件其实已落盘"的集被判离线失败 → 清 pending → 下轮重下 → 死循环）
-        dedupeRenameTargets(renameMap);
+        dedupeResolvedTargets(resolved);
 
         // 按原始路径分组，处理文件可能分布在多个子目录的情况
-        Map<String, List<String>> pathToNames = new HashMap<>();
-        for (Map.Entry<String, String> entry : renameMap.entrySet()) {
-            String srcName = entry.getKey();
-            String newName = rename ? entry.getValue() : srcName;
-            // 找到原始文件所在目录（排除目录条目，避免把 115 任务目录当文件处理）
-            Optional<OpenListFileInfo> fileInfo = openListFileInfos.stream()
-                    .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
-                    .filter(f -> f.getName().equals(srcName))
-                    .findFirst();
-            String dirPath = fileInfo.map(OpenListFileInfo::getPath).orElse(videoList.get(0).getPath());
-            pathToNames.computeIfAbsent(dirPath, k -> new ArrayList<>()).add(newName);
+        Map<String, List<ResolvedFile>> pathToFiles = new LinkedHashMap<>();
+        for (ResolvedFile file : resolved) {
+            String dirPath = StrUtil.isNotBlank(file.srcPath)
+                    ? file.srcPath
+                    : (scan.videoList().isEmpty() ? savePath : scan.videoList().get(0).getPath());
+            pathToFiles.computeIfAbsent(dirPath, k -> new ArrayList<>()).add(file);
         }
 
-        // 重命名
-        if (rename) {
-            for (Map.Entry<String, List<String>> entry : pathToNames.entrySet()) {
-                String dirPath = entry.getKey();
-                List<Map<String, String>> renameObjects = new ArrayList<>();
-                for (String srcName : renameMap.keySet()) {
-                    Optional<OpenListFileInfo> fi = openListFileInfos.stream()
-                            .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
-                            .filter(f -> f.getName().equals(srcName)).findFirst();
-                    if (fi.isPresent() && fi.get().getPath().equals(dirPath)) {
-                        String newName = renameMap.get(srcName);
-                        if (newName.equals(srcName)) {
-                            // 同名重命名是 no-op: 部分实现对 src==new 会报错, 直接跳过
-                            continue;
-                        }
-                        log.info("重命名 {} ==> {}", srcName, newName);
-                        renameObjects.add(Map.of("src_name", srcName, "new_name", newName));
-                    }
-                }
-                if (!renameObjects.isEmpty()) {
-                    fsBatchRename(renameObjects, dirPath);
-                }
-            }
-        }
-
-        // 移动：从每个子目录分别移动；已在 savePath 顶层的（兜底扫描发现的原始命名文件）仅就地重命名，无需移动
-        Set<String> allMovedNames = new HashSet<>();
-        String savePathNorm = trimTrailingSlash(savePath);
-        for (Map.Entry<String, List<String>> entry : pathToNames.entrySet()) {
-            String dirPath = entry.getKey();
-            List<String> names = entry.getValue();
-            if (Objects.equals(trimTrailingSlash(dirPath), savePathNorm)) {
-                allMovedNames.addAll(names);
-                continue;
-            }
-            fsMove(dirPath, savePath, names);
-            allMovedNames.addAll(names);
-        }
-
-        // 验证必须落在最终目录顶层；findFiles(savePath) 会递归进临时目录，
-        // 若仍用它判定，未真正移出的文件也会被当成「已移动」，随后清理失败留下空壳。
-        // 990009 异步移动/并发冲突下 fsMove 可能假成功：校验失败先重试移动，仍失败则判失败，
-        // 禁止「warn 后照常发完成通知」——那是「已存在但文件不在顶层」的直接来源。
-        List<String> missingNames = verifyTopLevelNames(savePath, allMovedNames);
-        int verifyAttempt = 0;
-        while (!missingNames.isEmpty() && verifyAttempt < MOVE_VERIFY_MAX_ATTEMPTS) {
-            verifyAttempt++;
-            log.warn("第{}次校验：文件未出现在最终目录顶层，重试移动 {}", verifyAttempt, missingNames);
-            ThreadUtil.sleep(MOVE_VERIFY_RETRY_DELAY_MS);
-            // 只失效本次归位涉及的目录：最终目录 + 各源目录（pathToNames 的键）
-            List<String> changedDirs = new ArrayList<>(pathToNames.keySet());
-            changedDirs.add(savePath);
-            api.invalidateFindFilesCache(changedDirs);
-            for (Map.Entry<String, List<String>> entry : pathToNames.entrySet()) {
-                String dirPath = entry.getKey();
-                if (Objects.equals(trimTrailingSlash(dirPath), savePathNorm)) {
-                    continue;
-                }
-                List<String> retryNames = entry.getValue().stream()
-                        .filter(missingNames::contains)
-                        .toList();
-                if (!retryNames.isEmpty()) {
-                    fsMove(dirPath, savePath, retryNames);
-                }
-            }
-            missingNames = verifyTopLevelNames(savePath, allMovedNames);
-        }
-        if (!missingNames.isEmpty()) {
-            log.error("归位失败：文件未出现在最终目录顶层，判定本次下载失败（不发完成通知）: {}", missingNames);
+        // 重命名 + 移动 + 顶层校验 + 清理临时/云下载空壳（启动恢复流程共用同一实现）
+        String fallbackDir = scan.videoList().isEmpty() ? savePath : scan.videoList().get(0).getPath();
+        if (!relocateResolved(resolved, pathToFiles, savePath, ctx.tempDirName, fallbackDir, cloudSourceDirs)) {
             return false;
-        }
-
-        if (ctx.tempDownloadDir != null) {
-            // 需要移动的视频/字幕已确认在最终目录顶层 → 强制删除临时目录
-            cleanupTempDownloadDir(savePath, ctx.tempDirName, true);
-        }
-        // 云下载兜底：文件已全部移动归位，清理源目录残留的空壳（115 任务目录）
-        if (!cloudSourceDirs.isEmpty()) {
-            cleanupCloudDownloadEmptyDirs(cloudSourceDirs);
         }
 
         // 缺集校验：扫描整季目录，但日志只报告本次声明范围的命中情况。
@@ -1291,14 +1360,556 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             }
         }
 
+        // P3: 计划内还有视频没到位 → 明确记账（失败队列 + 日志），
+        // 让"下载器报成功/部分成功但其实缺文件"在界面上可见、可重试。
+        reportPlanGaps(ctx, ani, item);
+        // 供调用方按"真正落位"的条目精确标记完成（不再把整个 episodeRange 都标成已下载）
+        ctx.finalizedItems = resolved.stream()
+                .map(file -> file.plan)
+                .filter(Objects::nonNull)
+                .toList();
+
         // 手动合集入口(collectionPlan 非空)且确为多集时才用合集措辞；总集数为 1 时按单集收尾
         boolean collectionDownload = ctx.collectionPlan != null && ctx.isCollection;
         String message = collectionDownload
-                ? StrFormatter.format("{} 合集下载完成, 共归位 {} 个文件", item.getReName(), renameMap.size())
+                ? StrFormatter.format("{} 合集下载完成, 共归位 {} 个文件", item.getReName(), resolved.size())
                 : StrFormatter.format("{} 下载完成", item.getReName());
         NotificationUtil.send(config, ani, message, NotificationStatusEnum.DOWNLOAD_END);
         recordHistory(ani, item, collectionDownload ? "离线合集完成" : "离线下载完成");
         return true;
+    }
+
+    /**
+     * 归位文件：统一成「源文件 → 目标名」的列表。
+     * <p>
+     * 有期望计划时按计划条目认领（字节数为主键，见 {@link TorrentPlanMatcher}）；
+     * 计划缺失、或计划与离线产物完全对不上时，回退到旧的"文件名提集数 + 主名配字幕"启发式。
+     * <p>
+     * 返回值里带上<b>每个文件的真实路径</b>：旧实现以裸文件名为键，再按名字反查目录，
+     * 不同子目录下的同名文件会认错目录，甚至静默丢一个产物。
+     */
+    private List<ResolvedFile> resolveFiles(OfflineDownloadContext ctx, Ani ani, EpisodeScanResult scan) {
+        List<OpenListFileInfo> openListFileInfos = scan.openListFileInfos();
+        if (ctx.plan != null && !ctx.plan.isEmpty()) {
+            TorrentPlanMatcher.Result result = TorrentPlanMatcher.match(ctx.plan, openListFileInfos);
+            ctx.planMissingVideos = result.missingVideos();
+            if (!result.matches().isEmpty()) {
+                if (!result.missing().isEmpty()) {
+                    log.info("计划归位命中 {} 项, 未到位 {} 项 {}",
+                            result.matches().size(), result.missing().size(), ctx.reName);
+                }
+                List<ResolvedFile> resolved = new ArrayList<>();
+                for (TorrentPlanMatcher.Match match : result.matches()) {
+                    String target = match.plan().getReName();
+                    if (StrUtil.isBlank(target)) {
+                        continue;
+                    }
+                    resolved.add(new ResolvedFile(match.file().getName(), match.file().getPath(), target, match.plan()));
+                }
+                if (!resolved.isEmpty()) {
+                    return resolved;
+                }
+            }
+            log.warn("期望计划({} 项)与离线产物({} 项)无任何匹配, 回退启发式归位 {}",
+                    ctx.plan.size(), openListFileInfos.size(), ctx.reName);
+        }
+
+        Map<String, String> renameMap = buildEpisodeRenameMap(scan.videoList(), scan.subtitleList(),
+                ctx.finalRenameBase, ctx.isCollection, ani == null ? null : ani.getSeason());
+        if (renameMap.isEmpty()) {
+            return List.of();
+        }
+        String fallbackDir = scan.videoList().isEmpty() ? null : scan.videoList().get(0).getPath();
+        List<ResolvedFile> resolved = new ArrayList<>();
+        for (Map.Entry<String, String> entry : renameMap.entrySet()) {
+            String srcName = entry.getKey();
+            String srcPath = openListFileInfos.stream()
+                    .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
+                    .filter(f -> Objects.equals(srcName, f.getName()))
+                    .map(OpenListFileInfo::getPath)
+                    .findFirst()
+                    .orElse(fallbackDir);
+            resolved.add(new ResolvedFile(srcName, srcPath, entry.getValue(), null));
+        }
+        return resolved;
+    }
+
+    /**
+     * 重命名后回读目录，拿到"盘上真实文件名"。
+     * <p>
+     * 必须回读而不是假定等于请求名：<b>115（经 AList）的 fs/rename 只改主名、保留原扩展名</b>——
+     * 实测「{@code x.bin} 请求改成 {@code y.mkv}」得到的是 {@code y.bin}。
+     * 于是"请求的目标名"和"盘上真实名"可能不一致，继续按请求名去移动/校验，
+     * 会把本集判成归位失败（保留临时目录、下轮重来），文件永远搬不出临时目录。
+     * <p>
+     * 找不到同主名的唯一候选时保持请求名不变：让后续校验如实失败，而不是瞎猜。
+     *
+     * @param dir       目录
+     * @param requested 本次请求的重命名结果（含扩展名）
+     * @return 请求名 → 盘上真实名
+     */
+    Map<String, String> resolveRenamedNames(String dir, List<String> requested) {
+        Map<String, String> resolved = new LinkedHashMap<>();
+        for (String want : requested) {
+            resolved.put(want, want);
+        }
+        if (requested.isEmpty()) {
+            return resolved;
+        }
+        List<String> actualNames;
+        try {
+            api.invalidateFindFilesCache(dir);
+            actualNames = api.fsListStrict(dir, true).stream()
+                    .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
+                    .map(OpenListFileInfo::getName)
+                    .filter(Objects::nonNull)
+                    .toList();
+        } catch (Exception e) {
+            log.warn("重命名后回读目录失败，按请求名继续 {}: {}", dir, ExceptionUtils.getMessage(e));
+            return resolved;
+        }
+        for (String want : requested) {
+            if (actualNames.contains(want)) {
+                continue;
+            }
+            String main = FileUtil.mainName(want);
+            List<String> sameMain = actualNames.stream()
+                    .filter(n -> FileUtil.mainName(n).equals(main))
+                    .toList();
+            if (sameMain.size() == 1) {
+                log.warn("网盘保留原扩展名：请求 {} 实际 {}", want, sameMain.get(0));
+                resolved.put(want, sameMain.get(0));
+            }
+        }
+        return resolved;
+    }
+
+    /**
+     * 计划内缺视频 → 失败队列 + 日志（"部分成功"不再静默）。
+     * <p>
+     * 只在归位成功后调用：此时能确定"要的这批文件里，确实还有这些没到位"。
+     * 不改变本次的"成功"判定（有文件就先归位、缺的下轮补，与旧行为一致），
+     * 但把它记进失败队列，用户能在界面上看到并手动重试。
+     */
+    private void reportPlanGaps(OfflineDownloadContext ctx, Ani ani, Item item) {
+        List<Item> missing = ctx.planMissingVideos;
+        if (missing == null || missing.isEmpty()) {
+            return;
+        }
+        String names = missing.stream()
+                .map(Item::getTitle)
+                .limit(10)
+                .collect(Collectors.joining(", "));
+        String raw = StrFormatter.format("{} 计划内仍有 {} 个视频未到位: {}",
+                ctx.reName, missing.size(), names);
+        log.warn(raw);
+        try {
+            FailedDownloadQueue.record(
+                    ani == null ? null : ani.getId(),
+                    ani == null ? null : ani.getTitle(),
+                    item == null ? null : item.getReName(),
+                    item == null ? null : item.getInfoHash(),
+                    raw);
+        } catch (Exception e) {
+            log.debug("记录缺文件失败队列失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 一个待归位文件：源文件名 + 源所在目录 + 目标名（+ 对应计划条目）。
+     * <p>
+     * {@code plan} 为空表示这条来自旧的启发式路径（没有计划可比对）。
+     */
+    private static final class ResolvedFile {
+        final String srcName;
+        final String srcPath;
+        String targetName;
+        final Item plan;
+
+        ResolvedFile(String srcName, String srcPath, String targetName, Item plan) {
+            this.srcName = srcName;
+            this.srcPath = srcPath;
+            this.targetName = targetName;
+            this.plan = plan;
+        }
+    }
+
+    /**
+     * 目标名去重（{@link #dedupeRenameTargets(Map)} 的列表版）：保证互不相同，
+     * 撞名时后来者退回自己的原始文件名，绝不抛异常。
+     */
+    static void dedupeResolvedTargets(List<ResolvedFile> files) {
+        if (files == null || files.size() < 2) {
+            return;
+        }
+        Set<String> taken = new HashSet<>();
+        for (ResolvedFile file : files) {
+            if (Objects.equals(file.srcName, file.targetName)) {
+                taken.add(file.targetName);
+            }
+        }
+        List<ResolvedFile> rest = files.stream()
+                .filter(f -> !Objects.equals(f.srcName, f.targetName))
+                .sorted(Comparator.comparing(f -> f.srcName))
+                .toList();
+        for (ResolvedFile file : rest) {
+            if (taken.add(file.targetName)) {
+                continue;
+            }
+            String fallback = uniqueRenameName(file.srcName, taken);
+            log.warn("重命名目标冲突, 退回原名避免互相覆盖: {} -> {} (原目标 {})",
+                    file.srcName, fallback, file.targetName);
+            file.targetName = fallback;
+        }
+    }
+
+    /**
+     * 计划扫描：只看"我们要的那些文件到了没"，与集数解析/模板命名无关。
+     * <p>
+     * 候选目录按代价递增逐个并入（与 {@link #scanEpisodeFilesOnce} 同一优先级）：
+     * 本次任务的临时目录 → 最终目录递归（历史/其它路径搬过去的）→ 115 云下载兜底（带标题守卫）。
+     * 每并入一批就比一次，命中即止，尽量少发列举请求。
+     *
+     * @return 计划内视频全部到位时的扫描结果（可直接交给 finalizeFromScan）；否则 null
+     */
+    private EpisodeScanResult planScan(OfflineDownloadContext ctx, String path, String savePath,
+                                       String tempDownloadDir, List<Double> expectedEpisodes,
+                                       List<String> titleTokens) {
+        return planScan(ctx, path, savePath, tempDownloadDir, expectedEpisodes, titleTokens, true);
+    }
+
+    /**
+     * @param requireAllVideos true=只有"计划内视频全到位"才算命中（P1 提前收尾）；
+     *                         false=只要<b>有任何</b>计划条目被认领就算命中（任务已终态时交给
+     *                         {@link #finalizeFromScan} 按计划归位，缺的部分记进失败队列）
+     */
+    private EpisodeScanResult planScan(OfflineDownloadContext ctx, String path, String savePath,
+                                       String tempDownloadDir, List<Double> expectedEpisodes,
+                                       List<String> titleTokens, boolean requireAllVideos) {
+        List<Item> plan = ctx.plan;
+        if (plan == null || plan.isEmpty()) {
+            return null;
+        }
+        java.util.function.Predicate<TorrentPlanMatcher.Result> hit = requireAllVideos
+                ? TorrentPlanMatcher.Result::videosComplete
+                : r -> !r.matches().isEmpty();
+        try {
+            Map<String, OpenListFileInfo> candidates = new LinkedHashMap<>();
+            addCandidates(candidates, findFiles(path));
+            TorrentPlanMatcher.Result result =
+                    TorrentPlanMatcher.match(plan, new ArrayList<>(candidates.values()));
+            if (!hit.test(result)) {
+                addCandidates(candidates, findFiles(savePath).stream()
+                        .filter(f -> !isUnderPath(f, tempDownloadDir)).toList());
+                result = TorrentPlanMatcher.match(plan, new ArrayList<>(candidates.values()));
+            }
+            if (!hit.test(result)) {
+                String cloudDir = resolveCloudDownloadDir();
+                addCandidates(candidates, findCloudDownloadFiles().stream()
+                        .filter(f -> !cloudEntryLacksTitleToken(f.getName(), f.getPath(), cloudDir, titleTokens))
+                        .toList());
+                result = TorrentPlanMatcher.match(plan, new ArrayList<>(candidates.values()));
+            }
+            if (!hit.test(result)) {
+                return null;
+            }
+            // 云下载兜底命中的源目录：归位后要清理空壳
+            Set<String> cloudSourceDirs = new HashSet<>();
+            String cloudDir = resolveCloudDownloadDir();
+            if (StrUtil.isNotBlank(cloudDir)) {
+                String prefix = trimTrailingSlash(cloudDir);
+                result.matches().stream()
+                        .map(m -> m.file().getPath())
+                        .filter(Objects::nonNull)
+                        .filter(p -> trimTrailingSlash(p).startsWith(prefix))
+                        .forEach(cloudSourceDirs::add);
+            }
+            return new EpisodeScanResult(
+                    result.videoMatches().stream().map(TorrentPlanMatcher.Match::file).toList(),
+                    result.subtitleMatches().stream().map(TorrentPlanMatcher.Match::file).toList(),
+                    new ArrayList<>(candidates.values()), cloudSourceDirs, false);
+        } catch (Exception e) {
+            log.debug("计划比对失败（不影响等待） {}: {}", ctx.reName, ExceptionUtils.getMessage(e));
+            return null;
+        }
+    }
+
+    /**
+     * 并入候选文件（按 path+name 去重，目录条目一律不要）
+     */
+    private static void addCandidates(Map<String, OpenListFileInfo> candidates, List<OpenListFileInfo> files) {
+        if (files == null) {
+            return;
+        }
+        for (OpenListFileInfo file : files) {
+            if (file == null || Boolean.TRUE.equals(file.getIsDir())) {
+                continue;
+            }
+            candidates.putIfAbsent(StrUtil.nullToEmpty(file.getPath()) + "/" + StrUtil.nullToEmpty(file.getName()), file);
+        }
+    }
+
+    /**
+     * 重命名（可选）+ 移动到最终目录顶层 + 顶层校验（失败重试移动）+ 清理临时目录与云下载空壳。
+     * <p>
+     * 从 {@link #finalizeFromScan} 抽出，供启动恢复（P4）复用：两处对"什么算归位成功"必须同一口径——
+     * 校验必须看<b>最终目录顶层</b>（{@code findFiles(savePath)} 会递归进临时目录，
+     * 用它判定会把未真正移出的文件当成已移动，随后清理失败留下空壳）。
+     *
+     * @param pathToFiles      源目录 → 待归位文件
+     * @param fallbackDir      拿不到源路径时的兜底目录
+     * @param cloudSourceDirs  云下载兜底命中的源目录（归位后清理空壳）
+     * @return true=全部落在最终目录顶层；false=校验未通过（调用方按失败收尾，保留临时目录）
+     */
+    private boolean relocateResolved(List<ResolvedFile> resolved, Map<String, List<ResolvedFile>> pathToFiles,
+                                     String savePath, String tempDirName, String fallbackDir,
+                                     Set<String> cloudSourceDirs) {
+        Boolean rename = config.getRename();
+        // 重命名。重命名后必须回读"盘上真实叫什么"：115（经 AList）的 fs/rename 只改主名、
+        // 保留原扩展名（实测请求 y.mkv 得到 y.bin），继续按"请求名"去移动/校验会把本集判成归位失败
+        Map<ResolvedFile, String> actualNames = new LinkedHashMap<>();
+        if (Boolean.TRUE.equals(rename)) {
+            for (Map.Entry<String, List<ResolvedFile>> entry : pathToFiles.entrySet()) {
+                List<Map<String, String>> renameObjects = new ArrayList<>();
+                List<String> requested = new ArrayList<>();
+                for (ResolvedFile file : entry.getValue()) {
+                    if (file.targetName.equals(file.srcName)) {
+                        // 同名重命名是 no-op: 部分实现对 src==new 会报错, 直接跳过
+                        continue;
+                    }
+                    log.info("重命名 {} ==> {}", file.srcName, file.targetName);
+                    renameObjects.add(Map.of("src_name", file.srcName, "new_name", file.targetName));
+                    requested.add(file.targetName);
+                }
+                if (renameObjects.isEmpty()) {
+                    continue;
+                }
+                fsBatchRename(renameObjects, entry.getKey());
+                Map<String, String> resolvedNames = resolveRenamedNames(entry.getKey(), requested);
+                for (ResolvedFile file : entry.getValue()) {
+                    if (!file.targetName.equals(file.srcName)) {
+                        actualNames.put(file, resolvedNames.getOrDefault(file.targetName, file.targetName));
+                    }
+                }
+            }
+        }
+        // 移动/校验一律用"盘上真实名"
+        java.util.function.Function<ResolvedFile, String> movedName = file ->
+                Boolean.TRUE.equals(rename)
+                        ? actualNames.getOrDefault(file, file.targetName)
+                        : file.srcName;
+
+        // 移动：从每个子目录分别移动；已在 savePath 顶层的（兜底扫描发现的原始命名文件）仅就地重命名，无需移动
+        Set<String> allMovedNames = new HashSet<>();
+        String savePathNorm = trimTrailingSlash(savePath);
+        for (Map.Entry<String, List<ResolvedFile>> entry : pathToFiles.entrySet()) {
+            String dirPath = entry.getKey();
+            List<String> names = entry.getValue().stream()
+                    .map(movedName)
+                    .toList();
+            if (Objects.equals(trimTrailingSlash(dirPath), savePathNorm)) {
+                allMovedNames.addAll(names);
+                continue;
+            }
+            fsMove(dirPath, savePath, names);
+            allMovedNames.addAll(names);
+        }
+
+        // 验证必须落在最终目录顶层；findFiles(savePath) 会递归进临时目录，
+        // 若仍用它判定，未真正移出的文件也会被当成「已移动」，随后清理失败留下空壳。
+        // 990009 异步移动/并发冲突下 fsMove 可能假成功：校验失败先重试移动，仍失败则判失败，
+        // 禁止「warn 后照常发完成通知」——那是「已存在但文件不在顶层」的直接来源。
+        List<String> missingNames = verifyTopLevelNames(savePath, allMovedNames);
+        int verifyAttempt = 0;
+        while (!missingNames.isEmpty() && verifyAttempt < MOVE_VERIFY_MAX_ATTEMPTS) {
+            verifyAttempt++;
+            log.warn("第{}次校验：文件未出现在最终目录顶层，重试移动 {}", verifyAttempt, missingNames);
+            ThreadUtil.sleep(MOVE_VERIFY_RETRY_DELAY_MS);
+            // 只失效本次归位涉及的目录：最终目录 + 各源目录（pathToFiles 的键）
+            List<String> changedDirs = new ArrayList<>(pathToFiles.keySet());
+            changedDirs.add(savePath);
+            api.invalidateFindFilesCache(changedDirs);
+            for (Map.Entry<String, List<ResolvedFile>> entry : pathToFiles.entrySet()) {
+                String dirPath = entry.getKey();
+                if (Objects.equals(trimTrailingSlash(dirPath), savePathNorm)) {
+                    continue;
+                }
+                List<String> retryNames = entry.getValue().stream()
+                        .map(movedName)
+                        .filter(missingNames::contains)
+                        .toList();
+                if (!retryNames.isEmpty()) {
+                    fsMove(dirPath, savePath, retryNames);
+                }
+            }
+            missingNames = verifyTopLevelNames(savePath, allMovedNames);
+        }
+        if (!missingNames.isEmpty()) {
+            log.error("归位失败：文件未出现在最终目录顶层，判定本次下载失败（不发完成通知）: {}", missingNames);
+            return false;
+        }
+
+        // 需要移动的视频/字幕已确认在最终目录顶层 → 强制删除临时目录（tempDirName 为空时内部直接返回）
+        cleanupTempDownloadDir(savePath, tempDirName, true);
+        // 云下载兜底：文件已全部移动归位，清理源目录残留的空壳（115 任务目录）
+        if (!cloudSourceDirs.isEmpty()) {
+            cleanupCloudDownloadEmptyDirs(cloudSourceDirs);
+        }
+        return true;
+    }
+
+    /**
+     * P4 启动恢复：把"重启前/重启期间其实已经下完"的离线任务补归位。
+     * <p>
+     * 背景：启动时 {@code TorrentUtil.cleanupOrphanPending()} 会清掉待完成标记，
+     * 让下一轮 RSS 重新提交（远端任务由 10008/adopt 接管）。但若文件其实早就下完了，
+     * "重新提交 + 扫目录反推"是绕远路，还可能因为下载器状态不更新而白等一轮甚至超时。
+     * 计划快照里有确切的文件清单与字节数，因此启动后做一次<b>只读比对</b>：
+     * 齐了就立刻重命名/移动/标记完成；没齐就把快照丢掉，交回 RSS 正常轮次。
+     * <p>
+     * 全部包在 try/catch 里：恢复只是补救手段，任何失败都不该影响启动与后续轮次。
+     */
+    void recoverOfflinePlans() {
+        recoverOfflinePlans(AniUtil.getAniList());
+    }
+
+    /**
+     * 恢复入口（订阅列表作为入参，便于单测直接驱动；生产走 {@link #recoverOfflinePlans()}）
+     */
+    void recoverOfflinePlans(List<Ani> aniList) {
+        List<TorrentPlanRecord> records = OfflinePlanStore.list();
+        if (records.isEmpty()) {
+            return;
+        }
+        if (aniList == null || aniList.isEmpty()) {
+            // 订阅列表还没加载出来：本轮不做任何判断（尤其不能因为"查不到订阅"就删快照）
+            log.info("离线计划恢复跳过：订阅列表尚未就绪，{} 份快照保留待下次启动", records.size());
+            return;
+        }
+        Map<String, Ani> aniById = aniList.stream()
+                .filter(a -> a != null && StrUtil.isNotBlank(a.getId()))
+                .collect(Collectors.toMap(Ani::getId, a -> a, (a, b) -> a));
+        for (TorrentPlanRecord record : records) {
+            try {
+                recoverOnePlan(record, aniById.get(record.getAniId()));
+            } catch (Exception e) {
+                // 保留快照：可能是网盘暂时不可用，下次启动再试
+                log.warn("启动恢复离线计划失败（保留快照） {}: {}",
+                        record.getInfoHash(), ExceptionUtils.getMessage(e));
+            }
+        }
+    }
+
+    /**
+     * 严格列举：目录不存在按空处理，<b>其余失败一律抛出</b>。
+     * <p>
+     * 启动恢复必须用严格版：把"查询失败/限流/超时"当成"目录里没有"，
+     * 会直接把计划快照丢掉（等于放弃了这次补救）——与归位对账的
+     * {@code UNVERIFIABLE ≠ NOT_FOUND} 同一条原则。
+     */
+    private List<OpenListFileInfo> listStrictOrEmpty(String path) {
+        try {
+            return api.findFilesStrict(path);
+        } catch (Exception e) {
+            String message = ExceptionUtils.getMessage(e);
+            if (OpenListApi.isDirNotFoundMessage(message)) {
+                return List.of();
+            }
+            throw new IllegalStateException("列举失败 " + path + ": " + message, e);
+        }
+    }
+
+    /**
+     * 恢复单个计划：候选目录只读比对 → 齐了才归位 → 标记完成 → 删除快照。
+     */
+    private void recoverOnePlan(TorrentPlanRecord record, Ani ani) {
+        String infoHash = record.getInfoHash();
+        List<Item> plan = record.getItems();
+        String savePath = record.getDownloadPath();
+        String tempDirName = record.getTempDirName();
+        if (ani == null) {
+            log.info("启动恢复：订阅已不存在, 丢弃计划快照 {}", infoHash);
+            OfflinePlanStore.delete(infoHash);
+            return;
+        }
+        if (plan == null || plan.isEmpty() || StrUtil.isBlank(savePath)) {
+            OfflinePlanStore.delete(infoHash);
+            return;
+        }
+        String tempDownloadDir = StrUtil.isBlank(tempDirName) ? null : trimTrailingSlash(savePath) + "/" + tempDirName;
+
+        Map<String, OpenListFileInfo> candidates = new LinkedHashMap<>();
+        if (StrUtil.isNotBlank(tempDownloadDir)) {
+            addCandidates(candidates, listStrictOrEmpty(tempDownloadDir));
+        }
+        addCandidates(candidates, listStrictOrEmpty(savePath).stream()
+                .filter(f -> !isUnderPath(f, tempDownloadDir)).toList());
+        TorrentPlanMatcher.Result result =
+                TorrentPlanMatcher.match(plan, new ArrayList<>(candidates.values()));
+        Set<String> cloudSourceDirs = new HashSet<>();
+        if (!result.videosComplete()) {
+            String cloudDir = resolveCloudDownloadDir();
+            List<String> titleTokens = titleTokensOf(ani, null);
+            addCandidates(candidates, findCloudDownloadFiles().stream()
+                    .filter(f -> !cloudEntryLacksTitleToken(f.getName(), f.getPath(), cloudDir, titleTokens))
+                    .toList());
+            result = TorrentPlanMatcher.match(plan, new ArrayList<>(candidates.values()));
+            if (result.videosComplete() && StrUtil.isNotBlank(cloudDir)) {
+                String prefix = trimTrailingSlash(cloudDir);
+                result.matches().stream()
+                        .map(m -> m.file().getPath())
+                        .filter(Objects::nonNull)
+                        .filter(p -> trimTrailingSlash(p).startsWith(prefix))
+                        .forEach(cloudSourceDirs::add);
+            }
+        }
+        if (!result.videosComplete()) {
+            log.info("启动恢复：计划内视频未齐, 交回 RSS 重新提交 {} ({}/{})",
+                    record.getFinalRenameBase(), result.matches().size(), plan.size());
+            OfflinePlanStore.delete(infoHash);
+            return;
+        }
+
+        List<ResolvedFile> resolved = new ArrayList<>();
+        for (TorrentPlanMatcher.Match match : result.matches()) {
+            String target = match.plan().getReName();
+            if (StrUtil.isBlank(target)) {
+                continue;
+            }
+            resolved.add(new ResolvedFile(match.file().getName(), match.file().getPath(), target, match.plan()));
+        }
+        if (resolved.isEmpty()) {
+            OfflinePlanStore.delete(infoHash);
+            return;
+        }
+        dedupeResolvedTargets(resolved);
+        Map<String, List<ResolvedFile>> pathToFiles = new LinkedHashMap<>();
+        for (ResolvedFile file : resolved) {
+            String dirPath = StrUtil.isNotBlank(file.srcPath) ? file.srcPath : savePath;
+            pathToFiles.computeIfAbsent(dirPath, k -> new ArrayList<>()).add(file);
+        }
+        if (!relocateResolved(resolved, pathToFiles, savePath, tempDirName, savePath, cloudSourceDirs)) {
+            // 归位校验没过（网盘异步移动失败等）：保留快照，下次启动再试
+            log.warn("启动恢复：归位校验未通过, 保留快照 {}", infoHash);
+            return;
+        }
+
+        // 标记"真正归位"的集（不用 episodeRange，避免把没到的集也标成已下载）
+        Set<String> keys = TorrentPlanUtil.episodeIndexKeys(ani, result.matches().stream()
+                .map(TorrentPlanMatcher.Match::plan).toList());
+        if (!keys.isEmpty()) {
+            LocalStateCache.appendEpisode(ani.getId(), savePath, keys);
+        }
+        Item item = new Item()
+                .setTitle(record.getFinalRenameBase())
+                .setReName(record.getFinalRenameBase())
+                .setInfoHash(infoHash);
+        NotificationUtil.send(config, ani,
+                StrFormatter.format("{} 下载完成（启动恢复归位 {} 个文件）", record.getFinalRenameBase(), resolved.size()),
+                NotificationStatusEnum.DOWNLOAD_END);
+        recordHistory(ani, item, "离线下载完成(启动恢复)");
+        OfflinePlanStore.delete(infoHash);
+        log.info("启动恢复完成: {} 已归位 {} 个文件", record.getFinalRenameBase(), resolved.size());
     }
 
     /**
@@ -1607,72 +2218,6 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             }
             renameMap.put(name, newName + "." + ext);
             log.info("未匹配字幕文件: {} -> {}", name, newName + "." + ext);
-        }
-        return renameMap;
-    }
-
-    /**
-     * 添加合集: 按「预览计划」构建重命名映射。
-     * 以文件主名(basename, 忽略大小写)匹配离线产物, 同名多候选时用文件大小甄别;
-     * 目标名取预览的 reName(已含扩展名/字幕语言后缀)。
-     * 未命中的文件不进入映射(随临时目录强制清理); 目标名冲突时保留原始名, 避免互相覆盖。
-     */
-    private Map<String, String> buildCollectionPlanRenameMap(List<Item> plan, EpisodeScanResult scan,
-                                                             String reName) {
-        Map<String, List<Item>> planByBase = new HashMap<>();
-        for (Item planItem : plan) {
-            String name = FileUtil.getName(planItem.getTitle());
-            if (StrUtil.isBlank(name)) {
-                continue;
-            }
-            planByBase.computeIfAbsent(name.toLowerCase(Locale.ROOT), k -> new ArrayList<>()).add(planItem);
-        }
-        Map<String, String> renameMap = new LinkedHashMap<>();
-        // 记录"裸文件名 -> 已映射的文件路径"。renameMap 以裸文件名为键，
-        // 不同子目录下的同名文件会互相覆盖，覆盖后只剩一条映射，
-        // 另一个文件既不会被重命名也不会被移动，最终随临时目录被强制清理(产物丢失)。
-        // 这里用它区分"同一个文件被重复列出"(无害) 与"不同目录的同名文件"(必须显式失败)。
-        Map<String, String> mappedPathByName = new HashMap<>();
-        List<OpenListFileInfo> files = scan.openListFileInfos();
-        for (OpenListFileInfo file : files) {
-            if (Boolean.TRUE.equals(file.getIsDir())) {
-                continue;
-            }
-            String fileName = file.getName();
-            String previousPath = mappedPathByName.get(fileName);
-            if (previousPath != null && !previousPath.equals(file.getPath())) {
-                // 不同目录的同名文件: 裸文件名做键无法区分, 继续下去会静默丢一个产物。
-                // 宁可显式失败(临时目录由上层保留)也不要"报成功但少文件"。
-                throw new IllegalStateException(StrUtil.format(
-                        "合集离线产物存在不同目录的同名文件, 无法确定归位目标: {} [{} / {}]",
-                        fileName, previousPath, file.getPath()));
-            }
-            mappedPathByName.put(fileName, file.getPath());
-            List<Item> candidates = planByBase.get(StrUtil.nullToEmpty(fileName).toLowerCase(Locale.ROOT));
-            if (candidates == null || candidates.isEmpty()) {
-                log.debug("合集离线产物不在预览计划中, 将随临时目录清理: {}", fileName);
-                continue;
-            }
-            Item matched = candidates.stream()
-                    .filter(p -> p.getLength() == null
-                            || file.getSize() == null
-                            || p.getLength().longValue() == file.getSize())
-                    .findFirst()
-                    .orElse(candidates.get(0));
-            String target = matched.getReName();
-            if (StrUtil.isBlank(target)) {
-                continue;
-            }
-            if (!renameMap.containsValue(target)) {
-                renameMap.put(fileName, target);
-                log.info("合集归位 {} ==> {}", fileName, target);
-            } else {
-                log.info("合集重命名目标冲突, 保留原名: {} => {}", fileName, fileName);
-                renameMap.put(fileName, fileName);
-            }
-        }
-        if (renameMap.isEmpty()) {
-            log.warn("合集预览计划({} 项)与离线产物({} 项)无任何匹配 {}", plan.size(), files.size(), reName);
         }
         return renameMap;
     }
@@ -1991,6 +2536,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
 
             // 按源目录分组：重命名 + 移动到顶层
             Map<String, List<String>> pathToNames = new LinkedHashMap<>();
+            // 重命名后的"盘上真实名"（115 会保留原扩展名，见 resolveRenamedNames）
+            Map<String, List<String>> resolvedNamesByDir = new LinkedHashMap<>();
             for (Map.Entry<String, String> entry : renameMap.entrySet()) {
                 String srcName = entry.getKey();
                 String newName = Boolean.TRUE.equals(config.getRename()) ? entry.getValue() : srcName;
@@ -2026,14 +2573,20 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                     }
                     if (!renameObjects.isEmpty()) {
                         fsBatchRename(renameObjects, dirPath);
+                        // 115 的 rename 只改主名、保留原扩展名：必须回读真实名再移动，
+                        // 否则对账会把"其实已归位"的集报成 NOT_FOUND（调用方据此删记录重下）
+                        names = names.stream()
+                                .map(n -> resolveRenamedNames(dirPath, List.of(n)).getOrDefault(n, n))
+                                .collect(Collectors.toCollection(ArrayList::new));
                     }
                 }
+                resolvedNamesByDir.put(dirPath, names);
                 if (!Objects.equals(trimTrailingSlash(dirPath), trimTrailingSlash(savePath))) {
                     fsMove(dirPath, savePath, names);
                 }
             }
 
-            Set<String> allNames = pathToNames.values().stream()
+            Set<String> allNames = resolvedNamesByDir.values().stream()
                     .flatMap(List::stream).collect(Collectors.toSet());
             List<String> missing = verifyTopLevelNames(savePath, allNames);
             if (!missing.isEmpty()) {
@@ -2246,13 +2799,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
      * （实测：骸骨骑士 S02E06 被同目录 E01~E05/E07 冒充）。
      */
     private static List<Double> expectedEpisodesOf(Item item) {
-        if (item == null) {
-            return List.of();
-        }
-        if (item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty()) {
-            return item.getEpisodeRange();
-        }
-        return item.getEpisode() != null ? List.of(item.getEpisode()) : List.of();
+        return TorrentPlanUtil.expectedEpisodesOf(item);
     }
 
     /**
@@ -3301,6 +3848,12 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 ThreadUtil.sleep(800L);
                 ResidualSnapshot snap = scanOfflineResiduals(true);
                 residualSnapshot.set(snap);
+                // P4: 恢复"重启前/重启期间其实已经下完"的离线任务（只读比对，齐了才归位）
+                try {
+                    recoverOfflinePlans();
+                } catch (Exception e) {
+                    log.warn("启动恢复离线计划失败: {}", ExceptionUtils.getMessage(e));
+                }
                 if (snap.getTerminalCount() > 0) {
                     CleanResult cleaned = cleanOfflineResiduals(false);
                     residualSnapshot.set(scanOfflineResiduals(false));

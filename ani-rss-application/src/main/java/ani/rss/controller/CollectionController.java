@@ -13,7 +13,9 @@ import ani.rss.util.basic.HttpReq;
 import ani.rss.util.other.AniUtil;
 import ani.rss.util.other.ConfigUtil;
 import ani.rss.util.other.ItemsUtil;
+import ani.rss.util.other.MagnetTorrentUtil;
 import ani.rss.util.other.RenameUtil;
+import ani.rss.util.other.TorrentPlanUtil;
 import ani.rss.util.other.TorrentUtil;
 import cn.hutool.core.codec.Base64;
 import cn.hutool.core.collection.CollUtil;
@@ -75,15 +77,16 @@ public class CollectionController extends BaseController {
     @PostMapping("/startCollection")
     public Result<Void> startCollection(@RequestBody CollectionInfo collectionInfo) throws IOException {
         String torrent = collectionInfo.getTorrent();
-        Assert.notBlank(torrent, "种子内容为空, 请重新上传种子文件");
-        File tempFile = FileUtil.createTempFile();
+        Assert.notBlank(torrent, "种子内容为空, 请重新上传种子文件或填入磁力链接");
+        // 磁力链接返回的是缓存文件（不可删），上传的种子才是本次请求独占的临时文件
+        boolean magnet = MagnetTorrentUtil.isMagnet(torrent);
+        File tempFile = getTorrentFile(torrent);
         try {
-            Base64.decodeToFile(torrent, tempFile);
             TorrentFile torrentFile;
             try {
                 torrentFile = new TorrentFile(tempFile);
             } catch (Exception e) {
-                throw ResultException.exception("种子文件解析失败, 请确认是有效的 .torrent 文件");
+                throw ResultException.exception("种子文件解析失败, 请确认是有效的 .torrent 文件或磁力链接");
             }
             Ani ani = collectionInfo.getAni();
             // 尽早校验: 标题会进下载路径、季数会被拆箱, 有问题要在动手下载之前就拒掉
@@ -131,7 +134,10 @@ public class CollectionController extends BaseController {
 
             return Result.success("已经开始下载合集, 正在后台等待元数据并重命名, 进度可在日志中查看");
         } finally {
-            FileUtil.del(tempFile);
+            // 磁力链接指向的是解析缓存，删了下次还得重新抓一次元数据
+            if (!magnet) {
+                FileUtil.del(tempFile);
+            }
         }
     }
 
@@ -297,122 +303,47 @@ public class CollectionController extends BaseController {
 
     public static synchronized List<Item> preview(CollectionInfo collectionInfo) {
         String torrent = collectionInfo.getTorrent();
-        Assert.notBlank(torrent, "种子内容为空, 请重新上传种子文件");
-        File tempFile = FileUtil.createTempFile();
+        Assert.notBlank(torrent, "种子内容为空, 请重新上传种子文件或填入磁力链接");
+        boolean magnet = MagnetTorrentUtil.isMagnet(torrent);
+        File tempFile = getTorrentFile(torrent);
         try {
-            Base64.decodeToFile(torrent, tempFile);
             TorrentFile torrentFile;
             try {
                 torrentFile = new TorrentFile(tempFile);
             } catch (Exception e) {
-                throw ResultException.exception("种子文件解析失败, 请确认是有效的 .torrent 文件");
+                throw ResultException.exception("种子文件解析失败, 请确认是有效的 .torrent 文件或磁力链接");
             }
-
-            Ani ani = collectionInfo.getAni();
-        long[] lengths = torrentFile.getLengths();
-        AtomicInteger index = new AtomicInteger(0);
-
-        List<String> match = ani.getMatch();
-        List<String> exclude = ani.getExclude();
-        Boolean globalExclude = ani.getGlobalExclude();
-        Config config = ConfigUtil.CONFIG;
-        List<String> globalExcludeList = config.getExclude();
-
-        Function<String, String> map = s -> {
-            String subgroup = ReUtil.get(StringEnum.SUBGROUP_REG_STR, s, 1);
-            if (StrUtil.isBlank(subgroup)) {
-                return s;
-            }
-            if (subgroup.equals(ani.getSubgroup())) {
-                return ReUtil.get(StringEnum.SUBGROUP_REG_STR, s, 2);
-            }
-            return "";
-        };
-
-        return Arrays.stream(torrentFile.getFilenames())
-                .map(name -> {
-                    name = CharsetUtil.convert(name, "ISO-8859-1", CharsetUtil.UTF_8);
-                    name = ReUtil.replaceAll(name, "[\\\\/]$", "");
-                    name = name.replace("\\", "/");
-                    return name;
-                })
-                .filter(name -> name.contains("."))
-                .toList()
-                .stream()
-                .map(name -> {
-                    int idx = index.getAndIncrement();
-                    Item item = new Item();
-                    return item.setTitle(name)
-                            .setLength(lengths[idx]);
-                })
-                .filter(item -> {
-                    String name = item.getTitle();
-
-                    if (name.startsWith("_____padding_file_") && name.contains("BitComet")) {
-                        return false;
-                    }
-
-                    // 排除
-                    if (!exclude.isEmpty()) {
-                        if (exclude.stream().map(map).filter(StrUtil::isNotBlank).anyMatch(s -> ReUtil.contains(s, name))) {
-                            return false;
-                        }
-                    }
-
-                    // 匹配
-                    if (!match.isEmpty()) {
-                        if (match.stream().map(map).filter(StrUtil::isNotBlank).anyMatch(s -> !ReUtil.contains(s, name))) {
-                            return false;
-                        }
-                    }
-
-                    // 全局排除
-                    if (globalExclude) {
-                        return globalExcludeList.stream().map(map).filter(StrUtil::isNotBlank).noneMatch(s -> ReUtil.contains(s, name));
-                    }
-                    return true;
-                })
-                .map(item -> {
-                    long length = item.getLength();
-
-                    String formatSize = FileUtils.formatSize(length, true);
-
-                    item
-                            .setFormatSize(formatSize)
-                            .setSubgroup(ani.getSubgroup());
-
-                    RenameUtil.rename(ani, item);
-
-                    String reName = item.getReName();
-
-                    if (StrUtil.isBlank(reName)) {
-                        return null;
-                    }
-
-                    String title = item.getTitle();
-
-                    String extName = FileUtil.extName(title);
-
-                    if (FileUtils.isSubtitleFormat(extName)) {
-                        // 语言后缀与下载器重命名口径一致（含 jpsc/jptc 等双语标识，统一小写）；
-                        // 原实现取 mainName 的最后一段，会把 "xxx.1080p.ass" 的 1080p 误当语言
-                        String lang = FileUtils.extractSubtitleLangSuffix(title);
-                        if (StrUtil.isNotBlank(lang)) {
-                            reName += "." + lang;
-                        }
-                    }
-
-                    reName = reName + "." + extName;
-
-                    return item.setReName(reName)
-                            .setLength(length);
-                })
-                .filter(Objects::nonNull)
-                .toList();
+            // 计划构建与订阅离线下载共用同一口径（TorrentPlanUtil）
+            return TorrentPlanUtil.build(torrentFile, collectionInfo.getAni());
         } finally {
-            // 解析已在内存（TorrentFile），临时文件不再需要，必须清理防 /tmp 堆积
-            FileUtil.del(tempFile);
+            // 解析已在内存（TorrentFile），临时文件不再需要，必须清理防 /tmp 堆积；
+            // 磁力链接的缓存文件例外（下次还要复用，删了要重新抓元数据）
+            if (!magnet) {
+                FileUtil.del(tempFile);
+            }
         }
+    }
+
+    /**
+     * 把「合集来源」统一成一份可解析的种子文件。
+     * <p>
+     * 磁力链接只有 infoHash，没有文件列表，无法预览/匹配/改名，因此先由
+     * {@link MagnetTorrentUtil} 抓取元数据落成 {@code .torrent}；之后整条链路
+     * （预览、qBittorrent 提交、OpenList 离线下载、种子记录）与上传种子方式完全一致。
+     * <p>
+     * 返回的文件：磁力链接是<b>缓存文件</b>（调用方不得删除），上传种子是本次请求
+     * 独占的临时文件（调用方必须删除）。
+     *
+     * @param torrent Base64 种子内容或磁力链接
+     * @return 本地种子文件
+     */
+    private static File getTorrentFile(String torrent) {
+        if (MagnetTorrentUtil.isMagnet(torrent)) {
+            return MagnetTorrentUtil.resolve(torrent);
+        }
+        File tempFile = FileUtil.createTempFile();
+        Base64.decodeToFile(torrent, tempFile);
+        return tempFile;
     }
 
     public static synchronized void download(String name, File torrentFile, String savePath, List<String> tags) {

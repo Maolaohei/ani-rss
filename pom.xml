@@ -5,7 +5,7 @@
 
     <groupId>ani.rss</groupId>
     <artifactId>ani-rss</artifactId>
-    <version>3.4.13</version>
+    <version>3.4.14</version>
 
     <name>ani-rss</name>
     <inceptionYear>2025</inceptionYear>
@@ -19,6 +19,8 @@
     <properties>
         <java.version>17</java.version>
         <spring-ai.version>2.0.0</spring-ai.version>
+        <!-- 磁力链接元数据解析（合集下载）：见 MagnetTorrentUtil -->
+        <jlibtorrent.version>2.0.12.9</jlibtorrent.version>
     </properties>
 
     <modules>

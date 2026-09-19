@@ -928,28 +928,22 @@ public class Config implements Serializable {
     private Integer quiescentTimeoutMinutes;
 
     /**
-     * 本地磁盘「本地状态快照」缓存时长（秒）。
+     * 「本地状态快照」统一缓存时长（天）。默认 10 天，范围 1–90。
      * <p>
-     * 本地目录遍历很便宜，TTL 可以短一些，保证用户手动改完文件名后刷新即可看到变化。
-     */
-    @Schema(description = "本地状态缓存时长(秒)")
-    private Integer localStateCacheTtlSeconds;
-
-    /**
-     * 网盘「本地状态快照」缓存时长（秒）。默认 24 小时。
+     * 本地磁盘与网盘<b>共用同一个值</b>（原先是两个字段：本地秒级、网盘 24 小时），
+     * 设置页只暴露一个以「天」为单位的输入框。
      * <p>
-     * 网盘列举是<b>真金白银</b>的 API 调用，TTL 应显著长于本地磁盘：
-     * 同一轮里预览、媒体库、RSS 主流程会反复问同一个订阅"这一集到底在不在"，
-     * 没有这层缓存就会变成同一份数据被列举 N 次。
+     * 之所以敢用天级 TTL，前提是快照<b>不靠过期自愈</b>：
+     * 离线归位/下载完成会增量追加本集（{@code LocalStateCache.appendEpisode}），
+     * 改名完成、删除、洗版、模板变更、订阅增删都会主动失效。
+     * TTL 只作<b>兜底对账间隔</b>，回收带外变更（用户在网盘手动增删、
+     * 手动往本地下载目录放文件、应用重启后离线任务自行完成）留下的偏差。
      * <p>
-     * 默认取 24 小时是有前提的——快照不靠过期自愈：离线归位成功会增量追加本集
-     * （{@code LocalStateCache.appendEpisode}），删除/洗版/模板变更会主动失效。
-     * TTL 只作兜底对账间隔，回收带外变更（用户在网盘手动增删等）留下的偏差。
      * 附带好处：绝大多数 RSS 轮次直接命中缓存、不发请求，也就没有
      * "列举失败被当成目录为空 → 删记录重下"的风险窗口。
      */
-    @Schema(description = "网盘状态缓存时长(秒)")
-    private Integer cloudStateCacheTtlSeconds;
+    @Schema(description = "结果缓存时长(天)")
+    private Integer stateCacheTtlDays;
 
     /**
      * 单轮网盘 API 调用预算上限。

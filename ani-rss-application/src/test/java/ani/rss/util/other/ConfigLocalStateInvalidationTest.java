@@ -11,7 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>
  * 这个判定之所以被抽成纯函数，是因为它极容易被后续迭代漏掉：新增一个影响判定口径的
  * 配置项时，改动者往往只记得把它接进业务逻辑，忘了接进失效逻辑，于是用户改完设置
- * 仍然看到旧结果（最长 {@code cloudStateCacheTtlSeconds} = 300s 才自然过期），
+ * 仍然看到旧结果（最长 {@code stateCacheTtlDays} = 90 天才自然过期），
  * 而且这种"看起来没生效"的问题极难归因。
  * <p>
  * 对应调用点：{@code ConfigController.setConfig}（Spring 依赖重，不便直接单测），

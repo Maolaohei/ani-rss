@@ -33,21 +33,18 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class LocalStateCacheTest {
 
-    private Integer prevLocalTtl;
-    private Integer prevCloudTtl;
+    private Integer prevTtl;
 
     @BeforeEach
     void setUp() {
         Config config = ConfigUtil.CONFIG;
-        prevLocalTtl = config.getLocalStateCacheTtlSeconds();
-        prevCloudTtl = config.getCloudStateCacheTtlSeconds();
+        prevTtl = config.getStateCacheTtlDays();
         LocalStateCache.clear();
     }
 
     @AfterEach
     void tearDown() {
-        ConfigUtil.CONFIG.setLocalStateCacheTtlSeconds(prevLocalTtl)
-                .setCloudStateCacheTtlSeconds(prevCloudTtl);
+        ConfigUtil.CONFIG.setStateCacheTtlDays(prevTtl);
         LocalStateCache.clear();
     }
 
@@ -208,10 +205,12 @@ class LocalStateCacheTest {
     @Test
     void expired_entry_is_rebuilt() {
         Ani a = ani("ani-1");
-        ConfigUtil.CONFIG.setLocalStateCacheTtlSeconds(10);
-        // 造一份"11 秒前构建"的快照：TTL 下限是 10s，靠 sleep 验证过期会让测试慢到不可接受
+        ConfigUtil.CONFIG.setStateCacheTtlDays(1);
+        // 造一份"刚过期"的快照：TTL 下限是 1 天，靠 sleep 验证过期不可行，
+        // 因此直接把 builtAt 放到 1 天零 1 秒之前
         LocalStateCache.putForTest("ani-1", "/media/A", Set.of("1:1"),
-                LocalStateCache.Source.LOCAL_DISK, System.currentTimeMillis() - 11_000L);
+                LocalStateCache.Source.LOCAL_DISK,
+                System.currentTimeMillis() - TimeUnit.DAYS.toMillis(1) - 1_000L);
 
         AtomicInteger loads = new AtomicInteger();
         LocalStateCache.Snapshot snapshot = assertDoesNotThrow(() ->
@@ -228,7 +227,7 @@ class LocalStateCacheTest {
     @Test
     void fresh_entry_is_not_rebuilt() {
         Ani a = ani("ani-1");
-        ConfigUtil.CONFIG.setLocalStateCacheTtlSeconds(60);
+        ConfigUtil.CONFIG.setStateCacheTtlDays(10);
         LocalStateCache.putForTest("ani-1", "/media/A", Set.of("1:1"),
                 LocalStateCache.Source.LOCAL_DISK, System.currentTimeMillis());
 
@@ -379,38 +378,35 @@ class LocalStateCacheTest {
                 "诊断摘要应包含 size/hit/miss/coalesced/build/expired/invalidatedDrop/appended/hitRate");
     }
 
+    /**
+     * 本地磁盘与网盘已统一成一个设置项（天，1–90），因此两个 Source 必须得到同一个 TTL。
+     */
     @Test
-    void ttl_is_clamped_by_source() {
-        ConfigUtil.CONFIG.setLocalStateCacheTtlSeconds(0).setCloudStateCacheTtlSeconds(0);
-        assertEquals(10_000L, LocalStateCache.resolveTtlMs(LocalStateCache.Source.LOCAL_DISK),
-                "本地 TTL 下限 10s");
-        assertEquals(30_000L, LocalStateCache.resolveTtlMs(LocalStateCache.Source.CLOUD_API),
-                "网盘 TTL 下限 30s");
+    void ttl_is_clamped_and_shared_by_both_sources() {
+        ConfigUtil.CONFIG.setStateCacheTtlDays(0);
+        assertEquals(TimeUnit.DAYS.toMillis(1), LocalStateCache.resolveTtlMs(LocalStateCache.Source.LOCAL_DISK),
+                "TTL 下限为 1 天");
+        assertEquals(TimeUnit.DAYS.toMillis(1), LocalStateCache.resolveTtlMs(LocalStateCache.Source.CLOUD_API),
+                "本地与网盘共用同一个值");
 
-        ConfigUtil.CONFIG.setLocalStateCacheTtlSeconds(99999).setCloudStateCacheTtlSeconds(999999);
-        assertEquals(3600_000L, LocalStateCache.resolveTtlMs(LocalStateCache.Source.LOCAL_DISK),
-                "本地 TTL 上限 1h");
-        assertEquals(86_400_000L, LocalStateCache.resolveTtlMs(LocalStateCache.Source.CLOUD_API),
-                "网盘 TTL 上限 24h（默认值即上限）");
-    }
-
-    @Test
-    void cloud_ttl_defaults_longer_than_local() {
-        ConfigUtil.CONFIG.setLocalStateCacheTtlSeconds(null).setCloudStateCacheTtlSeconds(null);
-        assertTrue(LocalStateCache.resolveTtlMs(LocalStateCache.Source.CLOUD_API)
-                        > LocalStateCache.resolveTtlMs(LocalStateCache.Source.LOCAL_DISK),
-                "网盘列举是真金白银的 API 调用，缓存应比本地磁盘更久");
+        ConfigUtil.CONFIG.setStateCacheTtlDays(99999);
+        assertEquals(TimeUnit.DAYS.toMillis(90), LocalStateCache.resolveTtlMs(LocalStateCache.Source.LOCAL_DISK),
+                "TTL 上限为 90 天");
+        assertEquals(TimeUnit.DAYS.toMillis(90), LocalStateCache.resolveTtlMs(LocalStateCache.Source.CLOUD_API),
+                "TTL 上限为 90 天");
     }
 
     /**
-     * 网盘缓存默认 24h：这是"离线归位成功走增量追加、结构性变更走主动失效"的配套约定。
-     * 若有人把默认值改回分钟级，就等于让每轮 RSS 都真实列举一次网盘——
+     * 默认 10 天：这是"离线归位/下载完成走增量追加、结构性变更走主动失效"的配套约定。
+     * 若有人把默认值改回分钟级，就等于让每轮 RSS 都真实列举一次——
      * 而那正是"列举失败被当成目录为空 → 删记录重下"的风险窗口。
      */
     @Test
-    void cloud_ttl_defaults_to_24_hours() {
-        ConfigUtil.CONFIG.setLocalStateCacheTtlSeconds(null).setCloudStateCacheTtlSeconds(null);
-        assertEquals(86_400_000L, LocalStateCache.resolveTtlMs(LocalStateCache.Source.CLOUD_API),
-                "网盘缓存默认应为 24 小时");
+    void ttl_defaults_to_10_days() {
+        ConfigUtil.CONFIG.setStateCacheTtlDays(null);
+        assertEquals(TimeUnit.DAYS.toMillis(10), LocalStateCache.resolveTtlMs(LocalStateCache.Source.CLOUD_API),
+                "结果缓存默认应为 10 天");
+        assertEquals(TimeUnit.DAYS.toMillis(10), LocalStateCache.resolveTtlMs(LocalStateCache.Source.LOCAL_DISK),
+                "结果缓存默认应为 10 天");
     }
 }

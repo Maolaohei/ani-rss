@@ -22,24 +22,24 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 增量事实，为此重列不划算；更要紧的是，重列会把"列举失败"这条路径拉回每轮必经，
  * 而查询失败一旦被当成"目录里什么都没有"，就会演变成删记录重下。
  * <p>
- * 因此改为追加维护，并把网盘 TTL 默认放到 24h（见 {@link LocalStateCacheTest}）。
+ * 因此改为追加维护，并把结果缓存 TTL 统一放到天级（见 {@link LocalStateCacheTest}）。
  * 追加的语义约束由本用例固化：只增不减、不创建残缺快照、不延长 TTL、不放宽 complete。
  */
 class LocalStateCacheAppendTest {
 
     private static final String PATH = "/115/动漫/转存/追番/某番 (2026) [tmdbid=1]/Season 1";
 
-    private Integer prevCloudTtl;
+    private Integer prevTtl;
 
     @BeforeEach
     void setUp() {
-        prevCloudTtl = ConfigUtil.CONFIG.getCloudStateCacheTtlSeconds();
+        prevTtl = ConfigUtil.CONFIG.getStateCacheTtlDays();
         LocalStateCache.clear();
     }
 
     @AfterEach
     void tearDown() {
-        ConfigUtil.CONFIG.setCloudStateCacheTtlSeconds(prevCloudTtl);
+        ConfigUtil.CONFIG.setStateCacheTtlDays(prevTtl);
         LocalStateCache.clear();
     }
 
@@ -100,7 +100,7 @@ class LocalStateCacheAppendTest {
     @Test
     @DisplayName("追加不延长 TTL：builtAt 保持上次真实列举的时刻")
     void append_does_not_refresh_built_at() throws Exception {
-        ConfigUtil.CONFIG.setCloudStateCacheTtlSeconds(86400);
+        ConfigUtil.CONFIG.setStateCacheTtlDays(10);
         Ani ani = ani("a1");
         long builtAt = System.currentTimeMillis() - 60_000L;
         LocalStateCache.putForTest("a1", PATH, Set.of("1:1"), LocalStateCache.Source.CLOUD_API, builtAt);

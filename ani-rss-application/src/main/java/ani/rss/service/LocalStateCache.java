@@ -152,30 +152,23 @@ public final class LocalStateCache {
 
     // ---- 配置常量 ----
     /**
-     * 本地磁盘快照 TTL。本地遍历很便宜，保持短 TTL 让"手动往下载目录放文件"这类
-     * 带外变更能及时被看到；改名完成时也有 invalidateByDownloadPath 主动失效兜着。
-     */
-    static final int DEFAULT_LOCAL_TTL_SECONDS = 60;
-    static final int MIN_LOCAL_TTL_SECONDS = 10;
-    static final int MAX_LOCAL_TTL_SECONDS = 3600;
-    /**
-     * 网盘快照 TTL：默认 24 小时。
+     * 统一 TTL（天）：<b>本地磁盘与网盘共用</b>，默认 10 天、范围 1–90。
      * <p>
      * 长 TTL 成立的前提是快照<b>不再靠过期来自愈</b>：
      * <ul>
-     *   <li>离线归位成功 → {@link #appendEpisode} 增量并入本集（不重列）；</li>
-     *   <li>删除/洗版/模板变更 → {@link #invalidate} / {@link #invalidateByDownloadPath} 主动失效。</li>
+     *   <li>离线归位/下载完成 → {@link #appendEpisode} 增量并入本集（不重列）；</li>
+     *   <li>删除/洗版/模板变更/订阅增删 → {@link #invalidate} / {@link #invalidateByDownloadPath} 主动失效。</li>
      * </ul>
      * TTL 在这里的角色退化成"兜底对账间隔"——只为回收那些带外变更
-     * （用户在网盘上手动增删、应用重启后离线任务自行完成）留下的偏差。
+     * （用户在网盘上手动增删、手动往本地下载目录拷文件、应用重启后离线任务自行完成）留下的偏差。
      * <p>
-     * 顺带解决了一个更要紧的问题：TTL 短意味着每轮 RSS 都要真实列举网盘，
-     * 而每次列举都有"查询失败 → 被当成目录为空 → 删记录重下"的风险窗口。
+     * 顺带解决了一个更要紧的问题：TTL 短意味着每轮 RSS 都要真实列举一遍，
+     * 网盘模式下每次列举都有"查询失败 → 被当成目录为空 → 删记录重下"的风险窗口。
      * TTL 拉长后，绝大多数轮次直接命中缓存，压根不发请求。
      */
-    static final int DEFAULT_CLOUD_TTL_SECONDS = 86_400;
-    static final int MIN_CLOUD_TTL_SECONDS = 30;
-    static final int MAX_CLOUD_TTL_SECONDS = 86_400;
+    static final int DEFAULT_TTL_DAYS = 10;
+    static final int MIN_TTL_DAYS = 1;
+    static final int MAX_TTL_DAYS = 90;
     /**
      * LRU 容量下限。订阅很少时也要留够，避免"订阅 1 个却每 2 次就淘汰"。
      */
@@ -583,20 +576,18 @@ public final class LocalStateCache {
     }
 
     /**
-     * 分级 TTL：网盘比本地磁盘贵得多，缓存也更久
+     * 统一的缓存 TTL（天 → 毫秒）。
+     * <p>
+     * 本地磁盘与网盘已经合成同一个设置项（{@code stateCacheTtlDays}，默认 10 天、
+     * 上下限 1–90），因此 {@code source} 只用于"这份快照有多贵"的可观测性，
+     * 不再影响 TTL 长短。
      */
     public static long resolveTtlMs(Source source) {
         Integer configured = ConfigUtil.CONFIG == null
                 ? null
-                : (source == Source.CLOUD_API
-                ? ConfigUtil.CONFIG.getCloudStateCacheTtlSeconds()
-                : ConfigUtil.CONFIG.getLocalStateCacheTtlSeconds());
-        if (source == Source.CLOUD_API) {
-            return intConfig(configured, DEFAULT_CLOUD_TTL_SECONDS,
-                    MIN_CLOUD_TTL_SECONDS, MAX_CLOUD_TTL_SECONDS) * 1000L;
-        }
-        return intConfig(configured, DEFAULT_LOCAL_TTL_SECONDS,
-                MIN_LOCAL_TTL_SECONDS, MAX_LOCAL_TTL_SECONDS) * 1000L;
+                : ConfigUtil.CONFIG.getStateCacheTtlDays();
+        return intConfig(configured, DEFAULT_TTL_DAYS, MIN_TTL_DAYS, MAX_TTL_DAYS)
+                * TimeUnit.DAYS.toMillis(1);
     }
 
     static int intConfig(Integer value, int fallback, int min, int max) {

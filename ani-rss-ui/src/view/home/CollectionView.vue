@@ -134,22 +134,40 @@
                 <CustomTagsView :config="data.ani"/>
               </el-form-item>
               <el-form-item label="Torrent">
-                <el-tag v-if="data.filename" closable @close="()=>{
-                data.filename = ''
-                data.torrent = ''
-              }">
-                  <el-tooltip :content="data.filename">
-                    <el-text line-clamp="1" size="small" class="filename">
-                      {{ data.filename }}
-                    </el-text>
-                  </el-tooltip>
-                </el-tag>
-                <UploadView v-else
-                            url="api/uploadAndReadToBase64"
-                            :extensions="['torrent']"
-                            :callback="uploadCallback">
-                  <el-button bg icon="Upload">选择并上传种子</el-button>
-                </UploadView>
+                <div class="torrent-source">
+                  <el-radio-group v-model="torrentSource" size="small" @change="clearTorrentSource">
+                    <el-radio-button value="file">种子文件</el-radio-button>
+                    <el-radio-button value="magnet">磁力链接</el-radio-button>
+                  </el-radio-group>
+                  <div v-if="torrentSource === 'file'" class="torrent-input">
+                    <el-tag v-if="data.filename" closable @close="clearTorrent">
+                      <el-tooltip :content="data.filename">
+                        <el-text line-clamp="1" size="small" class="filename">
+                          {{ data.filename }}
+                        </el-text>
+                      </el-tooltip>
+                    </el-tag>
+                    <UploadView v-else
+                                url="api/uploadAndReadToBase64"
+                                :extensions="['torrent']"
+                                :callback="uploadCallback">
+                      <el-button bg icon="Upload">选择并上传种子</el-button>
+                    </UploadView>
+                  </div>
+                  <div v-else class="torrent-input">
+                    <el-input v-model="data.torrent"
+                              :autosize="{ minRows: 2, maxRows: 4 }"
+                              clearable
+                              placeholder="magnet:?xt=urn:btih:..."
+                              type="textarea"/>
+                    <div class="margin-top-4">
+                      <el-text size="small" type="info">
+                        点「预览 / 开始」时才解析元数据（获取文件列表才能匹配、改名），
+                        热门资源几秒完成，冷门资源最长等待 60 秒；解析结果会缓存在本地。
+                      </el-text>
+                    </div>
+                  </div>
+                </div>
               </el-form-item>
             </template>
           </el-form>
@@ -157,13 +175,13 @@
       </el-scrollbar>
     </div>
     <div class="action">
-      <el-button :disabled="!data.filename" bg
+      <el-button :disabled="!data.torrent" bg
                  icon="Grid"
                  text
                  @click="collectionPreviewRef?.show">
         预览
       </el-button>
-      <el-button :disabled="!data.filename"
+      <el-button :disabled="!data.torrent"
                  :loading="startLoading"
                  bg
                  icon="Check"
@@ -281,6 +299,7 @@ let show = () => {
   data.value.ani.title = ''
   data.value.torrent = ''
   data.value.filename = ''
+  torrentSource.value = 'file'
   dialogVisible.value = true
 }
 
@@ -333,6 +352,14 @@ defineExpose({show})
   width: 100%;
   display: flex;
   justify-content: end;
+}
+
+.torrent-source {
+  width: 100%;
+}
+
+.torrent-input {
+  margin-top: 8px;
 }
 
 .filename {

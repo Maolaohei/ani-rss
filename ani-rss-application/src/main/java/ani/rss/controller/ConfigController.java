@@ -22,6 +22,7 @@ import ani.rss.util.basic.HttpReq;
 import ani.rss.util.other.AfdianUtil;
 import ani.rss.util.other.AniUtil;
 import ani.rss.util.other.ConfigUtil;
+import ani.rss.util.other.MagnetTorrentUtil;
 import ani.rss.util.other.TorrentUtil;
 import cn.hutool.core.codec.Base64;
 import cn.hutool.core.date.LocalDateTimeUtil;
@@ -151,7 +152,7 @@ public class ConfigController extends BaseController {
 
         // F6-4 配置变更联动：downloadPathTemplate / ovaDownloadPathTemplate / rename /
         // fileExist / downloadToolType 决定"本地状态判定"的输入或口径，改了必须让缓存作废，
-        // 否则用户改完设置仍会看到旧结果（最长 cloudStateCacheTtlSeconds = 86400s 才自然过期）。
+        // 否则用户改完设置仍会看到旧结果（最长 stateCacheTtlDays = 90 天才自然过期）。
         //
         // 注意这里只补媒体库缓存：DownloadService.invalidateDownloadPathIndex()
         // （内部含 LocalStateCache.invalidateAll()）已由 ConfigUtil.syncChecked() 在每次保存时
@@ -188,7 +189,9 @@ public class ConfigController extends BaseController {
         File configDir = ConfigUtil.getConfigDir();
         String configDirStr = FileUtils.getAbsolutePath(configDir);
 
-        Long size = clearService.clearCover();
+        Long size = clearService.clearCover()
+                // 磁力元数据缓存（合集添加磁力链接时抓取的 .torrent）
+                + MagnetTorrentUtil.clearCache();
 
         // 清理 mikan 预览封面
         FileUtil.del(configDirStr + "/img");

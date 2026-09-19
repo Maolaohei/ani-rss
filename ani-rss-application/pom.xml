@@ -5,7 +5,7 @@
     <parent>
         <groupId>ani.rss</groupId>
         <artifactId>ani-rss</artifactId>
-        <version>3.4.13</version>
+        <version>3.4.14</version>
     </parent>
 
     <artifactId>ani-rss-application</artifactId>
@@ -30,6 +30,11 @@
             <id>tmdb-api</id>
             <url>https://raw.github.com/wushuo894/tmdb-api/mvn-repo</url>
         </repository>
+        <!-- jlibtorrent（磁力链接元数据解析）不发布到 Maven Central -->
+        <repository>
+            <id>frostwire-maven</id>
+            <url>https://dl.frostwire.com/maven</url>
+        </repository>
     </repositories>
 
     <dependencies>
@@ -48,6 +53,42 @@
         <dependency>
             <groupId>org.eclipse</groupId>
             <artifactId>bittorrent</artifactId>
+        </dependency>
+        <!--
+            磁力链接元数据解析（合集下载支持 magnet）。
+
+            为什么需要原生库：BEP-9 的元数据交换要先接入 DHT/Tracker、与 Peer 握手，
+            纯 Java 自研不现实。jlibtorrent 是 libtorrent 的 JNI 绑定，
+            上游 ani-rss 亦采用同一方案（wushuo894/ani-rss 6b7dde89）。
+
+            平台包按需引入：缺失的平台（如 32 位 arm、musl）在运行时会抛
+            UnsatisfiedLinkError，由 MagnetTorrentUtil 统一转成用户可读的提示，
+            不影响其余功能（种子文件走原有 Base64 链路）。
+        -->
+        <dependency>
+            <groupId>com.frostwire</groupId>
+            <artifactId>jlibtorrent</artifactId>
+            <version>${jlibtorrent.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.frostwire</groupId>
+            <artifactId>jlibtorrent-windows</artifactId>
+            <version>${jlibtorrent.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.frostwire</groupId>
+            <artifactId>jlibtorrent-linux-x86_64</artifactId>
+            <version>${jlibtorrent.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.frostwire</groupId>
+            <artifactId>jlibtorrent-linux-arm64</artifactId>
+            <version>${jlibtorrent.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.frostwire</groupId>
+            <artifactId>jlibtorrent-macosx-arm64</artifactId>
+            <version>${jlibtorrent.version}</version>
         </dependency>
         <dependency>
             <groupId>org.xerial</groupId>
