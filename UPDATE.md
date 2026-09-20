@@ -22,6 +22,29 @@
 
 ---
 
+## 3.4.19 增量（2026-09）
+
+### 本地侧洗版也连带删旧字幕（与 OpenList 侧统一）
+
+背景：3.4.18 修洗版时记过一条口径差异——OpenList 侧删"本集全部条目"（含旧字幕 `.ass`），
+本地侧只删 视频 / nfo / bif / -thumb.jpg。
+
+**现在统一**：`DownloadService.isWashableEntry` 的白名单加上字幕
+（认 `FileUtils.SUBTITLE_FORMAT`：`ass` / `ssa` / `sub` / `srt` / `lyc` / `sup` / `pgs` / `mks`）。
+理由：旧字幕是按旧片源的时间轴做的，主RSS 换版后留着会与新视频错配。
+
+安全边界不变：仍受"提交前快照"约束（提交后才落地的新字幕不在快照里，绝不删），
+普通封面图（非 `-thumb.jpg`）仍不在白名单。
+
+#### 验证
+
+后端 `mvn test` 全量 **957 通过 / 0 失败 / 0 跳过**。新增用例：
+`StandbySweepTest.sweep_deletes_old_subtitles_with_the_video`（视频/ass/srt/nfo 全清，
+普通封面图保留）、`sweep_keeps_subtitles_not_seen_before_submit`（提交后落地的新字幕绝不删）。
+反向验证：摘掉 `isSubtitleFormat` 分支 → 两项失败。
+
+---
+
 ## 3.4.18 增量（2026-09）
 
 ### 备用RSS 洗版：专项审计后的 5 处修复
@@ -48,7 +71,8 @@
 视频 / nfo / bif / -thumb.jpg / 目录）。
 
 > 另记一条**口径差异（非缺陷）**：OpenList 侧删的是"本集全部条目"（含旧字幕 `.ass`），
-> 本地侧只删视频/nfo/bif/缩略图——旧字幕留着会与新视频错配，故 OpenList 侧保持全删。
+> 本地侧当时只删视频/nfo/bif/缩略图——旧字幕留着会与新视频错配。
+> （**该差异已在 3.4.19 统一**：本地侧也已连带删旧字幕。）
 
 #### 验证
 

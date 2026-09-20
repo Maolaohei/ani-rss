@@ -351,6 +351,40 @@ class StandbySweepTest {
         assertTrue(inside.exists(), "新目录里的文件属于主RSS版本，绝不能删");
     }
 
+    // --------------------------------------------------------- 旧字幕一起删
+
+    @Test
+    void sweep_deletes_old_subtitles_with_the_video() {
+        // 旧字幕是按旧片源时间轴做的，留着会与新视频错配 → 与 OpenList 侧同口径全删
+        File video = FileUtil.writeUtf8String("v", new File(tempDir, "测试番剧 S01E05.mkv"));
+        File ass = FileUtil.writeUtf8String("s", new File(tempDir, "测试番剧 S01E05.chs.ass"));
+        File srt = FileUtil.writeUtf8String("s", new File(tempDir, "测试番剧 S01E05.srt"));
+        File nfo = FileUtil.writeUtf8String("n", new File(tempDir, "测试番剧 S01E05.nfo"));
+        File cover = FileUtil.writeUtf8String("c", new File(tempDir, "测试番剧 S01E05-cover.jpg"));
+        Set<String> snapshot = downloadService.snapshotExistingFiles(tempDir.getAbsolutePath());
+
+        downloadService.deleteStandbyRss(ani(), item(true), null, snapshot);
+
+        assertFalse(video.exists(), "本集旧视频应被清理");
+        assertFalse(ass.exists(), "本集旧字幕（ass）应被一并清理");
+        assertFalse(srt.exists(), "本集旧字幕（srt）应被一并清理");
+        assertFalse(nfo.exists());
+        assertTrue(cover.exists(), "普通封面图不在白名单内（只清 -thumb.jpg），不得删");
+    }
+
+    @Test
+    void sweep_keeps_subtitles_not_seen_before_submit() {
+        File oldSub = FileUtil.writeUtf8String("old", new File(tempDir, "测试番剧 S01E05.ass"));
+        Set<String> snapshot = downloadService.snapshotExistingFiles(tempDir.getAbsolutePath());
+        // 主版本落地的新字幕：名字也含 SxxExx，但不在提交前快照里
+        File freshSub = FileUtil.writeUtf8String("new", new File(tempDir, "测试番剧 S01E05 v2.ass"));
+
+        downloadService.deleteStandbyRss(ani(), item(true), null, snapshot);
+
+        assertFalse(oldSub.exists(), "提交前就存在的旧字幕应被清理");
+        assertTrue(freshSub.exists(), "提交后才落地的字幕（不在快照里）绝不能删");
+    }
+
     @Test
     void sweep_never_deletes_neighbouring_episodes() {
         // S01E01 不得命中 S01E010 / S01E01.5（后者是本仓库明确区分的集数）

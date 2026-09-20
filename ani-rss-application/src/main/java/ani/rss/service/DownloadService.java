@@ -848,7 +848,11 @@ public class DownloadService {
      * 该条目是否属于「本集的旧版本」：名字里的 SxxExx 必须与本次<b>整体相等</b>（忽略大小写）。
      * <p>
      * 不能退化成 {@code contains}：那会让 {@code S01E01} 命中 {@code S01E010} / {@code S01E01.5}，
-     * 把别的集删掉。目录一律算（旧版本可能是目录结构）；文件只认 视频 / nfo / bif / -thumb.jpg。
+     * 把别的集删掉。目录一律算（旧版本可能是目录结构）；文件只认
+     * <b>视频 / 字幕 / nfo / bif / -thumb.jpg</b>。
+     * <p>
+     * 字幕必须一起删：旧版本的字幕是按旧片源的时间轴做的，留着会与新视频错配
+     * （与 OpenList 侧同一口径）。
      */
     static boolean isWashableEntry(File file, String episode) {
         if (file == null || StrUtil.isBlank(episode)) {
@@ -873,6 +877,7 @@ public class DownloadService {
             return false;
         }
         return FileUtils.isVideoFormat(extName)
+                || FileUtils.isSubtitleFormat(extName)
                 || List.of("nfo", "bif").contains(extName)
                 || file.getName().endsWith("-thumb.jpg");
     }
