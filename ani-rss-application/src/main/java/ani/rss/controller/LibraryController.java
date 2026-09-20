@@ -12,6 +12,7 @@ import ani.rss.entity.web.Result;
 import ani.rss.enums.StringEnum;
 import ani.rss.service.AniLocks;
 import ani.rss.service.DownloadService;
+import ani.rss.service.LocalStateCache;
 import ani.rss.util.other.AniUtil;
 import ani.rss.util.other.TorrentUtil;
 import cn.hutool.core.io.FileUtil;
@@ -60,11 +61,6 @@ public class LibraryController extends BaseController {
      */
     private static final long CACHE_TTL_MS = 60_000L;
 
-    /**
-     * 网盘扫描总预算（毫秒）。见 {@link #scan(boolean)}。
-     */
-    private static final long CLOUD_SCAN_BUDGET_MS = 10_000L;
-
     @Resource
     private DownloadService downloadService;
 
@@ -92,13 +88,19 @@ public class LibraryController extends BaseController {
          */
         private boolean cloud;
         /**
-         * 本轮<b>未能确认</b>（网盘列举失败 / 超出扫描时间预算）。
+         * 本轮<b>未能确认</b>（尚无本地状态快照 / 详情列举失败）。
          * <p>
          * 与 {@link #exists}=false 的区别：那个是"确认没有"，这个是"不知道"。
-         * 网盘 API 全局限流 300ms/次且订阅多时必然有订阅排不进预算，
          * 若一并当成"不存在"，用户会看到媒体库大面积变空。
          */
         private boolean unknown;
+        /**
+         * 数据来自<b>本地状态快照</b>而非实时列举（OpenList 模式下媒体库不再扫网盘）。
+         * <p>
+         * 此时 {@code videoCount} 的含义是"快照里已知的集数"，{@code totalSize} 不可测
+         * （大小要列网盘才知道），前端据此标注。
+         */
+        private boolean cacheOnly;
 
         public String getAniId() {
             return aniId;
@@ -225,6 +227,15 @@ public class LibraryController extends BaseController {
             this.unknown = unknown;
             return this;
         }
+
+        public boolean isCacheOnly() {
+            return cacheOnly;
+        }
+
+        public LibraryItem setCacheOnly(boolean cacheOnly) {
+            this.cacheOnly = cacheOnly;
+            return this;
+        }
     }
 
     public static class LibraryQuery {
@@ -286,15 +297,23 @@ public class LibraryController extends BaseController {
             filtered.add(item);
         }
 
-        long totalSize = filtered.stream().mapToLong(LibraryItem::getTotalSize).sum();
+        long totalSize = filtered.stream()
+                .filter(i -> !i.isCacheOnly())
+                .mapToLong(LibraryItem::getTotalSize)
+                .sum();
         int totalVideos = filtered.stream().mapToInt(LibraryItem::getVideoCount).sum();
+        // OpenList 模式：批量扫描不再列举网盘，条目集数来自本地状态快照，
+        // 因此占用空间不可测（要给前端一个明确标记，而不是把 0 当成"没有"）
+        boolean offlineMode = TorrentUtil.DOWNLOAD instanceof OfflineDownloader;
+        boolean sizeUnknown = offlineMode && filtered.stream().allMatch(LibraryItem::isCacheOnly);
 
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("items", filtered);
         data.put("total", filtered.size());
         data.put("totalSize", totalSize);
-        data.put("formatTotalSize", FileUtils.formatSize(totalSize, true));
+        data.put("formatTotalSize", sizeUnknown ? "不可测" : FileUtils.formatSize(totalSize, true));
         data.put("totalVideos", totalVideos);
+        data.put("offlineMode", offlineMode);
         data.put("scannedAt", CACHE_AT);
         data.put("cached", CACHE_AT > 0 && System.currentTimeMillis() - CACHE_AT < CACHE_TTL_MS);
         return Result.success(data);
@@ -328,7 +347,12 @@ public class LibraryController extends BaseController {
                 items.sort(Comparator.comparingDouble(PlayItem::getEpisode));
                 return Result.success(items);
             }
-            // 网盘虚拟路径：本地文件系统不可见，改列网盘文件
+            // 网盘虚拟路径：本地文件系统不可见，按需列一次网盘（仅用户点开单个订阅时）。
+            // 冷却期不发请求，直接告诉用户原因，而不是抛一个看不出问题的失败。
+            if (OpenListApi.isListingCoolingDown()) {
+                long remain = (OpenListApi.listingCooldownRemainingMs() + 999L) / 1000L;
+                return Result.error(StrUtil.format("网盘接口熔断冷却中（剩余 {}s），请稍后重试", remain));
+            }
             CloudScan cloud = scanCloud(downloadPath);
             if (cloud == null) {
                 return Result.error("读取网盘目录失败，请稍后重试");
@@ -419,10 +443,9 @@ public class LibraryController extends BaseController {
      */
     private List<LibraryItem> doScan() {
         List<LibraryItem> items = new ArrayList<>();
-            // 网盘扫描总预算：网盘 API 全局限流 300ms/次且递归列举，订阅多时逐条查
-            // 会把首屏拖到几十秒。超预算的订阅保持"未确认"（与改造前一致的"不存在"）。
-            // 结果仍走 60 秒缓存，正常刷新不会重复付这个代价。
-            long cloudDeadline = System.currentTimeMillis() + CLOUD_SCAN_BUDGET_MS;
+            // OpenList 模式下本方法<b>零网盘调用</b>：批量扫描不再列举网盘
+            // （那是媒体库最"鸡肋"的一项开销：遍历全部订阅、与预览/RSS 抢令牌桶与列举预算），
+            // 集数改由订阅级本地状态快照派生；逐集详情仍可在单订阅上按需列举一次。
             for (Ani ani : AniUtil.getAniList()) {
                 try {
                     // F6-5 矩阵：媒体库是<b>批量</b>读路径，取「无订阅锁，仅缓存」。
@@ -430,7 +453,7 @@ public class LibraryController extends BaseController {
                     // 等待会线性叠加成秒级延迟；而这里读到的只是"目录里有几集"的展示数据，
                     // 半更新状态最多让计数短暂偏旧，不会像预览那样诱发"重复下载"这类写动作。
                     // 一致性由 LocalStateCache 的 TTL 快照兜底（scanOne 内部走同一套快照）。
-                    items.add(scanOne(ani, cloudDeadline));
+                    items.add(scanOne(ani));
                 } catch (Exception e) {
                     log.debug("扫描媒体库条目失败 {}: {}", ani.getTitle(), ExceptionUtils.getMessage(e));
                     // 扫描失败是"未确认"而非"确认没有"：标 exists=false 会让用户以为内容丢了
@@ -444,10 +467,6 @@ public class LibraryController extends BaseController {
                             .setUnknown(true));
                 }
             }
-            if (System.currentTimeMillis() > cloudDeadline) {
-                log.warn("媒体库网盘扫描超出时间预算 {}ms，部分订阅本轮未确认（下次扫描或点「重新扫描」可继续）",
-                        CLOUD_SCAN_BUDGET_MS);
-            }
             // 有内容的排前面，其次按最近更新倒序；未确认的排在"确认没有"之前，
             // 因为"不知道"比"确实没有"更值得用户注意（也提示可以点「重新扫描」再试）
             items.sort(Comparator
@@ -457,7 +476,7 @@ public class LibraryController extends BaseController {
             return items;
     }
 
-    private LibraryItem scanOne(Ani ani, long cloudDeadline) {
+    private LibraryItem scanOne(Ani ani) {
         String downloadPath = downloadService.getDownloadPath(ani);
         LibraryItem item = new LibraryItem()
                 .setAniId(ani.getId())
@@ -493,31 +512,38 @@ public class LibraryController extends BaseController {
                     .setLastModify(lastModify == 0L ? null : lastModify);
         }
 
-        // 本地目录不存在：离线网盘模式下下载目录是网盘虚拟路径，本地文件系统不可见，
-        // 此前一律判为"不存在"，导致 OpenList 用户的媒体库恒空。改用 API 查真实文件。
-        return applyCloudScan(item, scanCloud(downloadPath, cloudDeadline));
+        // 本地目录不存在：离线网盘模式下下载目录是网盘虚拟路径，本地文件系统不可见。
+        // 这里<b>不再列举网盘</b>（批量扫描的成本大头），改用订阅级本地状态快照派生：
+        // 快照与预览 / 手动搜索 / RSS 主流程共用同一份，且不产生任何 API 调用。
+        // 逐集详情（用户点开单个订阅时）仍会按需列举一次网盘。
+        if (TorrentUtil.DOWNLOAD instanceof OfflineDownloader) {
+            return applyLocalSnapshot(item, LocalStateCache.peek(ani, downloadPath));
+        }
+        // 本地型下载器：目录不存在 = 确认没有内容
+        return item.setExists(false);
     }
 
     /**
-     * 把网盘扫描结果落到展示字段上。
+     * OpenList 模式的媒体库条目：<b>不列举网盘</b>，用订阅级本地状态快照派生。
      * <p>
-     * {@code cloud == null}（列举失败 / 超预算）必须与"目录确实没有视频"区分开：
-     * 前者是"不知道"，后者才是"确认没有"。二者混为一谈会让网盘抖动或订阅稍多时
-     * 媒体库大面积显示为 0 集。
+     * 快照为空（还没构建过：打开一次订阅预览或等一轮 RSS 即可产生）时保持"未确认"，
+     * 而不是报 0 集 —— 把"不知道"混成"确认没有"会让 OpenList 用户的库看起来是空的。
+     * <p>
+     * 此时集数是"快照里已知的集数"（不是视频文件数：一个合集文件可覆盖多集），
+     * 占用空间不可测（要列网盘才知道），故置 {@code cacheOnly} 并给出快照时间。
      */
-    static LibraryItem applyCloudScan(LibraryItem item, CloudScan cloud) {
-        if (cloud == null) {
+    static LibraryItem applyLocalSnapshot(LibraryItem item, LocalStateCache.Snapshot snapshot) {
+        if (snapshot == null) {
             return item.setExists(false).setUnknown(true);
         }
-        if (cloud.videos.isEmpty()) {
-            return item.setExists(false);
-        }
-        return item.setExists(true)
+        int knownEpisodes = snapshot.episodeIndex().size();
+        return item.setExists(knownEpisodes > 0)
                 .setCloud(true)
-                .setVideoCount(cloud.videos.size())
-                .setTotalSize(cloud.totalSize)
-                .setFormatSize(FileUtils.formatSize(cloud.totalSize, true))
-                .setLastModify(cloud.lastModify == 0L ? null : cloud.lastModify);
+                .setCacheOnly(true)
+                .setVideoCount(knownEpisodes)
+                .setTotalSize(0L)
+                .setFormatSize("不可测")
+                .setLastModify(snapshot.builtAt());
     }
 
     /**
@@ -545,20 +571,13 @@ public class LibraryController extends BaseController {
     /**
      * 扫描网盘目录（OpenList/Alist）。
      * <p>
+     * <b>只服务于单订阅详情</b>（用户点开某个订阅时的按需列举）；媒体库批量扫描已不再调它。
      * 非离线网盘模式返回空结果；查询失败返回 {@code null} —— 调用方据此区分
      * "目录确实为空"（空列表）与"查询失败"（null），不把"查不到"当成"没有"。
      */
     static CloudScan scanCloud(String downloadPath) {
-        return scanCloud(downloadPath, Long.MAX_VALUE);
-    }
-
-    static CloudScan scanCloud(String downloadPath, long cloudDeadline) {
         if (!(TorrentUtil.DOWNLOAD instanceof OfflineDownloader offline)) {
             return new CloudScan(List.of(), List.of(), 0L, 0L);
-        }
-        if (System.currentTimeMillis() > cloudDeadline) {
-            log.debug("媒体库网盘扫描超预算，跳过 {}", downloadPath);
-            return null;
         }
         List<OpenListFileInfo> files;
         try {

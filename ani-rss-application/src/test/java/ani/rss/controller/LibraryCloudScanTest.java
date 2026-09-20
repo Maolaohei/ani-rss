@@ -13,11 +13,13 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * 媒体库网盘扫描。
- * <p>
- * OpenList/Alist 模式下下载目录是网盘虚拟路径，本地文件系统不可见，
- * 旧实现 {@code new File(downloadPath).exists()} 恒为 false，媒体库对这类用户恒空。
- * 现在本地目录不存在时改用网盘 API 查真实文件。
+ * 媒体库的网盘侧：
+ * <ul>
+ *   <li>{@code scanCloud} / {@code toPlayItems} 现在<b>只服务于单订阅详情</b>
+ *       （用户点开某个订阅时的按需列举）；</li>
+ *   <li>媒体库<b>批量</b>扫描已不再列举网盘，集数改由订阅级本地状态快照派生
+ *       （见 {@code LibraryOfflineSnapshotTest}）。</li>
+ * </ul>
  */
 class LibraryCloudScanTest {
 
@@ -97,14 +99,6 @@ class LibraryCloudScanTest {
     }
 
     @Test
-    void cloud_scan_respects_time_budget() {
-        mockOpenList(List.of(video("乡下大叔成了剑圣 S02E01.mkv", 400L * 1024 * 1024)));
-
-        assertNull(LibraryController.scanCloud(CLOUD_DIR, System.currentTimeMillis() - 1),
-                "超出时间预算应跳过查询，避免订阅多时把首屏拖死");
-    }
-
-    @Test
     void to_play_items_parses_episode_size_and_subtitles() {
         mockOpenList(List.of(
                 video("乡下大叔成了剑圣 S02E03.mkv", 400L * 1024 * 1024),
@@ -121,48 +115,5 @@ class LibraryCloudScanTest {
         assertNotNull(playItem.getFormatSize());
         assertEquals(1, playItem.getSubtitles().size(), "同主名字幕应被统计");
         assertEquals("乡下大叔成了剑圣 S02E03.chs.ass", playItem.getSubtitles().get(0).getName());
-    }
-
-    // ---------------------------------------------------------------- 未确认 != 不存在
-
-    @Test
-    void cloud_scan_failure_marks_unknown_not_absent() {
-        LibraryController.LibraryItem item = LibraryController.applyCloudScan(
-                new LibraryController.LibraryItem(), null);
-
-        assertTrue(item.isUnknown(),
-                "查询失败是「未确认」，不能标成「确认没有」——"
-                        + "否则网盘抖动或订阅多时媒体库会大面积显示为 0 集");
-        assertFalse(item.isExists());
-        assertEquals(0, item.getVideoCount());
-    }
-
-    @Test
-    void empty_cloud_dir_is_absent_not_unknown() {
-        LibraryController.CloudScan scan = new LibraryController.CloudScan(List.of(), List.of(), 0L, 0L);
-
-        LibraryController.LibraryItem item = LibraryController.applyCloudScan(
-                new LibraryController.LibraryItem(), scan);
-
-        assertFalse(item.isExists(), "目录确实没有视频 → 确认不存在");
-        assertFalse(item.isUnknown(), "这是「确认没有」，不是「不知道」");
-    }
-
-    @Test
-    void cloud_scan_success_fills_display_fields() {
-        LibraryController.CloudScan scan = new LibraryController.CloudScan(
-                List.of(video("乡下大叔成了剑圣 S02E01.mkv", 400L * 1024 * 1024)),
-                List.of(video("乡下大叔成了剑圣 S02E01.mkv", 400L * 1024 * 1024)),
-                400L * 1024 * 1024, new Date(126, 0, 1).getTime());
-
-        LibraryController.LibraryItem item = LibraryController.applyCloudScan(
-                new LibraryController.LibraryItem(), scan);
-
-        assertTrue(item.isExists());
-        assertFalse(item.isUnknown());
-        assertTrue(item.isCloud());
-        assertEquals(1, item.getVideoCount());
-        assertNotNull(item.getFormatSize());
-        assertEquals(new Date(126, 0, 1).getTime(), item.getLastModify());
     }
 }

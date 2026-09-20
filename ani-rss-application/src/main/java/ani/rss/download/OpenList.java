@@ -157,6 +157,26 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     }
 
     /**
+     * 只读探测直接子项（自检用）。
+     * <p>
+     * 用<b>单层</b> {@code fs/list}（{@code fsListStrict}）而非递归的 findFilesStrict：
+     * 自检只需要知道"这个目录在不在"。目录不存在会抛
+     * {@link OpenListApi.OpenListDirNotFoundException}（业务结果，不参与熔断、不重试），
+     * 其余异常（超时/5xx/冷却中）原样上抛。
+     * <p>
+     * 不计入"单轮列举预算"（预算只在递归列举的 buildFileList 里累加），
+     * 但会走令牌桶限流。
+     */
+    @Override
+    public List<String> probeDirectChildren(String dirPath) {
+        String path = normalizeOpenListPath(dirPath);
+        return api.fsListStrict(path, false).stream()
+                .map(OpenListFileInfo::getName)
+                .filter(StrUtil::isNotBlank)
+                .toList();
+    }
+
+    /**
      * 严格版文件列举（含大小/修改时间），供媒体库展示网盘内容
      */
     @Override

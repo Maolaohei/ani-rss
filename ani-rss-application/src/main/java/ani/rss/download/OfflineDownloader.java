@@ -73,6 +73,22 @@ public interface OfflineDownloader {
     }
 
     /**
+     * 只读探测：列出该目录的<b>直接</b>子项名（不递归）。
+     * <p>
+     * 供自检这类"只看一眼目录在不在"的场景：{@link #listFilesStrict} 是递归的，
+     * 对一个根目录用它等于把整棵目录树都列一遍。
+     *
+     * @param dirPath 网盘目录
+     * @return 直接子项名（目录确实为空时是空列表）
+     * @throws OpenListApi.OpenListDirNotFoundException 目录不存在。这是<b>业务结果</b>（确认没有），
+     *                                                  不是故障，调用方据此区分"挂载名配错"与"尚未创建"
+     * @throws RuntimeException                          其它查询失败（超时/5xx/冷却中）
+     */
+    default List<String> probeDirectChildren(String dirPath) {
+        throw new UnsupportedOperationException("当前下载器不支持目录探测");
+    }
+
+    /**
      * 归位对账：downloadPath 子目录（临时目录/115 云下载残留）中存在本集文件而顶层缺失时，
      * 重命名并移动到顶层。用于：
      * <ul>

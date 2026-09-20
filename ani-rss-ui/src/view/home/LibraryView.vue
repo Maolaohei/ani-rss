@@ -15,7 +15,10 @@
               <div class="metric-value">{{ data.total || 0 }}</div>
             </div>
             <div class="metric-item">
-              <el-text size="small" type="info">视频文件</el-text>
+              <el-tooltip :disabled="!data.offlineMode" placement="top"
+                          content="OpenList 模式不列举网盘：这里是本地状态快照里的已知集数，占用空间不可测">
+                <el-text size="small" type="info">{{ data.offlineMode ? '已知集数' : '视频文件' }}</el-text>
+              </el-tooltip>
               <div class="metric-value">{{ data.totalVideos || 0 }}</div>
             </div>
             <div class="metric-item">
@@ -56,11 +59,14 @@
               </el-table-column>
               <el-table-column label="集数" width="90">
                 <template #default="{row}">
-                  <!-- 未确认：网盘列举失败或超出扫描预算，"不知道"而不是"确实没有" -->
-                  <el-tooltip v-if="row.unknown"
-                              content="本轮未能确认（网盘列举失败或超出扫描时间预算），点「重新扫描」可再试"
-                              placement="top">
+                  <!-- 未确认：尚无本地状态快照 / 列举失败；"不知道"而不是"确实没有" -->
+                  <el-tooltip v-if="row.unknown" :content="unknownHint(row)" placement="top">
                     <el-tag type="warning" effect="plain" size="small">未确认</el-tag>
+                  </el-tooltip>
+                  <el-tooltip v-else-if="row.cacheOnly" :content="cacheHint(row)" placement="top">
+                    <el-tag :type="row.videoCount > 0 ? 'success' : 'info'" effect="plain" size="small">
+                      {{ row.videoCount }}
+                    </el-tag>
                   </el-tooltip>
                   <el-tag v-else :type="row.videoCount > 0 ? 'success' : 'info'" size="small">
                     {{ row.videoCount }}
@@ -86,7 +92,7 @@
     </div>
 
     <el-dialog v-model="detailVisible" :title="detailTitle" width="720px" class="library-dialog">
-      <el-empty v-if="!detailItems.length" description="没有找到视频文件"/>
+      <el-empty v-if="!detailItems.length" :description="detailEmptyText"/>
       <el-table v-else :data="detailItems" size="small" max-height="420">
         <el-table-column label="集" width="70">
           <template #default="{row}">{{ row.episode }}</template>
@@ -132,8 +138,31 @@ const subtitle = computed(() => {
   if (loading.value) {
     return '正在扫描…'
   }
-  return data.value.total ? `共 ${data.value.total} 部 · ${data.value.formatTotalSize}` : '还没有可浏览的内容'
+  const parts = []
+  if (data.value.total) {
+    parts.push(`共 ${data.value.total} 部`)
+    if (data.value.formatTotalSize) {
+      parts.push(data.value.formatTotalSize)
+    }
+  }
+  if (data.value.offlineMode) {
+    parts.push('集数来自本地状态快照（不列举网盘）')
+  }
+  return parts.length ? parts.join(' · ') : '还没有可浏览的内容'
 })
+
+// OpenList 模式下批量扫描不列举网盘，条目集数来自订阅级快照；
+// 两个 tooltip 分别解释"未确认"与"快照派生"，避免用户以为内容丢了
+const unknownHint = () => data.value.offlineMode
+  ? 'OpenList 模式不列举网盘：尚无本地状态快照（打开一次订阅预览或等一轮 RSS 后出现）'
+  : '本轮未能确认（列举失败），点「重新扫描」可再试'
+
+const cacheHint = row => `来自本地状态快照（${row.lastModify ? formatTime(row.lastModify) : '时间未知'}），`
+  + '本模式不列举网盘；占用空间不可测'
+
+const detailEmptyText = computed(() => data.value.offlineMode
+  ? '网盘上没有找到视频文件（详情仅在点开单个订阅时按需列举一次）'
+  : '没有找到视频文件')
 
 const coverOf = row => row.image || ''
 

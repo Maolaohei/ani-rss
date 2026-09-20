@@ -4,6 +4,7 @@ import ani.rss.annotation.Auth;
 import ani.rss.commons.ExceptionUtils;
 import ani.rss.commons.FileUtils;
 import ani.rss.download.BaseDownload;
+import ani.rss.download.OfflineDownloader;
 import ani.rss.download.OpenListApi;
 import ani.rss.entity.Config;
 import ani.rss.entity.NotificationConfig;
@@ -16,6 +17,7 @@ import ani.rss.util.basic.HttpReq;
 import ani.rss.util.other.ConfigUtil;
 import ani.rss.util.other.DiskMonitorUtil;
 import ani.rss.util.other.NotificationUtil;
+import ani.rss.util.other.TorrentUtil;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.util.ClassUtil;
 import cn.hutool.core.util.StrUtil;
@@ -123,6 +125,12 @@ public class DoctorController extends BaseController {
                         "路径模板以变量开头，无法静态校验: " + template,
                         "确认模板静态前缀存在且可写"), start);
             }
+            // OpenList/Alist：下载目录是网盘虚拟路径，本地 File 永远不存在。
+            // 继续用本地语义会每次都报「下载根目录尚不存在」——既是噪音，
+            // 又把「挂载配错」与「还没下载过」说成同一件事。
+            if (RssTask.isOpenListTool(config)) {
+                return checkOpenListDownloadPath(key, label, staticRoot, config, start);
+            }
             File dir = new File(staticRoot);
             if (!dir.exists()) {
                 return timed(DoctorCheck.warn(key, label,
@@ -137,6 +145,176 @@ public class DoctorController extends BaseController {
         } catch (Exception e) {
             return timed(DoctorCheck.fail(key, label, ExceptionUtils.getMessage(e), "检查下载路径配置"), start);
         }
+    }
+
+    /**
+     * 目录探测三态（自检专用）。
+     * <p>
+     * 与"有没有文件"无关：{@link #MISSING} 是业务结果（目录不存在），
+     * {@link #FAILED} 是"没查成"——两者混为一谈就会把网盘抖动说成"路径配错"。
+     */
+    enum DirProbe {
+        EXISTS, MISSING, FAILED
+    }
+
+    /**
+     * 一次目录探测的结果：三态 + 直接子项数（存在时）+ 失败原因（失败时）
+     */
+    record DirProbeResult(DirProbe probe, int children, String failure) {
+        static DirProbeResult of(DirProbe probe) {
+            return new DirProbeResult(probe, 0, "");
+        }
+    }
+
+    /**
+     * 下载路径检查结论（纯数据，便于把判定表固化下来）
+     */
+    record DirVerdict(String level, String detail, String suggestion) {
+    }
+
+    /**
+     * OpenList 模式的分层判定。
+     * <p>
+     * 只用两次探测（下载前缀 / 首段挂载名）就能把三件事分开：
+     * <ul>
+     *   <li>目录在 → {@code ok}（并给出直接子项数）；</li>
+     *   <li>目录不在、首段挂载名也不在 → {@code warn} 并给出两种可能（挂载点配错 / 目录尚未创建）。
+     *       <b>刻意用 warn 而不是 fail</b>：模板首段不一定是挂载点（也可能只是用户自建目录），
+     *       报 fail 会把"第一次用、什么都还没下"误判成配置错误；</li>
+     *   <li>探测失败（超时/5xx/冷却中）→ {@code warn}，明确说是"没查成"而不是"没有"。</li>
+     * </ul>
+     * 纯函数：值就在这张表上，必须能直接测。
+     */
+    static DirVerdict judgeOpenListPath(String prefix, String mount,
+                                       DirProbeResult prefixProbe, DirProbeResult mountProbe) {
+        if (prefixProbe.probe() == DirProbe.EXISTS) {
+            return new DirVerdict("ok",
+                    StrUtil.format("网盘目录存在: {}（直接子项 {} 个）", prefix, prefixProbe.children()), null);
+        }
+        if (prefixProbe.probe() == DirProbe.FAILED) {
+            return new DirVerdict("warn",
+                    StrUtil.format("网盘目录探测失败（没查成，不是「没有」）: {}；原因: {}", prefix, prefixProbe.failure()),
+                    "看 OpenList 自己的日志确认上游错误；常见是容器 DNS / MTU / IPv6 / 代理");
+        }
+        if (mountProbe == null || mountProbe.probe() == DirProbe.EXISTS) {
+            return new DirVerdict("ok",
+                    StrUtil.format("网盘目录尚未创建（首次下载会自动创建）: {}", prefix),
+                    "确认挂载/provider 与下载位置首段一致");
+        }
+        if (mountProbe.probe() == DirProbe.FAILED) {
+            return new DirVerdict("warn",
+                    StrUtil.format("网盘目录不存在，且首段 {} 探测失败（无法确认是否配错）: {}；原因: {}",
+                            mount, prefix, mountProbe.failure()),
+                    "稍后重试；若持续失败，看 OpenList 自己的日志");
+        }
+        return new DirVerdict("warn",
+                StrUtil.format("网盘目录与首段 {} 都不存在: {}", mount, prefix),
+                "若首段是挂载点（如 /115 对应 115 Cloud）：检查 Driver(provider) 与下载位置首段是否一致；"
+                        + "若它只是你自建的目录：首次下载会自动创建，可以忽略");
+    }
+
+    /**
+     * 取路径首段（{@code /115/动漫/追番} → {@code /115}），识别不出返回 null。
+     */
+    static String firstSegment(String path) {
+        if (StrUtil.isBlank(path)) {
+            return null;
+        }
+        String p = path.replace('\\', '/');
+        int start = p.startsWith("/") ? 1 : 0;
+        int slash = p.indexOf('/', start);
+        String segment = slash < 0 ? p.substring(start) : p.substring(start, slash);
+        return StrUtil.isBlank(segment) ? null : "/" + segment;
+    }
+
+    /**
+     * 探测一次网盘目录（不抛异常，转成三态）。
+     */
+    private static DirProbeResult probeDir(OfflineDownloader offline, String path) {
+        try {
+            return new DirProbeResult(DirProbe.EXISTS, offline.probeDirectChildren(path).size(), "");
+        } catch (OpenListApi.OpenListDirNotFoundException e) {
+            return DirProbeResult.of(DirProbe.MISSING);
+        } catch (Exception e) {
+            return new DirProbeResult(DirProbe.FAILED, 0, ExceptionUtils.getMessage(e));
+        }
+    }
+
+    /**
+     * OpenList/Alist 的「下载路径」检查：网盘虚拟路径必须走网盘语义。
+     * <p>
+     * 顺带校验云下载目录（{@code alistCloudDownloadDir}）：它不存在会让"云下载兜底归位"
+     * 形同虚设；未配置时只提示"按根目录自动发现"。
+     */
+    private DoctorCheck checkOpenListDownloadPath(String key, String label, String prefix,
+                                                 Config config, long start) {
+        long coolRemain = OpenListApi.listingCooldownRemainingMs();
+        if (coolRemain > 0L) {
+            return timed(DoctorCheck.warn(key, label,
+                    StrUtil.format("网盘接口熔断冷却中（剩余 {}s），本次跳过目录探测: {}",
+                            (coolRemain + 999L) / 1000L, prefix),
+                    "冷却结束后重试（冷却期内不发起任何网盘请求）"), start);
+        }
+        if (!(TorrentUtil.DOWNLOAD instanceof OfflineDownloader offline)) {
+            return timed(DoctorCheck.skip(key, label,
+                    "下载器未登录或不是 OpenList/Alist，无法探测网盘目录: " + prefix), start);
+        }
+
+        DirProbeResult prefixProbe = probeDir(offline, prefix);
+        String mount = firstSegment(prefix);
+        DirProbeResult mountProbe = prefixProbe.probe() == DirProbe.MISSING && mount != null
+                ? probeDir(offline, mount)
+                : null;
+        DirVerdict verdict = judgeOpenListPath(prefix, mount, prefixProbe, mountProbe);
+
+        // 云下载目录：可选配置；不存在会让云下载归位兜底失效
+        String cloudDir = StrUtil.trimToNull(config.getAlistCloudDownloadDir());
+        DirProbeResult cloudProbe = null;
+        String cloudNote;
+        if (cloudDir == null) {
+            cloudNote = "云下载目录未配置（按根目录自动发现）";
+        } else {
+            cloudProbe = probeDir(offline, cloudDir);
+            cloudNote = switch (cloudProbe.probe()) {
+                case EXISTS -> "云下载目录存在: " + cloudDir;
+                case MISSING -> "云下载目录不存在: " + cloudDir + "（云下载兜底归位会失效）";
+                case FAILED -> "云下载目录探测失败（没查成）: " + cloudDir;
+            };
+        }
+
+        String level = verdict.level();
+        if (cloudProbe != null && cloudProbe.probe() != DirProbe.EXISTS && "ok".equals(level)) {
+            level = "warn";
+        }
+        String suggestion = verdict.suggestion();
+        if (cloudProbe != null && cloudProbe.probe() == DirProbe.MISSING) {
+            suggestion = joinSuggestion(suggestion, "把「云下载目录」改为实际存在的目录（或清空以自动发现）");
+        } else if (cloudProbe != null && cloudProbe.probe() == DirProbe.FAILED) {
+            suggestion = joinSuggestion(suggestion, "稍后重试云下载目录探测");
+        }
+
+        String evidence = StrUtil.format("{}；{}（OpenList 模式：本地文件系统看不到该路径，已改用网盘读取）",
+                verdict.detail(), cloudNote);
+        return timed(checkOf(level, key, label, evidence, suggestion), start);
+    }
+
+    /**
+     * 按级别构造自检项（{@code ok} 没有 suggestion 入参）。
+     */
+    private static DoctorCheck checkOf(String level, String key, String label,
+                                       String evidence, String suggestion) {
+        return switch (level) {
+            case "fail" -> DoctorCheck.fail(key, label, evidence, suggestion);
+            case "warn" -> DoctorCheck.warn(key, label, evidence, suggestion);
+            default -> DoctorCheck.ok(key, label, evidence);
+        };
+    }
+
+    private static String joinSuggestion(String a, String b) {
+        if (StrUtil.isBlank(a)) {
+            return b;
+        }
+        return a + "；" + b;
     }
 
     /**

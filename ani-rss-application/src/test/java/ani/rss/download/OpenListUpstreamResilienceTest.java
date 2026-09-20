@@ -17,6 +17,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -25,6 +26,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -55,6 +57,10 @@ class OpenListUpstreamResilienceTest {
     private final AtomicInteger failuresToInject = new AtomicInteger(0);
     /** 这些目录上的 fs/list 永久失败（模拟持续性故障） */
     private final Set<String> alwaysFailPaths = ConcurrentHashMap.newKeySet();
+    /** 这些目录不存在（业务结果，不是故障） */
+    private final Set<String> missingPaths = ConcurrentHashMap.newKeySet();
+    /** 目录存在时的直接子项名（给 probeDirectChildren 用） */
+    private volatile List<String> childNames = List.of();
 
     private Integer prevFailThreshold;
     private Integer prevCooldownSeconds;
@@ -65,12 +71,19 @@ class OpenListUpstreamResilienceTest {
         requests.clear();
         failuresToInject.set(0);
         alwaysFailPaths.clear();
+        missingPaths.clear();
+        childNames = List.of();
         savePath = "/115/动漫/转存/追番/某番-" + java.util.UUID.randomUUID() + " (2026) [tmdbid=1]/Season 1";
         cloudDir = "/115/云下载-" + java.util.UUID.randomUUID();
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/api/fs/list", exchange -> {
             String path = requestPath(exchange);
             requests.computeIfAbsent(path, k -> new AtomicInteger()).incrementAndGet();
+            if (missingPaths.contains(path)) {
+                // 目录不存在：业务 code != 200，文案命中 isDirNotFoundMessage
+                respond(exchange, 200, "{\"code\":500,\"message\":\"failed to get dir: object not found\"}");
+                return;
+            }
             if (shouldFail(path)) {
                 // 线上原文：OpenList 把 Go 的错误以 **HTTP 200 + 业务 code=500** 回给我们
                 // （HTTP 状态码是 200，所以 assertStatus 不会先生；这正是实际形状）
@@ -79,7 +92,11 @@ class OpenListUpstreamResilienceTest {
                         + "net/http: TLS handshake timeout\"}");
                 return;
             }
-            respond(exchange, 200, "{\"code\":200,\"data\":{\"content\":[]}}");
+            respond(exchange, 200, GsonStatic.toJson(Map.of(
+                    "code", 200,
+                    "data", Map.of("content", childNames.stream()
+                            .map(name -> Map.of("name", name, "is_dir", false))
+                            .toList()))));
         });
         server.setExecutor(Executors.newSingleThreadExecutor());
         server.start();
@@ -204,5 +221,23 @@ class OpenListUpstreamResilienceTest {
                 openList.relocateEpisodeFiles(ani(), item("某番 S01E02"), savePath));
         assertEquals(1, requests(cloudDir), "同一轮内不该为第二条记录再列一次云下载目录");
         assertEquals(1, requests(savePath), "下载目录本身应命中 30s 列举缓存");
+    }
+
+    // ---------------- 4. 自检用的目录探测 ----------------
+
+    @Test
+    @DisplayName("probeDirectChildren：目录存在返回直接子项，不存在抛 OpenListDirNotFoundException")
+    void probe_direct_children_distinguishes_missing() {
+        OpenList openList = openList();
+        childNames = List.of("某番 S01E01.mkv", "某番 S01E02.mkv");
+        assertTrue(openList.probeDirectChildren(savePath).containsAll(childNames));
+
+        String missing = savePath + "/不存在";
+        missingPaths.add(missing);
+        assertThrows(OpenListApi.OpenListDirNotFoundException.class,
+                () -> openList.probeDirectChildren(missing),
+                "目录不存在必须是可识别的业务结果（自检据此区分「未创建」与「查不到」）");
+        // 单层探测：不因为子目录多而打出一整棵树
+        assertEquals(1, requests(savePath), "同一目录只发一次单层列举");
     }
 }
