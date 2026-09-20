@@ -827,7 +827,7 @@ public class ConfigUtil {
             config.setStaggerBatchIntervalMs(2000);
         }
         if (config.getOpenListApiPerSecond() == null) {
-            config.setOpenListApiPerSecond(3);
+            config.setOpenListApiPerSecond(1);
         }
         if (config.getOpenListApiBurst() == null) {
             config.setOpenListApiBurst(1);

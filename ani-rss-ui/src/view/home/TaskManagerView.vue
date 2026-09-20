@@ -76,17 +76,21 @@
           <span class="job-value progress-summary">
             <el-tooltip placement="top" :show-after="300">
               <template #content>
-                <div>列举失败：网盘查询失败或熔断冷却中，等网盘恢复即可</div>
+                <div>熔断冷却中：网盘连续失败触发了接口冷却，本轮一个请求都没发，等冷却结束即可自愈</div>
+                <div>列举失败：网盘查询失败（超时 / 连接被重置 / 5xx），确认网盘可用后会自行恢复</div>
                 <div>超预算：本轮网盘 API 预算用尽，可调大「单轮预算」或减少订阅</div>
                 <div>索引不完整：网盘目录文件数超过「列举上限」被截断，可调大该上限</div>
                 <div>等待改名：下载器里已有任务但尚未改名落地，稍后会自行收敛</div>
+                <div>缺席未确认：网盘目录列举自带缓存（可达 1 小时），刚下完可能列不到；约 1 小时后复核确认才会清理记录重下</div>
               </template>
               <span class="muted">为什么无法确认？</span>
             </el-tooltip>
+            <span v-if="status.unknownReasons.cooldown">冷却中 {{ status.unknownReasons.cooldown }}</span>
             <span v-if="status.unknownReasons.verifyFailed">列举失败 {{ status.unknownReasons.verifyFailed }}</span>
             <span v-if="status.unknownReasons.budgetExhausted">超预算 {{ status.unknownReasons.budgetExhausted }}</span>
             <span v-if="status.unknownReasons.indexIncomplete">索引不完整 {{ status.unknownReasons.indexIncomplete }}</span>
             <span v-if="status.unknownReasons.downloading">等待改名 {{ status.unknownReasons.downloading }}</span>
+            <span v-if="status.unknownReasons.absenceUnconfirmed">缺席未确认 {{ status.unknownReasons.absenceUnconfirmed }}</span>
           </span>
         </div>
         <div class="job-row">
@@ -576,7 +580,7 @@ const nextBatchCountdownText = computed(() => {
 const unknownReasonText = computed(() => {
   const r = status.value.unknownReasons
   if (!r) return ''
-  return [r.verifyFailed, r.budgetExhausted, r.indexIncomplete, r.downloading]
+  return [r.cooldown, r.verifyFailed, r.budgetExhausted, r.indexIncomplete, r.downloading, r.absenceUnconfirmed]
     .some((n) => n > 0) ? 'has' : ''
 })
 

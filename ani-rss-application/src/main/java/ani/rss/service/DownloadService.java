@@ -173,20 +173,26 @@ public class DownloadService {
                     // 只有 ABSENT 才允许删记录重下——把"查不到"读成"确认没有"，
                     // 会让一次网盘抖动直接演变成"删记录 + 整季重新下单"。
                     Presence presence;
+                    UnknownReason unknownReason = UnknownReason.NONE;
                     if (!Boolean.TRUE.equals(config.getRename())) {
                         presence = Presence.VALID;
                     } else if (isOpenListTool() && TorrentUtil.DOWNLOAD instanceof OfflineDownloader offline) {
-                        presence = resolveOpenListPresence(ani, item, reName, savePath, offline, localEpisodeIndex);
+                        PresenceDecision decision = resolveOpenListPresence(ani, item, reName, savePath, offline, localEpisodeIndex);
+                        presence = decision.presence();
+                        unknownReason = decision.reason();
                     } else {
                         // 本地型下载器：索引已在订阅级预构建，失败路径极少；保持原有布尔语义
                         presence = itemDownloaded(ani, item, true, localEpisodeIndex)
                                 ? Presence.VALID : Presence.ABSENT;
                     }
                     if (presence == Presence.UNVERIFIABLE) {
-                        // 网盘不可用/查询失败：既不能断言"有"也不能断言"没有"。
-                        // 保留记录、本轮不重下——网盘恢复后会发现文件本来就在。
-                        log.info("本地状态无法确认（网盘不可用），本轮保留记录不重下 {}", reName);
+                        // 既不能断言"有"也不能断言"没有"：保留记录、本轮不重下，网盘恢复后自会发现文件本来就在。
+                        // 但必须带出<b>成因</b>——统称"网盘不可用"会把"等 60s 冷却"和"下载路径配错了"
+                        // 说成同一件事，用户除了猜没有别的办法（2026-09-20 的排查正是卡在这里）。
+                        log.info("本地状态无法确认（{}），本轮保留记录不重下 {}{}",
+                                unknownReasonText(unknownReason), reName, cooldownRemainText(unknownReason));
                         RssTask.countRoundLocalState(LocalState.UNKNOWN);
+                        RssTask.countRoundUnknownReason(unknownReason);
                         continue;
                     }
                     if (presence == Presence.RETRY_EXHAUSTED) {
@@ -1663,13 +1669,21 @@ public class DownloadService {
     }
 
     /**
-     * OpenList 路径的「记录是否有效」判定（三态）。
+     * OpenList 路径的「记录是否有效」判定（三态 + 存疑成因）。
      * <p>
-     * 判定顺序：失败队列 → 熔断冷却 → 归位对账 → 兜底校验。
-     * 任一环节"没能查成"都返回 {@link Presence#UNVERIFIABLE}，由调用方保留记录。
+     * 判定顺序：熔断冷却 → 失败队列 → 归位对账 → 兜底校验。
+     * 任一环节"没能查成"都返回 {@link Presence#UNVERIFIABLE}，并带上
+     * {@link UnknownReason} 让调用方把"为什么没查成"说清楚，由调用方保留记录。
      */
-    private Presence resolveOpenListPresence(Ani ani, Item item, String reName, String savePath,
-                                            OfflineDownloader offline, Set<String> localEpisodeIndex) {
+    private PresenceDecision resolveOpenListPresence(Ani ani, Item item, String reName, String savePath,
+                                                    OfflineDownloader offline, Set<String> localEpisodeIndex) {
+        // 熔断冷却期：本轮不发网盘请求，直接"无法判断"（不删记录、不重下）。
+        // 放在失败队列之前：冷却期连兜底校验都发不出请求，先判冷却才能给出准确成因——
+        // 否则一律报成"列举失败"，把"等 60s 就好"说成"网盘坏了"。
+        if (OpenListApi.isListingCoolingDown()) {
+            OpenListApi.logCooldownSkipOnce("本地状态校验");
+            return PresenceDecision.of(Presence.UNVERIFIABLE, UnknownReason.COOLDOWN);
+        }
         String failKey = FailedDownloadQueue.keyOf(ani.getId(), item.getInfoHash(), reName);
         FailedDownloadQueue.FailedItem queued = FailedDownloadQueue.list().stream()
                 .filter(f -> Objects.equals(f.getId(), failKey))
@@ -1677,23 +1691,23 @@ public class DownloadService {
                 .orElse(null);
         if (queued != null) {
             // 失败队列已有本集记录: 跳过二次对账, 直接兜底校验, 避免每轮重复对账
-            Presence verified = verifyPresence(ani, item, localEpisodeIndex);
-            if (verified == Presence.EXISTS) {
+            PresenceDecision verified = verifyPresence(ani, item, localEpisodeIndex);
+            if (verified.presence() == Presence.EXISTS) {
                 // 文件已实际就位(如手动归位/上轮重下成功): 清掉过期失败记录
                 FailedDownloadQueue.remove(failKey);
+                clearAbsence(failKey);
                 return verified;
             }
             // 连续失败上限：避免真失败(坏种/超时/持久冲突)时每轮无限重推，
             // 每次都往网盘堆一份新产物。条目保留在失败队列，可由用户手动重试。
             int attempts = queued.getAttempts() == null ? 0 : queued.getAttempts();
-            if (verified == Presence.ABSENT && attempts >= MAX_OPENLIST_AUTO_RETRY_ATTEMPTS) {
-                return Presence.RETRY_EXHAUSTED;
+            if (verified.presence() == Presence.ABSENT && attempts >= MAX_OPENLIST_AUTO_RETRY_ATTEMPTS) {
+                return PresenceDecision.of(Presence.RETRY_EXHAUSTED, UnknownReason.NONE);
+            }
+            if (verified.presence() == Presence.ABSENT) {
+                return absenceOrUnconfirmed(failKey, reName, verified);
             }
             return verified;
-        }
-        // 熔断冷却期：本轮不发网盘请求，直接"无法判断"（不删记录、不重下）
-        if (OpenListApi.isListingCoolingDown()) {
-            return Presence.UNVERIFIABLE;
         }
         // 周期对账（仅离线工具）：记录存在但文件滞留子目录/云下载目录时自动归位到顶层，
         // 修复「显示已存在但文件不在预期位置」且无任何自动纠正机制的问题。
@@ -1707,25 +1721,175 @@ public class DownloadService {
         // 对账已确认归位成功 / 本就位于顶层：直接采信，不必再跑一次兜底列举
         if (relocated == OfflineDownloader.RelocateResult.RELOCATED
                 || relocated == OfflineDownloader.RelocateResult.ALREADY_AT_TOP) {
-            return Presence.EXISTS;
+            clearAbsence(failKey);
+            return PresenceDecision.of(Presence.EXISTS, UnknownReason.NONE);
         }
         // 对账没能跑完：既不能说文件在，也不能说文件不在。保留记录，本轮不重下。
         if (relocated == OfflineDownloader.RelocateResult.UNVERIFIABLE) {
-            return Presence.UNVERIFIABLE;
+            return unverifiableOrSnapshot(ani, item, UnknownReason.VERIFY_FAILED);
         }
         // 对账确认没找到：兜底检查（网盘视频文件按需检查；离线工具的任务列表恒空）
-        Presence fallback = verifyPresence(ani, item, localEpisodeIndex);
-        Presence combined = combineFallback(relocated, fallback);
+        PresenceDecision fallback = verifyPresence(ani, item, localEpisodeIndex);
+        Presence combined = combineFallback(relocated, fallback.presence());
         if (combined == Presence.ABSENT) {
-            log.warn("归位对账未找到且兜底检查确认无文件，清理过期种子记录并重新下载 {}", reName);
-            if (relocated != null) {
-                recordRelocateFailure(ani, item, new IllegalStateException(
-                        "归位对账未发现本集文件(" + relocated + ")"));
+            // 「确认没有」是唯一允许删记录重下的判定，因此必须跨时间确认：
+            // Alist/OpenList 的目录列举自带缓存（存储驱动"缓存过期时间"默认可达 1 小时），
+            // 刚下完 / 刚移动完去列目录经常列不到，一次就删记录会换来重复下载 + 与已落盘文件撞名。
+            PresenceDecision absence = absenceOrUnconfirmed(failKey, reName,
+                    PresenceDecision.of(Presence.ABSENT, UnknownReason.NONE));
+            if (absence.presence() == Presence.ABSENT) {
+                log.warn("归位对账未找到且兜底检查确认无文件，清理过期种子记录并重新下载 {}", reName);
+                if (relocated != null) {
+                    recordRelocateFailure(ani, item, new IllegalStateException(
+                            "归位对账未发现本集文件(" + relocated + ")"));
+                }
             }
-        } else if (combined == Presence.UNVERIFIABLE) {
-            log.info("归位对账未找到，但兜底检查未能完成（网盘不可用），本轮保留记录不重下 {}", reName);
+            return absence;
         }
-        return combined;
+        if (combined == Presence.UNVERIFIABLE) {
+            log.info("归位对账未找到，但兜底检查未能完成（{}），本轮保留记录不重下 {}",
+                    unknownReasonText(fallback.reason()), reName);
+            return unverifiableOrSnapshot(ani, item, fallback.reason());
+        }
+        clearAbsence(failKey);
+        return PresenceDecision.of(combined, UnknownReason.NONE);
+    }
+
+    /**
+     * 「无法确认」前的最后一层兜底：新鲜快照已确认本集存在 → 直接改判 {@link Presence#EXISTS}。
+     * <p>
+     * 为什么值得这么做：网盘抖一下（上游 TLS 握手超时之类）就会让<b>整批已下载过的集</b>
+     * 变成"存疑"并跳过下载——而它们其实都在快照里写着"存在"。事实已经在手，
+     * 就不该因为一次列举失败改口（那也正是用户看到的"全都是网盘不可用"）。
+     * <p>
+     * <b>只信"有"，不信"没有"</b>：快照可能带外过期（用户在网盘手动删了文件），
+     * 用它断言"不存在"会删记录重下；而"存在"这一半即使过期也只会让我们少下一次，
+     * 代价可接受（TTL 与主动失效会兜底回收）。
+     * <p>
+     * package-private：判定表本身要能被单测直接固化。
+     */
+    PresenceDecision unverifiableOrSnapshot(Ani ani, Item item, UnknownReason reason) {
+        LocalStateCache.Snapshot snapshot = LocalStateCache.peek(ani, getDownloadPath(ani));
+        // 截断的快照仍然能确认"存在"（找到了就是找到了），所以不要求 complete()
+        if (snapshot != null && matchesEpisodeIndex(ani, item, snapshot.episodeIndex())) {
+            log.info("网盘列举未能完成，改用本地状态快照判定为「已存在」（快照 {} 分钟前构建） {}",
+                    (System.currentTimeMillis() - snapshot.builtAt()) / 60_000L, item.getReName());
+            return PresenceDecision.of(Presence.EXISTS, UnknownReason.NONE);
+        }
+        return PresenceDecision.of(Presence.UNVERIFIABLE, reason);
+    }
+
+    /**
+     * 「记录是否有效」判定结果 + 无法确认时的成因。
+     * <p>
+     * 为什么要把成因一起带出来：{@code UNVERIFIABLE} 只回答"没查成"，
+     * 而"为什么没查成"决定用户下一步做什么（等冷却结束 / 查网盘 / 调大列举上限）。
+     * 只回一个三态，调用方就只能打出一句"网盘不可用"——那句话把三种完全不同的
+     * 故障说成同一件事，日志里再没有第二条线索可用。
+     */
+    record PresenceDecision(Presence presence, UnknownReason reason) {
+        static PresenceDecision of(Presence presence, UnknownReason reason) {
+            return new PresenceDecision(presence, reason == null ? UnknownReason.NONE : reason);
+        }
+
+        boolean unverifiable() {
+            return presence == Presence.UNVERIFIABLE;
+        }
+    }
+
+    /**
+     * 「确认没有」需要跨时间确认的间隔。
+     * <p>
+     * <b>为什么不能一次就删记录</b>：Alist/OpenList 侧的目录列举<b>自带缓存</b>
+     * （存储驱动的"缓存过期时间"默认可达 1 小时），刚下完 / 刚移动完去列目录经常列不到；
+     * 而"一次判 ABSENT 就删记录重下"会同时付出两份代价——重复下载 + 与已落盘文件撞名。
+     * 所以改成"两次都判没有、且相隔 ≥ 本间隔"才允许删记录，其余情况报「存疑」等下一轮。
+     * <p>
+     * 取 <b>62 分钟</b>：<b>刻意比 Alist/OpenList 默认的 1 小时目录缓存更长一点</b>——
+     * 否则两次观察可能都在同一份过期缓存里，确认等于没确认。默认 15 分钟轮询下
+     * 相当于第 5 轮才可能真正清理记录；代价是"文件确实被删"要多等一会儿，
+     * 换来的是绝不重复下载。
+     */
+    static final long ABSENT_CONFIRM_INTERVAL_MS = TimeUnit.MINUTES.toMillis(62);
+
+    /** 同一集首次被判「确认没有」的时刻（key = aniId|infoHash|reName） */
+    private static final Map<String, Long> ABSENT_FIRST_SEEN = new ConcurrentHashMap<>();
+
+    /**
+     * 缺席是否已被跨时间确认：第一次看到只登记并返回 {@code false}。
+     * <p>
+     * package-private 且带 {@code nowMs} 重载：判定本身要能被单测用合成时间固化。
+     */
+    static boolean absenceConfirmed(String key, long nowMs) {
+        if (StrUtil.isBlank(key)) {
+            return false;
+        }
+        if (ABSENT_FIRST_SEEN.size() > 4096) {
+            // 兜底：长期运行不该无限增长（正常路径会 remove）。清空只会让确认重新计时，方向安全。
+            ABSENT_FIRST_SEEN.clear();
+        }
+        Long first = ABSENT_FIRST_SEEN.putIfAbsent(key, nowMs);
+        return first != null && nowMs - first >= ABSENT_CONFIRM_INTERVAL_MS;
+    }
+
+    static boolean absenceConfirmed(String key) {
+        return absenceConfirmed(key, System.currentTimeMillis());
+    }
+
+    /** 文件又被找到了 → 清掉缺席登记，下次从头计时。 */
+    private static void clearAbsence(String key) {
+        if (StrUtil.isNotBlank(key)) {
+            ABSENT_FIRST_SEEN.remove(key);
+        }
+    }
+
+    /**
+     * 「确认没有」的跨时间闸门：首次只登记，跨过间隔后才真的允许删记录。
+     *
+     * @param decision 原本的 ABSENT 判定（确认后原样返回，由调用方执行删记录重下）
+     */
+    private static PresenceDecision absenceOrUnconfirmed(String key, String reName, PresenceDecision decision) {
+        if (absenceConfirmed(key)) {
+            clearAbsence(key);
+            return decision;
+        }
+        log.warn("判为「没有文件」但尚未跨时间确认（网盘目录列举自带缓存、可达 1 小时），"
+                + "本轮保留记录等下一轮复核 {}", reName);
+        return PresenceDecision.of(Presence.UNVERIFIABLE, UnknownReason.ABSENCE_UNCONFIRMED);
+    }
+
+    /**
+     * 存疑成因的展示文案（日志与自检共用）。
+     * <p>
+     * 抽成静态纯函数是为了能把"文案本身"固化下来：这些字串就是可排查性，
+     * 一旦有人把它们又合并成一句"网盘不可用"，用例会立刻失败。
+     */
+    static String unknownReasonText(UnknownReason reason) {
+        if (reason == null) {
+            return "原因未知";
+        }
+        return switch (reason) {
+            case COOLDOWN -> "网盘接口熔断冷却中";
+            case VERIFY_FAILED -> "网盘列举失败";
+            case BUDGET_EXHAUSTED -> "本轮网盘列举预算已耗尽";
+            case INDEX_INCOMPLETE -> "集数索引不完整（列举被截断）";
+            case DOWNLOADING -> "等待改名落地";
+            case ABSENCE_UNCONFIRMED -> "缺席未确认（网盘目录列举可能有缓存）";
+            case NONE -> "原因未知";
+        };
+    }
+
+    /**
+     * 冷却剩余时长的展示后缀（仅冷却成因有），空串表示无需追加。
+     */
+    private static String cooldownRemainText(UnknownReason reason) {
+        if (reason != UnknownReason.COOLDOWN) {
+            return "";
+        }
+        long remain = OpenListApi.listingCooldownRemainingMs();
+        return remain > 0L
+                ? "，剩余 " + ((remain + 999L) / 1000L) + "s（冷却期内不发任何网盘请求）"
+                : "";
     }
 
     /**
@@ -1750,31 +1914,32 @@ public class DownloadService {
      * 「本地存在」三态校验：区分"确实没有"与"查不到"。
      * <p>
      * 与 {@link #itemDownloaded} 的区别是失败不降级：列举抛异常、索引被截断时
-     * 返回 {@link Presence#UNVERIFIABLE} 而非 ABSENT，调用方据此避免破坏性动作。
+     * 返回 {@link Presence#UNVERIFIABLE} 而非 ABSENT，并带上成因，调用方据此避免破坏性动作。
      *
      * @param localEpisodeIndex 预构建索引；为 null 时按需走订阅级快照缓存
      */
-    private Presence verifyPresence(Ani ani, Item item, Set<String> localEpisodeIndex) {
+    private PresenceDecision verifyPresence(Ani ani, Item item, Set<String> localEpisodeIndex) {
         if (localEpisodeIndex != null) {
-            return matchesEpisodeIndex(ani, item, localEpisodeIndex) ? Presence.EXISTS : Presence.ABSENT;
+            return PresenceDecision.of(matchesEpisodeIndex(ani, item, localEpisodeIndex)
+                    ? Presence.EXISTS : Presence.ABSENT, UnknownReason.NONE);
         }
         EpisodeIndex index;
         try {
             index = cachedEpisodeIndex(ani, getDownloadPath(ani));
         } catch (Exception e) {
-            log.warn("构建集数索引失败，本地状态无法确认（本轮不删记录、不重下） {}: {}",
+            log.warn("构建集数索引失败（本轮不删记录、不重下） {}: {}",
                     item.getReName(), ExceptionUtils.getMessage(e));
-            return Presence.UNVERIFIABLE;
+            return unverifiableOrSnapshot(ani, item, UnknownReason.VERIFY_FAILED);
         }
         if (matchesEpisodeIndex(ani, item, index.index())) {
-            return Presence.EXISTS;
+            return PresenceDecision.of(Presence.EXISTS, UnknownReason.NONE);
         }
         if (!index.complete()) {
             // 列举被截断：只能确认"存在"，不能断言"不存在"
             log.info("集数索引不完整（列举被截断），无法断言本集不存在 {}", item.getReName());
-            return Presence.UNVERIFIABLE;
+            return PresenceDecision.of(Presence.UNVERIFIABLE, UnknownReason.INDEX_INCOMPLETE);
         }
-        return Presence.ABSENT;
+        return PresenceDecision.of(Presence.ABSENT, UnknownReason.NONE);
     }
 
     /**
@@ -1952,9 +2117,16 @@ public class DownloadService {
          */
         NONE,
         /**
-         * 网盘列举失败 / 熔断冷却中（查询失败 ≠ 目录为空）
+         * 网盘列举失败 / 查询失败（查询失败 ≠ 目录为空）
+         * <p>
+         * <b>不含</b>熔断冷却——冷却是一个"等一会儿会自愈"的状态，
+         * 与"网盘坏了"的对策完全不同，故单列为 {@link #COOLDOWN}。
          */
         VERIFY_FAILED,
+        /**
+         * 网盘接口处于熔断冷却期：本轮一个请求都没发出去
+         */
+        COOLDOWN,
         /**
          * 本轮网盘 API 预算已耗尽，主动放弃校验
          */
@@ -1966,7 +2138,11 @@ public class DownloadService {
         /**
          * 下载器里已有同名任务，文件尚未改名落地
          */
-        DOWNLOADING
+        DOWNLOADING,
+        /**
+         * 判为「没有文件」但尚未跨时间确认（网盘目录列举自带缓存，刚下完可能列不到）
+         */
+        ABSENCE_UNCONFIRMED
     }
 
     /**

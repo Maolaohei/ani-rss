@@ -30,6 +30,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -57,7 +58,15 @@ public class OpenListApi {
 
     // ---- 网盘 API 限流：令牌桶（替代原先的固定最小间隔）----
     private static final Object API_RATE_LOCK = new Object();
-    private static final double DEFAULT_API_PER_SECOND = 3.0;
+    /**
+     * 默认速率（次/秒）。
+     * <p>
+     * 取 1 而不是更激进的值：网盘按账号限流，列举又是"1 + 子目录数"次往返的递归调用，
+     * 速率过高只会把账号打进服务端限流（然后被熔断，反而更慢）。
+     * 需要更快可以调大 {@code openListApiPerSecond}（上限 20），但单轮列举预算
+     * 与熔断阈值都随速率联动，请一并确认（见 {@code RssTask.resolveAffordableListingsPerRound}）。
+     */
+    private static final double DEFAULT_API_PER_SECOND = 1.0;
     private static final double DEFAULT_API_BURST = 1.0;
     private static final double MAX_API_PER_SECOND = 20.0;
     private static final double MAX_API_BURST = 5.0;
@@ -84,6 +93,65 @@ public class OpenListApi {
     /** 熔断触发次数（可观测） */
     private static final java.util.concurrent.atomic.AtomicLong cooldownTriggered =
             new java.util.concurrent.atomic.AtomicLong(0L);
+    /**
+     * 已经为哪个冷却窗口打过"本轮跳过"的 INFO。
+     * <p>
+     * 冷却期逐条打会刷满日志，一条不打则用户只能看到"网盘不可用"——两头都不行，
+     * 所以按"冷却窗口"去重：一次冷却最多一条 INFO，带剩余秒数（2026-09-20 排查所加）。
+     */
+    private static final java.util.concurrent.atomic.AtomicLong cooldownSkipLoggedFor =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+
+    // ---- 失败记忆（不缓存"结果"，但要缓存"失败本身"）----
+    /**
+     * 同一路径的失败记忆存活时长。
+     * <p>
+     * 与成功列举的短缓存（{@code FIND_FILES_TTL_MS} = 30s）同量级：这里是"这次没查成"，
+     * 不该像成功结果一样被信任很久——上游一恢复，下一分钟就该重新真查。
+     */
+    private static final long LISTING_FAILURE_TTL_MS = java.util.concurrent.TimeUnit.SECONDS.toMillis(30);
+    /**
+     * path -> 最近的失败。
+     * <p>
+     * <b>为什么必须记失败</b>：一个订阅有 N 条已下载记录时，每条都会为同一个目录调一次列举；
+     * 上游一抖，N 次全部失败——每条都要等上游 10~30s 超时，熔断计数还会被直接顶到阈值，
+     * 于是整批订阅一起被冷却。记忆之后：同一目录在窗口内失败一次就够。
+     * <p>
+     * 与"目录不存在"无关：那是业务结果（确认空），不进本表（新目录随时可能被创建）。
+     */
+    private static final Map<String, FailedListing> listingFailures = new ConcurrentHashMap<>();
+    /** 因失败记忆而省下的重复请求次数（可观测） */
+    private static final java.util.concurrent.atomic.AtomicLong listingFailureMemoHit =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+    /** 最近一次列举失败（供自检页回答"到底哪一跳坏了"） */
+    private static volatile long lastListingFailureAt = 0L;
+    private static volatile String lastListingFailureMessage = "";
+    /**
+     * 本轮已强制刷新过的云下载目录（归位对账用）。
+     * <p>
+     * 每条 item 都 `invalidate + list` 一次云下载目录是纯浪费：一个订阅 12 集就是 12 次请求，
+     * 网盘一抖则 12 次失败。现在只在本轮首次读时强制刷新，其余复用共享列举缓存。
+     */
+    private static final Set<String> cloudListingRefreshedThisRound = ConcurrentHashMap.newKeySet();
+
+    /**
+     * 登记"本轮已强制刷新过该目录"。首次调用返回 {@code true}（调用方据此真实刷新），
+     * 之后返回 {@code false}。
+     */
+    public static boolean markCloudListingRefreshedThisRound(String path) {
+        return cloudListingRefreshedThisRound.add(path);
+    }
+
+    /** 一次被记住的失败：到期时间 + 现场 */
+    private static final class FailedListing {
+        final long expireAt;
+        final RuntimeException error;
+
+        FailedListing(long expireAt, RuntimeException error) {
+            this.expireAt = expireAt;
+            this.error = error;
+        }
+    }
 
     // findFiles 短缓存，轮询期间减少递归 list
     private static final long FIND_FILES_TTL_MS = java.util.concurrent.TimeUnit.SECONDS.toMillis(30);
@@ -148,7 +216,7 @@ public class OpenListApi {
     /**
      * 递归列举（findFilesStrict）专用的合并等待上限，比单目录列举宽松得多。
      * <p>
-     * 一次递归列举天然是"1 + 子目录数"次往返（默认 3 次/秒限流），大目录树超过 60s 很正常；
+     * 一次递归列举天然是"1 + 子目录数"次往返（默认 1 次/秒限流），大目录树超过 60s 很正常；
      * 沿用 60s 会让等待方无谓超时，而超时会向上抛（buildFileList 只吞 OpenListDirNotFoundException），
      * 整个父目录列举失败、findFiles 再把"查不到"报成"目录是空的"。
      * <p>
@@ -553,6 +621,15 @@ public class OpenListApi {
             throw new IllegalStateException("网盘接口冷却中（剩余 " + ((cooldownRemaining + 999L) / 1000L)
                     + "s），本次不发起请求 path=" + path);
         }
+        // 失败记忆：同一目录刚失败过就不再打一次（每次都要等上游超时，且会重复计入熔断）
+        FailedListing remembered = listingFailures.get(path);
+        if (remembered != null) {
+            if (remembered.expireAt > System.currentTimeMillis()) {
+                listingFailureMemoHit.incrementAndGet();
+                throw remembered.error;
+            }
+            listingFailures.remove(path, remembered);
+        }
         try {
             List<OpenListFileInfo> result = retryIdempotent("fs/list " + path, () -> postApi("fs/list")
                     .body(GsonStatic.toJson(Map.of(
@@ -593,8 +670,14 @@ public class OpenListApi {
                         }));
                     }));
             onListingSuccess();
+            listingFailures.remove(path);
             return result;
         } catch (RuntimeException e) {
+            // 目录不存在不是故障，不记、也不参与熔断（见 onListingFailure）
+            if (!(e instanceof OpenListDirNotFoundException)) {
+                listingFailures.put(path, new FailedListing(
+                        System.currentTimeMillis() + LISTING_FAILURE_TTL_MS, e));
+            }
             onListingFailure(e);
             throw e;
         }
@@ -1005,6 +1088,7 @@ public class OpenListApi {
             if (className.contains("sockettimeout")
                     || className.contains("connectexception")
                     || className.contains("noroutetohost")
+                    || isTransientMessage(message)
                     || message.contains("read timed out")
                     || message.contains("connect timed out")
                     || message.contains("connection reset")
@@ -1037,9 +1121,13 @@ public class OpenListApi {
 
     /**
      * 业务错误文案是否表示"目录不存在"。不同网盘/版本的文案不一致，故做包含匹配。
+     * <p>
+     * <b>网络层故障一律先被排除</b>（{@link #isTransientMessage}）：115 把超时/连不上
+     * 层层包在 {@code failed get dir} 里，与真正的目录不存在（{@code failed to get dir}）
+     * 只差一个 "to"。一旦这里把"没查成"读成"确认没有"，代价就是删种子记录 + 整季重新下单。
      */
     static boolean isDirNotFoundMessage(String message) {
-        if (StrUtil.isBlank(message)) {
+        if (StrUtil.isBlank(message) || isTransientMessage(message)) {
             return false;
         }
         String lower = message.toLowerCase(Locale.ROOT);
@@ -1048,6 +1136,36 @@ public class OpenListApi {
                 || lower.contains("object not exist")
                 || lower.contains("no such file")
                 || lower.contains("dir not exist");
+    }
+
+    /**
+     * 文案里是否含网络层故障标记（超时 / 握手 / 连接层错误 / 限流）。
+     * <p>
+     * 出现的就说明"这次没能查成"，任何"确认没有"类判定都得先让路。真实日志：
+     * <pre>
+     * fs/list 失败 code=500 path=/115/… /Season 2
+     * message=failed get objs: failed get dir: failed get parent list: failed to list objs:
+     *         Get "https://webapi.115.com/files?…": net/http: TLS handshake timeout
+     * </pre>
+     * 注意只认网络层可携带的短语，<b>不认裸数字</b>（502/429 之类）——调用方常把
+     * 整个异常串（含 path= / tmdbid=）传进来，裸数字会在路径上假阳性。
+     */
+    static boolean isTransientMessage(String message) {
+        if (StrUtil.isBlank(message)) {
+            return false;
+        }
+        String lower = message.toLowerCase(Locale.ROOT);
+        return lower.contains("timeout")
+                || lower.contains("timed out")
+                || lower.contains("tls handshake")
+                || lower.contains("connection reset")
+                || lower.contains("connection refused")
+                || lower.contains("no route to host")
+                || lower.contains("network is unreachable")
+                || lower.contains("unexpected eof")
+                || lower.contains("broken pipe")
+                || lower.contains("i/o error")
+                || lower.contains("too many requests");
     }
 
     /**
@@ -1061,6 +1179,26 @@ public class OpenListApi {
 
     public static boolean isListingCoolingDown() {
         return listingCooldownRemainingMs() > 0L;
+    }
+
+    /**
+     * 同一个冷却窗口只打一条「本轮跳过」INFO。
+     * <p>
+     * 调用点应在确认 {@link #isListingCoolingDown()} 之后。冷却重新触发时
+     * {@code cooldownUntilMs} 会变成新的时间戳，于是下一条 INFO 又能打出来。
+     * <p>
+     * 为什么需要它：冷却期逐条打会把日志刷满，一条不打则用户只能看到一句
+     * "网盘不可用"，分不清是"等一会儿会自愈"还是"网盘坏了"。
+     *
+     * @param what 被跳过的动作（如"归位对账""本地状态校验"）
+     */
+    public static void logCooldownSkipOnce(String what) {
+        long until = cooldownUntilMs;
+        if (until <= 0L || cooldownSkipLoggedFor.getAndSet(until) == until) {
+            return;
+        }
+        log.info("网盘接口熔断冷却中（剩余 {}s），{} 本轮跳过且不发起任何请求",
+                (listingCooldownRemainingMs() + 999L) / 1000L, what);
     }
 
     /**
@@ -1130,6 +1268,9 @@ public class OpenListApi {
     public static void resetRoundApiStats() {
         apiCallCountRound.set(0L);
         listingCallCountRound.set(0L);
+        // 新一轮重新真查：上一轮的失败/刷新记录不该把本轮的列举拦住
+        listingFailures.clear();
+        cloudListingRefreshedThisRound.clear();
     }
 
     // ---- F7-5 每轮 API 预算 ----
@@ -1213,6 +1354,8 @@ public class OpenListApi {
             // 目录不存在不是故障，不参与熔断
             return;
         }
+        lastListingFailureAt = System.currentTimeMillis();
+        lastListingFailureMessage = StrUtil.blankToDefault(ExceptionUtils.getMessage(e), e.getClass().getSimpleName());
         int threshold = intConfig(ConfigUtil.CONFIG == null ? null : ConfigUtil.CONFIG.getOpenListFailThreshold(),
                 3, 1, 10);
         int failures = consecutiveListingFailures.incrementAndGet();
@@ -1227,8 +1370,99 @@ public class OpenListApi {
         consecutiveListingFailures.set(0);
         cooldownTriggered.incrementAndGet();
         log.warn("网盘列举连续失败 {} 次，进入冷却 {}s（第 {} 级）。冷却期内不再发起网盘请求，"
-                        + "本地状态一律标记为「存疑」。原因: {}",
-                threshold, cooldownMs / 1000L, level, ExceptionUtils.getMessage(e));
+                        + "本地状态一律标记为「存疑」。原因: {}{}",
+                threshold, cooldownMs / 1000L, level, ExceptionUtils.getMessage(e), upstreamHint(e));
+    }
+
+    /**
+     * 给失败日志补上"到底哪一跳坏了"：上游域名 + 错误类别。
+     * <p>
+     * 用户看到的原始文案长这样：
+     * <pre>
+     * fs/list 失败 code=500 path=/115/… message=failed get objs: failed to list objs:
+     *         Get "https://webapi.115.com/files?…": net/http: TLS handshake timeout
+     * </pre>
+     * 其中真正的因果在最后一段（OpenList → 115），而不是 ani-rss → OpenList 那一跳。
+     */
+    static String upstreamHint(Exception e) {
+        String message = ExceptionUtils.getMessage(e);
+        String host = extractUpstreamHost(message);
+        String category = classifyUpstreamFailure(message);
+        if (StrUtil.isBlank(host) && StrUtil.isBlank(category)) {
+            return "";
+        }
+        return "（上游=" + StrUtil.blankToDefault(host, "未识别") + "，类别=" + StrUtil.blankToDefault(category, "未知")
+                + "；这是 OpenList 到上游网盘的连接问题，不是 ani-rss 到 OpenList）";
+    }
+
+    /**
+     * 从错误文案里揠出上游服务的 host（如 {@code webapi.115.com}），识别不出返回空串。
+     */
+    public static String extractUpstreamHost(String message) {
+        if (StrUtil.isBlank(message)) {
+            return "";
+        }
+        java.util.regex.Matcher matcher = UPSTREAM_URL_PATTERN.matcher(message);
+        if (!matcher.find()) {
+            return "";
+        }
+        String host = matcher.group(1);
+        int colon = host.indexOf(':');
+        return colon > 0 ? host.substring(0, colon) : host;
+    }
+
+    private static final java.util.regex.Pattern UPSTREAM_URL_PATTERN =
+            java.util.regex.Pattern.compile("https?://([^/\\s\"'?]+)", java.util.regex.Pattern.CASE_INSENSITIVE);
+
+    /**
+     * 上游失败的类别（纯字符串判定，供日志与自检页给具体建议）。
+     */
+    public static String classifyUpstreamFailure(String message) {
+        if (StrUtil.isBlank(message)) {
+            return "";
+        }
+        String lower = message.toLowerCase(Locale.ROOT);
+        if (lower.contains("tls handshake")) {
+            return "TLS 握手超时（网络层丢包 / MTU / IPv6 / 代理）";
+        }
+        if (lower.contains("no such host") || lower.contains("dns") || lower.contains("lookup ")) {
+            return "DNS 解析失败";
+        }
+        if (lower.contains("connection refused")) {
+            return "连接被拒";
+        }
+        if (lower.contains("connection reset") || lower.contains("unexpected eof") || lower.contains("broken pipe")) {
+            return "连接被重置";
+        }
+        if (lower.contains("too many requests") || lower.contains("429")) {
+            return "上游限流";
+        }
+        if (lower.contains("timeout") || lower.contains("timed out")) {
+            return "超时";
+        }
+        // 认不出就不编：空串让调用方显示"未知"，也避免日志里出现假的归因
+        return "";
+    }
+
+    /**
+     * 失败记忆命中次数（诊断用）
+     */
+    public static long getListingFailureMemoHit() {
+        return listingFailureMemoHit.get();
+    }
+
+    /**
+     * 最近一次列举失败的时刻（0 = 本次运行还没失败过）
+     */
+    public static long getLastListingFailureAt() {
+        return lastListingFailureAt;
+    }
+
+    /**
+     * 最近一次列举失败的原始文案
+     */
+    public static String getLastListingFailureMessage() {
+        return lastListingFailureMessage;
     }
 
     /**
@@ -1242,6 +1476,12 @@ public class OpenListApi {
         consecutiveListingFailures.set(0);
         cooldownLevel.set(0);
         cooldownUntilMs = 0L;
+        cooldownSkipLoggedFor.set(0L);
+        listingFailures.clear();
+        listingFailureMemoHit.set(0L);
+        lastListingFailureAt = 0L;
+        lastListingFailureMessage = "";
+        cloudListingRefreshedThisRound.clear();
         throttleWaitMs.set(0L);
         cooldownTriggered.set(0L);
         apiCallCount.set(0L);
@@ -1380,6 +1620,8 @@ public class OpenListApi {
         listNamesExpire.keySet().removeIf(k -> isAffectedByChange(k, roots));
         findFilesInFlight.keySet().removeIf(k -> isAffectedByChange(k, roots));
         listNamesInFlight.keySet().removeIf(k -> isAffectedByChange(k, roots));
+        // 目录已经变了，失败记忆也必须跟着失效：否则一次抖动会把"新目录已经能列了"也拦 30s
+        listingFailures.keySet().removeIf(k -> isAffectedByChange(k, roots));
     }
 
     /**

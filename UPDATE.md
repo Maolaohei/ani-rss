@@ -22,6 +22,118 @@
 
 ---
 
+## 3.4.16 增量（2026-09）
+
+### 上游抖动（OpenList → 115）的六条缓解
+
+**现象**：日志反复刷 `归位对账无法完成（网盘不可用或异常）…: net/http: TLS handshake timeout`，
+但网盘其实是可用的。这条错误里 `Get "https://webapi.115.com/files?…"` + `net/http:` 已经说明
+失败发生在 **OpenList 服务端 → 115** 那一跳（Go 的错误被 115 驱动层层包装后以业务 code=500 回传），
+不是 ani-rss → OpenList。同一个抖动之所以能刷满日志，是因为下游少了四道闸门。
+
+**六条（相互配套，不是取一）**：
+
+1. **瞬时故障重试**：`TLS handshake timeout` / 超时 / 连接层错误类文案纳入
+   `isTransientOpenListFailure`（复用现有 500ms/1500ms 退避、最多 3 次）。
+   此前这条错**一次都不重试**（判据只认 `read timed out` / `connect timed out` / `502|503|504`）。
+2. **失败记忆（同目录本轮只打一次）**：`fsListStrict` 把"失败本身"按 path 缓存 30s。
+   原先一个订阅的 N 条记录会对同一目录重打 N 次，每次都要等上游 10~30s 超时，
+   熔断计数还被直接顶到阈值 → 整批订阅一起停摆。
+3. **云下载目录轮内只真列一次**：`findCloudDownloadFilesStrict` 原先每条 item 都
+   `invalidate + list`；现改为本轮首次强制刷新 + 其余复用缓存。
+   顺带修了它名下名不副实的 `Strict`：内部走的是宽容版 `findFiles`（查询失败被吞成空列表），
+   于是"云下载目录里没有本集"曾是一个基于失败的结论，现在改用 `findFilesStrict`。
+4. **快照兜底（只信"有"）**：列举失败（`UNVERIFIABLE`）时先查订阅级快照，命中即改判 `EXISTS`。
+   已下载过的集不再因一次抖动全部显示"存疑"；**绝不**用快照断言"不存在"（那会删记录重下）。
+5. **缺席需要跨时间确认（新成因 `ABSENCE_UNCONFIRMED`）**：Alist/OpenList 的目录列举
+   **自带缓存**（存储驱动"缓存过期时间"默认可达 1 小时），刚下完/刚移动完去列目录常列不到；
+   一次判 `ABSENT` 就删记录重下会换来重复下载 + 与已落盘文件撞名。现在要求
+   两次都判没有、且相隔 ≥ **62 分钟**（`ABSENT_CONFIRM_INTERVAL_MS`，**刻意比默认 1 小时的目录缓存更长一点**，
+   否则两次观察可能落在同一份过期缓存里）才允许删记录。
+6. **自检页「OpenList → 上游网盘」**：从最近一次失败里提取上游域名与错误类别，
+   给出 DNS / MTU / IPv6 / 代理 / 限流的具体建议；进冷却的 WARN 也补上同一归因。
+
+#### 验证
+
+后端 `mvn test` 全量 **939 通过 / 0 失败 / 0 跳过**；前端 `pnpm build` 通过。
+新增用例：`OpenListUpstreamResilienceTest`(3，真 HTTP mock 含重试/失败记忆/云目录复用)、
+`DownloadSnapshotFallbackTest`(4)、`AbsenceConfirmationTest`(5，合成时间跑间隔边界，并断言间隔 > 1 小时)、
+`DoctorUpstreamSuggestionTest`(2)、`OpenListRateLimitTest` +2。
+反向验证（逐条摘掉修复，确认用例真会红）：摘 `isTransientMessage` → 重试用例失败；
+摘失败记忆 → `same_path_failure_is_only_attempted_once` 失败；恢复云目录每条强制刷新 →
+`cloud_dir_is_listed_once_per_round` 失败；把缺席闸门改成"永真" → `AbsenceConfirmationTest` 3 项失败。
+
+### 网盘 API 速率默认 3 → 1 次/秒
+
+默认速率下调到 **1 次/秒**（`OpenListApi.DEFAULT_API_PER_SECOND` / `ConfigUtil.format()` /
+`ani-rss-ui/src/js/config.js` / 设置页占位符与提示四处同步），取值区间 `[1,20]` 不变，
+用户显式配置的值优先。
+
+理由：网盘按账号限流，而一次递归列举天然是“1 + 子目录数”次往返（`findFilesStrict`），
+速率过高只会把账号打进服务端限流，随后被熔断停得更久——**限流比熔断便宜**。
+
+**连带影响（已同步调整用例口径，不是回归）**：单轮列举预算的“周期负担”=
+速率 × 周期秒 ÷ 4，默认周期 15 分钟下从 `3×900÷4 = 675` 变为 `1×900÷4 = 225`；
+预算取 `max(订阅数, min(订阅数×4, 周期负担))`，因此 50 订阅仍是 200（需求估算先撞线），
+而大库保底“每订阅一次列举”成立时，单轮列举耗时上限约为 `订阅数 ÷ 速率`
+（1000 订阅 ≈ 16.7 分钟，已超过默认 15 分钟周期，下一轮顺延）。
+觉得慢就调大速率或缩短周期；两者的联动口径由 `RssTask.resolveAffordableListingsPerRound` 统一。
+
+#### 验证
+
+`EnabledOnlyTest` 中与默认值硬编码相关的断言已改为按 `resolveAffordableListingsPerRound` 推导
+（不再把 675 写死，避免下次调默认值时用例“假绿”）；后端 `mvn test` 全量通过，
+前端 `pnpm build` 通过。
+
+### 「本地状态无法确认（网盘不可用）」拆开：成因可区分 + 目录不存在不再谎报故障
+
+**现象**：OpenList 模式下，一轮里每条已下载记录的日志都是同一句
+`本地状态无法确认（网盘不可用），本轮保留记录不重下 X`。用户看不出到底是网盘访问不了、
+还是实现自己有毛病——排查卡在这句话上。
+
+**根因（三层）**：
+
+1. **文案把三种完全不同的故障揉成一句**。能走到这句的路径至少有四条：熔断冷却中、
+   归位对账列举失败、索引被截断、兜底列举失败。统称"网盘不可用"之后，
+   "等 60s 冷却"和"下载路径配错了"在日志里长得一模一样。
+2. **冷却期在下载路径上完全静默**。`resolveOpenListPresence` 的冷却短路不打日志，
+   `relocateEpisodeFiles` 的逐条跳过只打 `debug`，于是冷却期用户只能看到那句 INFO。
+3. **「下载目录在网盘上不存在」被 `catch (Exception)` 吞成 UNVERIFIABLE**。它在需求文档
+   §2.1 里明确属于「目录不存在 → 视为确认没有 → ABSENT」，且 `OpenListApi.buildFileNames`
+   早就按这个口径处理。落到归位对账的宽 catch 后，路径/挂载配错这种配置问题被报成"网盘不可用"、
+   **每轮每集都报且永不收敛**（记录既不清、文件也不重下）。
+
+**改法**：
+
+- `PresenceDecision{presence, reason}`：判定结果带上 `UnknownReason`，调用方据此打印
+  `本地状态无法确认（网盘接口熔断冷却中，剩余 47s（冷却期内不发任何网盘请求））` 这类可直接行动的文案；
+  冷却新增独立成因 `UnknownReason.COOLDOWN`（进 `RssTask.countRoundUnknownReason`，
+  任务管理器「为什么无法确认」多一格「冷却中」），不再与「列举失败」混计。
+- 下载路径的存疑**开始计入** `unknownReasons`（此前只加 `localUnknown`，所以任务管理器那一行永远统计不到它们）。
+- `OpenListApi.logCooldownSkipOnce(...)`：同一个冷却窗口只打一条带剩余秒数的 INFO，既不刷屏也不静默。
+- `OpenList.relocateEpisodeFiles` 内层单独 catch `OpenListDirNotFoundException` → 回报 NOT_FOUND
+  （交兜底校验按「目录为空」判定），WARN 带上 `path=`；外层 catch 的文案改为
+  「网盘列举失败或异常，非「确认没有」」。
+- **「目录不存在」判定加了一道反向守卫**（同一天的真实日志逼出来的）：
+  `isDirNotFoundMessage` 先经过新增的 `isTransientMessage` 过滤，含
+  超时 / `tls handshake` / 连接层错误 / `too many requests` 的文案一律不得判成「目录不存在」。
+  证据：115 的 transient 错误是 `failed get objs: failed get dir: failed get parent list:
+  failed to list objs: Get "https://webapi.115.com/files?…": net/http: TLS handshake timeout`——
+  与真正的 `failed to get dir` 只差一个 "to"。匹配一旦被放宽，上面刚接上的 NOT_FOUND 分支
+  就会把超时读成"确认没有"并删记录重下。守卫只认网络层短语，不认裸数字（调用方常把含
+  `path=` / `tmdbid=` 的整串传进来，裸数字会在路径上假阳性）。
+
+#### 验证
+
+后端 `mvn test` 全量 **924 通过 / 0 失败 / 1 跳过**；前端 `pnpm build` 通过。新增用例
+`OpenListRelocateDirNotFoundTest`(3)、`DownloadPresenceDecisionTest` +2、`RoundLocalStateSummaryTest` +2、
+`OpenListRateLimitTest.transient_failure_never_reads_as_dir_not_found`(1)，
+并已做反向验证：把内层 catch 还原成 `throw e` → 新增用例报 `expected: <NOT_FOUND> but was: <UNVERIFIABLE>`；
+把冷却文案改回与列举失败同串 → `unknown_reason_texts_are_distinguishable` 失败；
+去掉 `isTransientMessage` 守卫 → `transient_failure_never_reads_as_dir_not_found` 失败。
+
+---
+
 ## 3.4.15 增量（2026-09）
 
 ### P0 修复：v3.4.14 启动失败（依赖被静默丢弃）

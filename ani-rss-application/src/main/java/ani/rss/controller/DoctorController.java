@@ -68,6 +68,7 @@ public class DoctorController extends BaseController {
         checks.add(checkNotification(config));
         checks.add(checkTasks());
         checks.add(checkOpenListRateLimit(config));
+        checks.add(checkOpenListUpstream(config));
         checks.add(checkLocalStateCache(config));
 
         Map<String, Integer> summary = new LinkedHashMap<>();
@@ -368,6 +369,71 @@ public class DoctorController extends BaseController {
                     "若反复触发，检查网盘是否在限流、token 是否有效"), start);
         }
         return timed(DoctorCheck.ok(key, label, evidence), start);
+    }
+
+    /**
+     * 「OpenList → 上游网盘」归因。
+     * <p>
+     * 用户看到的报错常常只有一句"网盘不可用"，而真正的因果埋在 OpenList 的 Go 错误里：
+     * <pre>
+     * Get "https://webapi.115.com/files?…": net/http: TLS handshake timeout
+     * </pre>
+     * 那是 <b>OpenList 所在机器到上游网盘</b> 的那一跳，不是 ani-rss 到 OpenList。
+     * 本项把最近一次列举失败摊开，并给出可直接照做的排查方向。
+     */
+    private DoctorCheck checkOpenListUpstream(Config config) {
+        String key = "openListUpstream";
+        String label = "OpenList → 上游网盘";
+        long start = System.currentTimeMillis();
+        if (!RssTask.isOpenListTool(config)) {
+            return timed(DoctorCheck.skip(key, label, "当前下载器不是 OpenList / Alist，无上游一跳"), start);
+        }
+        long lastAt = OpenListApi.getLastListingFailureAt();
+        if (lastAt <= 0L) {
+            return timed(DoctorCheck.ok(key, label,
+                    "本次运行尚未出现列举失败；失败记忆省下 " + OpenListApi.getListingFailureMemoHit()
+                            + " 次重复请求"), start);
+        }
+        String message = OpenListApi.getLastListingFailureMessage();
+        String host = OpenListApi.extractUpstreamHost(message);
+        String category = OpenListApi.classifyUpstreamFailure(message);
+        String evidence = StrUtil.format(
+                "最近一次列举失败（{} 前）：上游={}，类别={}；失败记忆省下 {} 次重复请求；原文: {}",
+                ((System.currentTimeMillis() - lastAt) / 1000L) + "s",
+                StrUtil.blankToDefault(host, "未识别"),
+                StrUtil.blankToDefault(category, "未知"),
+                OpenListApi.getListingFailureMemoHit(),
+                StrUtil.maxLength(message, 300));
+        return timed(DoctorCheck.warn(key, label, evidence, upstreamSuggestion(category)), start);
+    }
+
+    /**
+     * 上游失败类别 → 可执行建议。
+     * <p>
+     * 抽成纯函数是为了能直接固化：建议本身就是本项的价值，
+     * 把"TLS 握手超时"笼统地说成"检查网络"等于什么都没说。
+     */
+    static String upstreamSuggestion(String category) {
+        if (StrUtil.isBlank(category)) {
+            return "看 OpenList 自己的日志确认上游错误的完整原因";
+        }
+        if (category.startsWith("TLS 握手")) {
+            return "在 OpenList 所在机器/容器里测该域名：换 DNS（223.5.5.5）对比、确认容器 MTU 与宿主一致、"
+                    + "分别用 curl -4 / -6 试、检查宿主代理是否透传给容器";
+        }
+        if (category.contains("DNS")) {
+            return "在 OpenList 容器内 getent hosts 该域名，并与换 DNS 后的结果对比";
+        }
+        if (category.contains("限流")) {
+            return "调低「网盘 API 限流」速率、减少同时扫描的订阅、必要时重新登录上游网盘账号";
+        }
+        if (category.contains("连接")) {
+            return "检查 OpenList 到上游的代理 / 防火墙 / 出口是否被拦截";
+        }
+        if (category.contains("超时")) {
+            return "同 TLS 握手超时：优先查 DNS / MTU / IPv6 / 代理这四项";
+        }
+        return "看 OpenList 自己的日志确认上游错误的完整原因";
     }
 
     /**

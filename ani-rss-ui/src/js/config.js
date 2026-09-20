@@ -35,8 +35,8 @@ export let configData = {
     // 错峰更新：把一轮全量扫描分片提交，批间留间隔（后端默认开启）
     "staggeredUpdateEnable": true,
     "staggerBatchIntervalMs": 2000,
-    // 网盘 API 限流（令牌桶）与熔断：后端默认 3/s、突发 1、连续失败 3 次冷却 60s
-    "openListApiPerSecond": 3,
+    // 网盘 API 限流（令牌桶）与熔断：后端默认 1/s、突发 1、连续失败 3 次冷却 60s
+    "openListApiPerSecond": 1,
     "openListApiBurst": 1,
     "openListFailThreshold": 3,
     "openListCooldownSeconds": 60,

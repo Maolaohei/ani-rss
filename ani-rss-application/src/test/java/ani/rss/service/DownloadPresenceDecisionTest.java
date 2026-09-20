@@ -2,11 +2,14 @@ package ani.rss.service;
 
 import ani.rss.download.OfflineDownloader;
 import ani.rss.service.DownloadService.Presence;
+import ani.rss.service.DownloadService.UnknownReason;
+import cn.hutool.core.util.StrUtil;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -99,5 +102,41 @@ class DownloadPresenceDecisionTest {
         assertFalse(Presence.ABSENT.valid());
         assertFalse(Presence.UNVERIFIABLE.valid());
         assertFalse(Presence.RETRY_EXHAUSTED.valid());
+    }
+
+    // ---------------- 存疑成因必须可区分（2026-09-20） ----------------
+
+    /**
+     * 二次排查的卡点：三种完全不同的故障被同一句「网盘不可用」盖住，用户看到
+     * "都显示网盘不可用"，既分不清"等 60s 冷却"和"网盘坏了"，也看不出
+     * "下载路径配错"。文案本身就是可排查性，故在此固化。
+     */
+    @Test
+    @DisplayName("存疑成因文案必须可区分：冷却 ≠ 列举失败")
+    void unknown_reason_texts_are_distinguishable() {
+        String cooldown = DownloadService.unknownReasonText(UnknownReason.COOLDOWN);
+        String verifyFailed = DownloadService.unknownReasonText(UnknownReason.VERIFY_FAILED);
+        assertNotEquals(cooldown, verifyFailed, "冷却与列举失败不能共用一句话");
+        assertTrue(cooldown.contains("冷却"), cooldown);
+        assertTrue(verifyFailed.contains("列举失败"), verifyFailed);
+        for (UnknownReason reason : UnknownReason.values()) {
+            assertFalse(StrUtil.isBlank(DownloadService.unknownReasonText(reason)),
+                    "每种成因都要有可读文案，空白等于把用户又丢回「原因未知」: " + reason);
+        }
+    }
+
+    /**
+     * 判定结果必须带成因，且缺成因时不能变成 {@code null}
+     * （调用方直接把它交给计数与文案，null 会静默丢信息）。
+     */
+    @Test
+    @DisplayName("PresenceDecision 缺成因时归一成 NONE")
+    void presence_decision_normalises_null_reason() {
+        assertEquals(UnknownReason.NONE,
+                DownloadService.PresenceDecision.of(Presence.UNVERIFIABLE, null).reason());
+        assertTrue(DownloadService.PresenceDecision.of(Presence.UNVERIFIABLE, UnknownReason.COOLDOWN)
+                .unverifiable());
+        assertFalse(DownloadService.PresenceDecision.of(Presence.EXISTS, UnknownReason.NONE)
+                .unverifiable());
     }
 }

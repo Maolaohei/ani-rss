@@ -125,7 +125,7 @@ class EnabledOnlyTest {
     void budget_defaults_to_estimated_listings_not_subscription_count() {
         Config config = new Config();
         config.setOpenListApiBudgetPerRound(null);
-        // 50 订阅：需求估算 = 50 × 4 = 200；周期负担（默认 3 次/秒 × 15 分钟 ÷ 4）= 675 → 取 200。
+        // 50 订阅：需求估算 = 50 × 4 = 200；周期负担（默认 1 次/秒 × 15 分钟 ÷ 4）= 225 → 取 200。
         // 旧口径给的是 50，而每个订阅实际要 1 + 子目录数 次列举，大库必然中途耗尽。
         assertEquals(50 * RssTask.LISTINGS_PER_SUBSCRIPTION_ESTIMATE,
                 RssTask.resolveApiBudgetPerRound(config, 50));
@@ -150,15 +150,17 @@ class EnabledOnlyTest {
      * <p>
      * 这是<b>有意</b>的取舍，不是漏掉的边界：让每个订阅都至少能列举一次，好过让任意一批订阅
      * 完全不被校验——后者正是"一批订阅长期显示存疑"的成因，也正是本项要修的 bug。
-     * 代价是这一轮被限流拖住的时长约为 {@code 订阅数 ÷ 速率}（1000 订阅 / 3 次每秒 ≈ 5.5 分钟），
-     * 这已经低于默认 15 分钟周期；真要更快的全量扫描只能提高速率或缩短周期。
+     * 代价是这一轮被限流拖住的时长约为 {@code 订阅数 ÷ 速率}（1000 订阅 / 1 次每秒 ≈ 16.7 分钟，
+     * 已超过默认 15 分钟周期，下一轮会顺延）；真要更快的全量扫描只能提高速率或缩短周期。
      */
     @Test
     void library_larger_than_period_allowance_falls_back_to_one_listing_per_subscription() {
         Config config = new Config();
         config.setOpenListApiBudgetPerRound(null);
-        assertEquals(675, RssTask.resolveApiBudgetPerRound(config, 675),
+        int affordable = RssTask.resolveAffordableListingsPerRound(config);
+        assertEquals(affordable, RssTask.resolveApiBudgetPerRound(config, affordable),
                 "恰好等于周期负担时两者一致");
+        assertTrue(1000 > affordable, "前置条件：订阅数需超过周期负担，实际 " + affordable);
         assertEquals(1000, RssTask.resolveApiBudgetPerRound(config, 1000),
                 "超过周期负担后由保底值决定：每订阅一次列举，旧实现只给 200");
     }
@@ -171,7 +173,8 @@ class EnabledOnlyTest {
         // 200 订阅需要约 800 次列举；旧实现无论怎么算都被 200 硬顶压住，后半程订阅全被判「存疑」。
         assertTrue(budget > OpenListApi.MAX_API_BUDGET_PER_ROUND,
                 "大库的默认预算必须能突破 200，否则修复等于没做，实际 " + budget);
-        assertEquals(675, budget, "默认速率 3 次/秒、周期 15 分钟 → 周期负担 3×900÷4 = 675");
+        assertEquals(RssTask.resolveAffordableListingsPerRound(config), budget,
+                "200 订阅（需求 800 次）受周期负担约束，不得被 200 硬顶压回");
     }
 
     @Test
@@ -228,8 +231,8 @@ class EnabledOnlyTest {
 
     @Test
     void affordable_listings_uses_effective_rate_not_raw_config() {
-        // 速率未配置时应按限流器的默认值 3 计算，而不是当成 0
-        assertEquals(3 * 900 / 4, RssTask.resolveAffordableListingsPerRound(new Config()));
+        // 速率未配置时应按限流器的默认值 1 计算，而不是当成 0
+        assertEquals(1 * 900 / 4, RssTask.resolveAffordableListingsPerRound(new Config()));
         // 超过上限的速率按上限 20 钳制，与 OpenListApi.effectiveApiPerSecond 保持一致
         assertEquals(20 * 900 / 4,
                 RssTask.resolveAffordableListingsPerRound(new Config().setOpenListApiPerSecond(999)));

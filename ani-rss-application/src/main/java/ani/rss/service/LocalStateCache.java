@@ -314,6 +314,20 @@ public final class LocalStateCache {
     }
 
     /**
+     * 只读快照：命中且未过期时返回，否则返回 {@code null} —— <b>绝不触发构建</b>。
+     * <p>
+     * 供"网盘列举失败时先用已知事实兜一层"的场景：有新鲜快照就不必因为一次抖动报「存疑」。
+     * 调用方<b>只能用它证明"存在"</b> —— 快照可能带外过期（用户在网盘手动删了文件），
+     * 用它断言"不存在"会导致删记录重下。
+     */
+    public static Snapshot peek(Ani ani, String downloadPath) {
+        if (ani == null || StrUtil.isBlank(ani.getId())) {
+            return null;
+        }
+        return getFresh(key(ani.getId(), downloadPath));
+    }
+
+    /**
      * 失效某订阅的全部快照（含下载路径变化前的旧 key）。
      * <p>
      * 必须同时递增版本号：否则一个"失效前开始、失效后才结束"的构建会把旧结果写回来，

@@ -24,6 +24,8 @@ class RoundLocalStateSummaryTest {
         RssTask.RssJobState.localExists.set(0);
         RssTask.RssJobState.localUnknown.set(0);
         RssTask.RssJobState.localAbsent.set(0);
+        RssTask.RssJobState.unknownCooldown.set(0);
+        RssTask.RssJobState.unknownVerifyFailed.set(0);
     }
 
     @Test
@@ -60,5 +62,33 @@ class RoundLocalStateSummaryTest {
         assertEquals(0, summary.get("exists").intValue(), "新一轮必须从 0 开始，否则分布会跨轮累积失真");
         assertEquals(0, summary.get("unknown").intValue());
         assertEquals(0, summary.get("absent").intValue());
+    }
+
+    /**
+     * 「冷却」必须与「列举失败」分开计数：前者的对策是等一会儿，后者要去查网盘。
+     * 合并成一格就回到了"都显示网盘不可用"那个排查死角。
+     */
+    @Test
+    void unknown_reasons_are_counted_separately() {
+        RssTask.countRoundUnknownReason(DownloadService.UnknownReason.COOLDOWN);
+        RssTask.countRoundUnknownReason(DownloadService.UnknownReason.COOLDOWN);
+        RssTask.countRoundUnknownReason(DownloadService.UnknownReason.VERIFY_FAILED);
+        RssTask.countRoundUnknownReason(DownloadService.UnknownReason.ABSENCE_UNCONFIRMED);
+
+        Map<String, Integer> reasons = RssTask.getRoundUnknownReasonSummary();
+        assertEquals(2, reasons.get("cooldown").intValue());
+        assertEquals(1, reasons.get("verifyFailed").intValue());
+        assertEquals(1, reasons.get("absenceUnconfirmed").intValue());
+    }
+
+    @Test
+    void unknown_reason_counters_reset_with_round() {
+        RssTask.countRoundUnknownReason(DownloadService.UnknownReason.COOLDOWN);
+        RssTask.countRoundUnknownReason(DownloadService.UnknownReason.VERIFY_FAILED);
+        RssTask.RssJobState.resetRoundState(RssTask.JobSource.PERIODIC, "启动中");
+
+        Map<String, Integer> reasons = RssTask.getRoundUnknownReasonSummary();
+        assertEquals(0, reasons.get("cooldown").intValue(), "存疑成因不能跨轮累积");
+        assertEquals(0, reasons.get("verifyFailed").intValue());
     }
 }

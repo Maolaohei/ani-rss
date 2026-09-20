@@ -89,6 +89,66 @@ class OpenListRateLimitTest {
         assertEquals(0L, OpenListApi.getCooldownTriggeredCount());
     }
 
+    /**
+     * 反向守卫：网络层故障即使文案里带着 "failed to get dir"，也不得被判成「目录不存在」。
+     * <p>
+     * 真实日志（2026-09-20）：115 把底层故障层层包在 {@code failed get dir} 里，
+     * 与真正的目录不存在（{@code failed to get dir}）只差一个 "to"：
+     * <pre>
+     * fs/list 失败 code=500 path=/115/…/Season 2
+     * message=failed get objs: failed get dir: failed get parent list: failed to list objs:
+     *         Get "https://webapi.115.com/files?aid=1&…": net/http: TLS handshake timeout
+     * </pre>
+     * 匹配一旦被放宽一步，这类超时就会变成"确认没有"→ 删记录 + 整季重新下单。
+     */
+    @Test
+    void transient_failure_never_reads_as_dir_not_found() {
+        String realLog = "failed get objs: failed get dir: failed get parent list: failed to list objs: "
+                + "Get \"https://webapi.115.com/files?aid=1&cid=3469352942455228193&limit=1000\": "
+                + "net/http: TLS handshake timeout";
+        assertTrue(OpenListApi.isTransientMessage(realLog), "TLS 握手超时属于网络层故障");
+        assertFalse(OpenListApi.isDirNotFoundMessage(realLog));
+
+        // 关键一格：文案恰好命中目录不存在的形状，但同时含网络层故障标记 → 必须让路
+        String composite = "failed to get dir: failed to list objs: net/http: TLS handshake timeout";
+        assertTrue(OpenListApi.isTransientMessage(composite));
+        assertFalse(OpenListApi.isDirNotFoundMessage(composite),
+                "超时被读成「确认没有」会删掉种子记录并重新下单");
+
+        // 真正的目录不存在不受影响（无网络层标记）
+        assertTrue(OpenListApi.isDirNotFoundMessage("failed to get dir: object not found"));
+        assertFalse(OpenListApi.isTransientMessage("failed to get dir: object not found"));
+    }
+
+    /**
+     * 上游一跳的故障归因：日志与自检页都要能回答"到底哪一跳坏了"。
+     */
+    @Test
+    void upstream_failure_is_classified_for_logs_and_doctor() {
+        String real = "fs/list 失败 code=500 path=/115/动漫/转存/追番/克雷瓦提斯 (2025) [tmdbid=258348]/Season 2 "
+                + "message=failed get objs: failed to list objs: Get \"https://webapi.115.com/files?aid=1\": "
+                + "net/http: TLS handshake timeout";
+        assertEquals("webapi.115.com", OpenListApi.extractUpstreamHost(real));
+        assertTrue(OpenListApi.classifyUpstreamFailure(real).startsWith("TLS 握手"),
+                OpenListApi.classifyUpstreamFailure(real));
+        assertTrue(OpenListApi.upstreamHint(new IllegalStateException(real)).contains("webapi.115.com"));
+        // 认不出上游域名时不硬编（日志里不该出现 "上游=null"）
+        assertEquals("", OpenListApi.extractUpstreamHost("failed to get dir: object not found"));
+        assertEquals("", OpenListApi.upstreamHint(new IllegalStateException("boom")));
+    }
+
+    /**
+     * 这条是线上反复刷屏的那个形状：不认它的话一次抖动就直接记一次失败，连试都不试。
+     */
+    @Test
+    void upstream_timeout_is_transient_so_it_gets_retried() {
+        IllegalStateException e = new IllegalStateException("fs/list 失败 code=500 path=/115/x "
+                + "message=failed to list objs: Get \"https://webapi.115.com/files\": "
+                + "net/http: TLS handshake timeout");
+        assertTrue(OpenListApi.isTransientOpenListFailure(e), "上游握手超时是瞬时故障，必须重试");
+        assertFalse(OpenListApi.isTransientOpenListFailure(new OpenListApi.OpenListDirNotFoundException(
+                "failed to get dir: object not found")), "目录不存在是业务结果，不该重试");
+    }
     // ---------------- 熔断 ----------------
 
     @Test

@@ -130,8 +130,8 @@
       <div class="num-field">
         <el-text class="num-label" size="small">速率</el-text>
         <el-input-number v-model="props.config['openListApiPerSecond']" :min="1" :max="20"
-                         controls-position="right" placeholder="默认 3"/>
-        <el-text class="num-hint" size="small" type="info">次/秒，默认 3</el-text>
+                         controls-position="right" placeholder="默认 1"/>
+        <el-text class="num-hint" size="small" type="info">次/秒，默认 1</el-text>
       </div>
       <div class="num-field">
         <el-text class="num-label" size="small">突发</el-text>

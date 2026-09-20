@@ -2437,6 +2437,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         // 熔断冷却期：本轮不发任何网盘请求，直接回报「无法判断」。
         // 绝不能返回 NOT_FOUND —— 调用方会把"没查到"当成"确认没有"，进而删记录重下。
         if (OpenListApi.isListingCoolingDown()) {
+            OpenListApi.logCooldownSkipOnce("归位对账");
             log.debug("归位对账跳过: 网盘接口冷却中（剩余 {}ms） {}",
                     OpenListApi.listingCooldownRemainingMs(), item.getReName());
             return RelocateResult.UNVERIFIABLE;
@@ -2452,9 +2453,21 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             // 归位对账便一路走到 NOT_FOUND —— 调用方据此删记录重下。
             // 2026-09-18 日志里「递归列出网盘目录失败 …TLS handshake timeout」紧跟着
             // 「归位对账未找到」就是这个链条。
-            List<OpenListFileInfo> files = api.findFilesStrict(savePath).stream()
-                    .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
-                    .toList();
+            List<OpenListFileInfo> files;
+            try {
+                files = api.findFilesStrict(savePath).stream()
+                        .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
+                        .toList();
+            } catch (OpenListApi.OpenListDirNotFoundException e) {
+                // 「下载目录在网盘上不存在」按既定口径是业务事实（= 确认没有），不是查询失败。
+                // 落在外层 catch(Exception) 会把这条变成 UNVERIFIABLE，于是该目录下每条记录
+                // 每轮都报"网盘不可用"且永不收敛（记录不清、文件也不重下）。
+                // 回报 NOT_FOUND，交由调用方的兜底校验按「目录为空」判定（与
+                // OpenListApi.buildFileNames 对同一异常的处理保持同一口径）。
+                log.warn("归位对账: 网盘下载目录不存在，按「确认没有」处理 path={} {}",
+                        savePath, item.getReName());
+                return RelocateResult.NOT_FOUND;
+            }
             String saveNorm = trimTrailingSlash(savePath);
             List<OpenListFileInfo> topVideos = files.stream()
                     .filter(f -> FileUtils.isVideoFormat(f.getName()))
@@ -2602,8 +2615,9 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             // 对账没能跑完（列举失败/冷却/超时/移动校验异常）≠ 文件不存在。
             // 必须回报 UNVERIFIABLE 让调用方保留记录；返回 NOT_FOUND 会被读成"确认没有"，
             // 一次网盘抖动就会演变成"删记录 + 整季重新下单"。
-            log.warn("归位对账无法完成（网盘不可用或异常），本轮保留记录 {}: {}",
-                    item.getReName(), ExceptionUtils.getMessage(e));
+            // 注意：目录不存在已在内层单独摘出（它不是故障），走到这里的都是真故障。
+            log.warn("归位对账无法完成（网盘列举失败或异常，非「确认没有」），本轮保留记录 path={} {}: {}",
+                    savePath, item.getReName(), ExceptionUtils.getMessage(e));
             return RelocateResult.UNVERIFIABLE;
         }
     }
@@ -2780,8 +2794,15 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             return List.of();
         }
         try {
-            api.invalidateFindFilesCache(cloudDir);
-            return findFiles(cloudDir);
+            // 归位对账用：本轮第一次读云下载目录时才强制刷新（刚提交的离线任务可能刚落盘），
+            // 之后复用共享列举缓存。原先是每条 item 都失效重列——一个订阅 12 集就是 12 次请求，
+            // 网盘一抖就变成 12 次失败（每次都等上游超时，还会把熔断计数顶到阈值）。
+            if (OpenListApi.markCloudListingRefreshedThisRound(cloudDir)) {
+                api.invalidateFindFilesCache(cloudDir);
+            }
+            // 严格版：宽容版会把"查询失败"吞成空列表，于是"云下载目录里没有本集"
+            // 就成了一个基于失败的结论（本方法名里的 Strict 原先并没有真的严格）。
+            return api.findFilesStrict(cloudDir);
         } catch (Exception e) {
             String message = ExceptionUtils.getMessage(e);
             if (OpenListApi.isDirNotFoundMessage(message)) {

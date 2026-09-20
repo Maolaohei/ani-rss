@@ -104,14 +104,18 @@ public class RssTask implements BaseTask {
         /** 判定为"确认不存在"（已下发下载）的条目数 */
         static final AtomicInteger localAbsent = new AtomicInteger(0);
         // ---- F5-6 存疑成因分布（"为什么无法确认"比"有多少条无法确认"更有用）----
-        /** 网盘列举失败 / 熔断冷却中 */
+        /** 网盘列举失败 / 查询失败 */
         static final AtomicInteger unknownVerifyFailed = new AtomicInteger(0);
+        /** 熔断冷却中：本轮一个请求都没发（等一会儿会自愈，与"网盘坏了"区别对待） */
+        static final AtomicInteger unknownCooldown = new AtomicInteger(0);
         /** 本轮 API 预算耗尽，主动放弃校验 */
         static final AtomicInteger unknownBudgetExhausted = new AtomicInteger(0);
         /** 索引被截断，无法断言"不存在" */
         static final AtomicInteger unknownIncomplete = new AtomicInteger(0);
         /** 下载器里已有同名任务，文件尚未改名落地 */
         static final AtomicInteger unknownDownloading = new AtomicInteger(0);
+        /** 判为"没有文件"但尚未跨时间确认（网盘目录列举自带缓存） */
+        static final AtomicInteger unknownAbsenceUnconfirmed = new AtomicInteger(0);
         /**
          * 本轮失败的订阅明细（含归因与建议）。
          * <p>
@@ -201,9 +205,11 @@ public class RssTask implements BaseTask {
             RssJobState.localUnknown.set(0);
             RssJobState.localAbsent.set(0);
             RssJobState.unknownVerifyFailed.set(0);
+            RssJobState.unknownCooldown.set(0);
             RssJobState.unknownBudgetExhausted.set(0);
             RssJobState.unknownIncomplete.set(0);
             RssJobState.unknownDownloading.set(0);
+            RssJobState.unknownAbsenceUnconfirmed.set(0);
             RssJobState.failedSubscriptions.clear();
             RssJobState.jobScope.set("starting");
             RssJobState.jobTitle.set("");
@@ -240,9 +246,11 @@ public class RssTask implements BaseTask {
             RssJobState.localUnknown.set(0);
             RssJobState.localAbsent.set(0);
             RssJobState.unknownVerifyFailed.set(0);
+            RssJobState.unknownCooldown.set(0);
             RssJobState.unknownBudgetExhausted.set(0);
             RssJobState.unknownIncomplete.set(0);
             RssJobState.unknownDownloading.set(0);
+            RssJobState.unknownAbsenceUnconfirmed.set(0);
             RssJobState.jobMessage.set(idleMessage);
         }
 
@@ -2316,9 +2324,11 @@ public class RssTask implements BaseTask {
         }
         switch (reason) {
             case VERIFY_FAILED -> RssJobState.unknownVerifyFailed.incrementAndGet();
+            case COOLDOWN -> RssJobState.unknownCooldown.incrementAndGet();
             case BUDGET_EXHAUSTED -> RssJobState.unknownBudgetExhausted.incrementAndGet();
             case INDEX_INCOMPLETE -> RssJobState.unknownIncomplete.incrementAndGet();
             case DOWNLOADING -> RssJobState.unknownDownloading.incrementAndGet();
+            case ABSENCE_UNCONFIRMED -> RssJobState.unknownAbsenceUnconfirmed.incrementAndGet();
             default -> {
             }
         }
@@ -2330,9 +2340,11 @@ public class RssTask implements BaseTask {
     public static Map<String, Integer> getRoundUnknownReasonSummary() {
         return Map.of(
                 "verifyFailed", RssJobState.unknownVerifyFailed.get(),
+                "cooldown", RssJobState.unknownCooldown.get(),
                 "budgetExhausted", RssJobState.unknownBudgetExhausted.get(),
                 "indexIncomplete", RssJobState.unknownIncomplete.get(),
-                "downloading", RssJobState.unknownDownloading.get());
+                "downloading", RssJobState.unknownDownloading.get(),
+                "absenceUnconfirmed", RssJobState.unknownAbsenceUnconfirmed.get());
     }
 
     /**
