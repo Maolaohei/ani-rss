@@ -57,3 +57,18 @@ build.info
 
 # Windows 组件服务误以未展开的 %SystemDrive% 为目录名写出的缓存, 不属于仓库内容
 %SystemDrive%/
+
+# ---- 本机调试 / AI 会话 / 本地构建脚本产生的临时物：不进仓库 ----
+/.workbuddy-ai/
+/.codex-tmp/
+/.mimocode/
+/.reasonix/
+/.rss-samples/
+/ani-rss-ui/design/
+/build_compile.bat
+/build_log.txt
+/distill_*.py
+/inst_ani.json
+/openalistAPI文档.txt
+/reasonix.toml
+/t.bin
