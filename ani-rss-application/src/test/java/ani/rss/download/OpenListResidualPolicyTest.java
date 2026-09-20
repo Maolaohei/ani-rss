@@ -478,6 +478,26 @@ class OpenListResidualPolicyTest {
         assertFalse(OpenList.isWashTarget(null, "S01E05", null));
     }
 
+    /**
+     * 洗版目标必须"整体相等"，不能退化成前缀包含。
+     * <p>
+     * 旧实现用 {@code name.contains(seasonKey)}：{@code S01E01} 会命中 {@code S01E010}
+     * 与 {@code S01E01.5}（后者是本仓库明确区分的独立一集，索引键就是 {@code 1:1.5}）——
+     * 替换一集时顺手删掉别的集，且无法从日志里看出来。
+     */
+    @Test
+    void wash_target_requires_exact_sxxexx_not_prefix() {
+        assertFalse(OpenList.isWashTarget("Show S01E010.mkv", "S01E01", null),
+                "S01E010 不是 S01E01");
+        assertFalse(OpenList.isWashTarget("Show S01E01.5.mkv", "S01E01", null),
+                ".5 集必须与整数集区分开");
+        assertTrue(OpenList.isWashTarget("Show S01E01.5.mkv", "S01E01.5", null),
+                ".5 集自身仍可被自己的集数命中");
+        // 大小写不敏感：网盘/下载器回的名字大小写不保证
+        assertTrue(OpenList.isWashTarget("show s01e05.mkv", "S01E05", null));
+        assertTrue(OpenList.isWashTarget("Show.S01E05.1080p.mkv", "S01E05", null));
+    }
+
     @Test
     void probeStall_window_state_machine() {
         long now = 1_000_000L;

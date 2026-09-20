@@ -17,6 +17,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
@@ -53,6 +54,8 @@ class StandbySweepTest {
      */
     private static class StubDownloader implements BaseDownload {
         final AtomicReference<String> deletedName = new AtomicReference<>();
+        /** 全部被删任务（同集多条残留时必须全部删掉） */
+        final List<String> deletedNames = Collections.synchronizedList(new ArrayList<>());
         final AtomicReference<Boolean> deletedWithFiles = new AtomicReference<>();
         final AtomicReference<TorrentsInfo> lastDeleted = new AtomicReference<>();
         volatile List<TorrentsInfo> torrents = List.of();
@@ -75,6 +78,7 @@ class StandbySweepTest {
         @Override
         public Boolean delete(TorrentsInfo torrentsInfo, Boolean deleteFiles) {
             deletedName.set(torrentsInfo.getName());
+            deletedNames.add(torrentsInfo.getName());
             deletedWithFiles.set(deleteFiles);
             lastDeleted.set(torrentsInfo);
             return true;
@@ -283,5 +287,84 @@ class StandbySweepTest {
 
         assertNull(stub.deletedName.get(), "备用条目下载时不得反向清理任务");
         assertTrue(file.exists(), "备用条目下载时不得反向清理文件");
+    }
+
+    // --------------------------------------------------- 同集多条备用任务：全删
+
+    @Test
+    void sweep_deletes_all_standby_tasks_of_same_episode() {
+        // 只删 findFirst 会让其余残留任务继续占位（而文件侧是全清）——两边口径必须一致
+        TorrentsInfo first = torrent("测试番剧 S01E05", "bbbbbbbbbbbbbbbb", standbyTags());
+        TorrentsInfo second = torrent("测试番剧 S01E05 v2", "cccccccccccccccc", standbyTags());
+        givenTorrents(first, second);
+
+        downloadService.deleteStandbyRss(ani(), item(true), MASTER_HASH, new HashSet<>());
+
+        assertEquals(List.of("测试番剧 S01E05", "测试番剧 S01E05 v2"), stub.deletedNames,
+                "同一集的多条备用任务必须全删");
+    }
+
+    // ------------------------------------------------------- 递归清扫与快照键口径
+
+    @Test
+    void snapshot_is_recursive_with_relative_keys() {
+        File sub = new File(tempDir, "残留目录");
+        assertTrue(sub.mkdirs());
+        FileUtil.writeUtf8String("a", new File(tempDir, "测试番剧 S01E05.mkv"));
+        FileUtil.writeUtf8String("b", new File(sub, "测试番剧 S01E05.ass"));
+
+        Set<String> snapshot = downloadService.snapshotExistingFiles(tempDir.getAbsolutePath());
+
+        assertTrue(snapshot.contains("测试番剧 S01E05.mkv"));
+        assertTrue(snapshot.contains("残留目录"), "目录本身也要进快照");
+        assertTrue(snapshot.contains("残留目录/测试番剧 S01E05.ass"),
+                "子目录内容必须以相对路径进快照，否则递归清扫清不到");
+    }
+
+    @Test
+    void sweep_recurses_into_subdirs_using_relative_paths() {
+        File sub = new File(tempDir, "残留目录");
+        assertTrue(sub.mkdirs());
+        File oldInSub = FileUtil.writeUtf8String("old", new File(sub, "测试番剧 S01E05.mkv"));
+        // 用生产同款快照（递归 + 相对路径）——手写快照很容易漏掉目录项，反而测不出问题
+        Set<String> snapshot = downloadService.snapshotExistingFiles(tempDir.getAbsolutePath());
+        // 提交后才落地的新版本：不在快照里
+        File freshInSub = FileUtil.writeUtf8String("new", new File(sub, "测试番剧 S01E05 v2.mkv"));
+
+        downloadService.deleteStandbyRss(ani(), item(true), null, snapshot);
+
+        assertFalse(oldInSub.exists(), "子目录里提交前就存在的同集旧文件也应被清理");
+        assertTrue(freshInSub.exists(), "提交后才落地的文件仍不能删");
+        assertTrue(sub.exists(), "目录名不含 SxxExx，不应被整棵删掉");
+    }
+
+    @Test
+    void sweep_does_not_enter_dirs_created_after_submit() {
+        // 提交后才出现的目录整棵都是新的：目录名不在快照里 → 不删也不递归进去
+        File sub = new File(tempDir, "提交后新建的目录");
+        assertTrue(sub.mkdirs());
+        File inside = FileUtil.writeUtf8String("x", new File(sub, "测试番剧 S01E05.mkv"));
+        Set<String> snapshot = new HashSet<>();
+
+        downloadService.deleteStandbyRss(ani(), item(true), null, snapshot);
+
+        assertTrue(inside.exists(), "新目录里的文件属于主RSS版本，绝不能删");
+    }
+
+    @Test
+    void sweep_never_deletes_neighbouring_episodes() {
+        // S01E01 不得命中 S01E010 / S01E01.5（后者是本仓库明确区分的集数）
+        File e10 = FileUtil.writeUtf8String("x", new File(tempDir, "测试番剧 S01E010.mkv"));
+        File e1_5 = FileUtil.writeUtf8String("y", new File(tempDir, "测试番剧 S01E01.5.mkv"));
+        File e1 = FileUtil.writeUtf8String("z", new File(tempDir, "测试番剧 S01E01.mkv"));
+        Set<String> snapshot = new HashSet<>(List.of(e10.getName(), e1_5.getName(), e1.getName()));
+
+        Item item1 = item(true);
+        item1.setReName("测试番剧 S01E01").setEpisode(1.0);
+        downloadService.deleteStandbyRss(ani(), item1, null, snapshot);
+
+        assertFalse(e1.exists(), "本集旧文件应被清理");
+        assertTrue(e10.exists(), "S01E010 不是 S01E01，绝不能删");
+        assertTrue(e1_5.exists(), ".5 集是独立的一集，绝不能删");
     }
 }

@@ -157,6 +157,19 @@ class StandbyPlaceholderTest {
                 "未知字幕组");
     }
 
+    /**
+     * 走生产路径的"先找可清除占位、再真正删"两步。
+     * <p>
+     * 旧用例调的是 {@code removeStandbyPlaceholder}（"检测并立即删除"入口）——
+     * 该入口在 P0 改造后已无生产调用者（统一走"登记 → 主RSS提交成功后才删"），
+     * 已删除；这里直接组合两个真实方法，语义与原断言完全一致。
+     */
+    private boolean removePlaceholder(Ani ani, Item item, List<TorrentsInfo> torrentsInfos,
+                                     Set<String> localEpisodeIndex) {
+        return downloadService.removeStandbyPlaceholderTorrent(ani, item, torrentsInfos, localEpisodeIndex,
+                downloadService.findRemovableStandbyPlaceholder(ani, item, torrentsInfos));
+    }
+
     @Test
     void placeholder_removed_master_replaces() {
         // 备用RSS占位(同名任务+备用标签+已重命名): 删除任务与文件, 返回 true 放行主RSS
@@ -164,7 +177,7 @@ class StandbyPlaceholderTest {
         List<TorrentsInfo> torrentsInfos = new ArrayList<>(List.of(standbyTorrent));
         Set<String> localEpisodeIndex = new HashSet<>(List.of("1:5.0", "2:3.0"));
 
-        boolean removed = downloadService.removeStandbyPlaceholder(ani(), item(true), torrentsInfos, localEpisodeIndex);
+        boolean removed = removePlaceholder(ani(), item(true), torrentsInfos, localEpisodeIndex);
 
         assertTrue(removed, "备用占位应被识别并清除");
         assertEquals("测试番剧 S01E05", stub.deletedName.get(), "应删除备用占位任务");
@@ -182,7 +195,7 @@ class StandbyPlaceholderTest {
         List<TorrentsInfo> torrentsInfos = new ArrayList<>(List.of(masterTorrent));
         Set<String> localEpisodeIndex = new HashSet<>(List.of("1:5.0"));
 
-        boolean removed = downloadService.removeStandbyPlaceholder(ani(), item(true), torrentsInfos, localEpisodeIndex);
+        boolean removed = removePlaceholder(ani(), item(true), torrentsInfos, localEpisodeIndex);
 
         assertFalse(removed, "主RSS自身任务不应被当作备用占位");
         assertNull(stub.deletedName.get(), "不应发生删除");
@@ -195,7 +208,7 @@ class StandbyPlaceholderTest {
         // 备用条目自身不触发替换(只有主RSS条目才洗版)
         List<TorrentsInfo> torrentsInfos = new ArrayList<>(List.of(torrent("测试番剧 S01E05", standbyTags())));
 
-        boolean removed = downloadService.removeStandbyPlaceholder(ani(), item(false), torrentsInfos, new HashSet<>());
+        boolean removed = removePlaceholder(ani(), item(false), torrentsInfos, new HashSet<>());
 
         assertFalse(removed, "备用条目不应触发占位替换");
         assertNull(stub.deletedName.get());
@@ -207,7 +220,7 @@ class StandbyPlaceholderTest {
         ConfigUtil.CONFIG.setCoexist(true);
         List<TorrentsInfo> torrentsInfos = new ArrayList<>(List.of(torrent("测试番剧 S01E05", standbyTags())));
 
-        boolean removed = downloadService.removeStandbyPlaceholder(ani(), item(true), torrentsInfos, new HashSet<>());
+        boolean removed = removePlaceholder(ani(), item(true), torrentsInfos, new HashSet<>());
 
         assertFalse(removed, "共存模式不进行替换");
         assertNull(stub.deletedName.get());
@@ -219,7 +232,7 @@ class StandbyPlaceholderTest {
         ConfigUtil.CONFIG.setDelete(false);
         List<TorrentsInfo> torrentsInfos = new ArrayList<>(List.of(torrent("测试番剧 S01E05", standbyTags())));
 
-        boolean removed = downloadService.removeStandbyPlaceholder(ani(), item(true), torrentsInfos, new HashSet<>());
+        boolean removed = removePlaceholder(ani(), item(true), torrentsInfos, new HashSet<>());
 
         assertFalse(removed, "洗版关闭时不替换");
         assertNull(stub.deletedName.get());
@@ -233,7 +246,7 @@ class StandbyPlaceholderTest {
         TorrentsInfo standbyTorrent = torrent("测试番剧 S01E05", tagsWithoutRename);
         List<TorrentsInfo> torrentsInfos = new ArrayList<>(List.of(standbyTorrent));
 
-        boolean removed = downloadService.removeStandbyPlaceholder(ani(), item(true), torrentsInfos, new HashSet<>());
+        boolean removed = removePlaceholder(ani(), item(true), torrentsInfos, new HashSet<>());
 
         assertFalse(removed, "未完成重命名的占位应等待下轮");
         assertNull(stub.deletedName.get());
@@ -247,7 +260,7 @@ class StandbyPlaceholderTest {
         TorrentsInfo standbyTorrent = torrent("测试番剧 S01E05", standbyTags());
         List<TorrentsInfo> torrentsInfos = new ArrayList<>(List.of(standbyTorrent));
 
-        boolean removed = downloadService.removeStandbyPlaceholder(ani(), item(true), torrentsInfos, new HashSet<>());
+        boolean removed = removePlaceholder(ani(), item(true), torrentsInfos, new HashSet<>());
 
         assertFalse(removed, "删除失败应等待下轮");
         assertTrue(torrentsInfos.contains(standbyTorrent));
@@ -259,7 +272,7 @@ class StandbyPlaceholderTest {
         TorrentsInfo otherEpisode = torrent("测试番剧 S01E06", standbyTags());
         List<TorrentsInfo> torrentsInfos = new ArrayList<>(List.of(otherEpisode));
 
-        boolean removed = downloadService.removeStandbyPlaceholder(ani(), item(true), torrentsInfos, new HashSet<>());
+        boolean removed = removePlaceholder(ani(), item(true), torrentsInfos, new HashSet<>());
 
         assertFalse(removed, "不同集的备用任务不应被误删");
         assertNull(stub.deletedName.get());
@@ -272,7 +285,7 @@ class StandbyPlaceholderTest {
         TorrentsInfo standbyTorrent = torrent("[字幕组] 测试番剧 - 05 [1080p][S01E05]", standbyTags());
         List<TorrentsInfo> torrentsInfos = new ArrayList<>(List.of(standbyTorrent));
 
-        boolean removed = downloadService.removeStandbyPlaceholder(ani(), item(true), torrentsInfos, new HashSet<>());
+        boolean removed = removePlaceholder(ani(), item(true), torrentsInfos, new HashSet<>());
 
         assertTrue(removed, "按 SxxExx 兜底应命中备用占位");
         assertEquals("[字幕组] 测试番剧 - 05 [1080p][S01E05]", stub.deletedName.get());
@@ -281,7 +294,7 @@ class StandbyPlaceholderTest {
     @Test
     void no_torrents_noop() {
         // 下载器无任务(如文件已被手动清理): 保持原跳过行为
-        boolean removed = downloadService.removeStandbyPlaceholder(ani(), item(true), new ArrayList<>(), new HashSet<>());
+        boolean removed = removePlaceholder(ani(), item(true), new ArrayList<>(), new HashSet<>());
 
         assertFalse(removed);
         assertNull(stub.deletedName.get());

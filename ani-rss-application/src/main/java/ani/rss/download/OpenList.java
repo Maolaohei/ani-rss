@@ -735,27 +735,21 @@ public class OpenList implements BaseDownload, OfflineDownloader {
 
             // 洗版：仅在即将新提交离线时做一次；复用/10008 等待路径禁止洗，避免重试风暴删掉目标
             if (!skipNewSubmit && StrUtil.isBlank(tid) && standbyRss && delete && !coexist) {
-                String s = ReUtil.get(StringEnum.SEASON_REG, finalRenameBase, 0);
-                if (StrUtil.isNotBlank(s)) {
-                    String finalSavePath = savePath;
-                    String seasonKey = s;
+                String seasonKey = ReUtil.get(StringEnum.SEASON_REG, finalRenameBase, 0);
+                if (StrUtil.isNotBlank(seasonKey)) {
                     // 本次任务目录（刚 mkdir 创建）：必须排除，否则洗版会把刚创建的任务目录当旧文件删掉，
                     // 导致 115 离线任务落点目录被删 → 任务 Failed → 下轮提交被 10008 挡住 → 死循环
                     String taskDirPath = trimTrailingSlash(path);
                     String currentDirName = taskDirPath.substring(taskDirPath.lastIndexOf('/') + 1);
                     try {
-                        fsList(savePath, true)
-                                .stream()
-                                .map(OpenListFileInfo::getName)
-                                .filter(name -> isWashTarget(name, seasonKey, currentDirName))
-                                .forEach(name -> {
-                                    fsRemove(finalSavePath, List.of(name));
-                                    log.info("已开启备用RSS, 自动删除 {}/{}", finalSavePath, name);
-                                });
+                        if (washStandbyFiles(savePath, seasonKey, currentDirName) == 0) {
+                            log.debug("洗版无需清理 {}/{}", savePath, seasonKey);
+                        }
                     } catch (Exception e) {
-                        // 洗版是辅助操作：删除失败（115 异步 990009/超时等）仅告警，不得中断本次下载
-                        log.warn("洗版删除旧文件失败(不影响本次下载) {}/{}: {}",
-                                finalSavePath, seasonKey, ExceptionUtils.getMessage(e));
+                        // 洗版是辅助操作：列举/删除失败（115 异步 990009/超时等）仅告警，不得中断本次下载。
+                        // 文案必须说清"本次跳过"：否则用户会以为已经替换完成。
+                        log.warn("本次洗版跳过（列举或删除失败，旧文件保留，下轮可再试） {}/{}: {}",
+                                savePath, seasonKey, ExceptionUtils.getMessage(e));
                     }
                 }
             }
@@ -2700,6 +2694,42 @@ public class OpenList implements BaseDownload, OfflineDownloader {
      * 洗版删除目标判定：名称含 seasonKey 的旧文件/目录，但排除本次任务目录
      * （刚 mkdir 创建的目录，否则洗版会删掉它导致离线任务落点丢失）
      */
+    /**
+     * 备用RSS洗版：删除目标目录下与本次同集、且不是本任务目录的旧条目。
+     * <p>
+     * 用<b>严格版</b>列举：宽容版会把"列举失败"吞成空列表 —— 洗版就会静默地什么都不删，
+     * 而用户以为已经替换完成（同一文件里"P0-3：必须用 fsListStrict"就是这个道理）。
+     *
+     * @param savePath       目标目录（网盘虚拟路径）
+     * @param seasonKey      本次目标集的 SxxExx
+     * @param currentDirName 刚 mkdir 的本任务目录名：必须排除（删掉任务落点 = 任务 Failed → 10008 死循环）
+     * @return 实际删除的条目数
+     * @throws RuntimeException 列举或删除失败（调用方仅 WARN，不中断本次下载）
+     */
+    int washStandbyFiles(String savePath, String seasonKey, String currentDirName) {
+        List<String> targets = api.fsListStrict(savePath, true).stream()
+                .map(OpenListFileInfo::getName)
+                .filter(name -> isWashTarget(name, seasonKey, currentDirName))
+                .toList();
+        for (String name : targets) {
+            fsRemove(savePath, List.of(name));
+            log.info("已开启备用RSS, 自动删除 {}/{}", savePath, name);
+        }
+        return targets.size();
+    }
+
+    /**
+     * 洗版目标判定（纯函数，便于单测固化）。
+     * <p>
+     * 必须用"提取出 SxxExx 后<b>整体相等</b>"，不能用 {@code name.contains(seasonKey)}：
+     * 后者会把 {@code S01E010} / {@code S01E01.5} 都当成 {@code S01E01} 删掉 ——
+     * 而本仓库明确区分 {@code .5} 集（集数索引键口径就是 {@code 2:1.5}）。
+     * 大小写也要忽略：网盘/下载器回的名字大小写不保证（与本地路径的 equalsIgnoreCase 同口径）。
+     *
+     * @param name           网盘上的条目名
+     * @param seasonKey      本次目标集的 SxxExx（来自 reName）
+     * @param currentDirName 刚创建的本任务目录名，绞不能删
+     */
     static boolean isWashTarget(String name, String seasonKey, String currentDirName) {
         if (name == null || StrUtil.isBlank(seasonKey)) {
             return false;
@@ -2707,7 +2737,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         if (name.equals(currentDirName)) {
             return false;
         }
-        return name.contains(seasonKey);
+        String found = ReUtil.get(StringEnum.SEASON_REG, name, 0);
+        return found != null && found.equalsIgnoreCase(seasonKey);
     }
 
     /**

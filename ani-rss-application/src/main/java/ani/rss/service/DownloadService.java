@@ -639,18 +639,6 @@ public class DownloadService {
     }
 
     /**
-     * 检测并立即清除「备用RSS占位」。
-     *
-     * @return 是否成功清除; false 时调用方保持原"本地文件已存在"跳过行为
-     */
-    boolean removeStandbyPlaceholder(Ani ani, Item item,
-                                     List<TorrentsInfo> torrentsInfos,
-                                     Set<String> localEpisodeIndex) {
-        return removeStandbyPlaceholderTorrent(ani, item, torrentsInfos, localEpisodeIndex,
-                findRemovableStandbyPlaceholder(ani, item, torrentsInfos));
-    }
-
-    /**
      * 从本地集数索引移除该 item 对应的键(占位文件删除后防止本轮 stale 索引继续误判)。
      * 键的构造与 buildLocalEpisodeIndex/addFileToIndex 及 itemDownloaded 的查询保持一致。
      */
@@ -771,7 +759,7 @@ public class DownloadService {
 
         List<TorrentsInfo> torrentsInfos = TorrentUtil.getTorrentsInfos();
 
-        torrentsInfos
+        List<TorrentsInfo> standbyTorrents = torrentsInfos
                 .stream()
                 .filter(torrentsInfo -> {
                     String name = torrentsInfo.getName();
@@ -795,55 +783,50 @@ public class DownloadService {
                     String s = ReUtil.get(StringEnum.SEASON_REG, name, 0);
                     return s != null && s.equalsIgnoreCase(episode);
                 })
-                .findFirst()
-                .ifPresent(standbyRSS ->
-                        TorrentUtil.delete(standbyRSS, true, true)
-                );
+                .toList();
+        if (standbyTorrents.size() > 1) {
+            // 同集存在多条备用任务（历史残留）：全部删掉。只删第一条会让其余继续占位/占空间，
+            // 而文件侧是"全清"，两边口径必须一致。
+            log.warn("同集数存在 {} 条备用RSS任务，本次全部删除以避免残留占位 {} {}",
+                    standbyTorrents.size(), episode, downloadPath);
+        }
+        standbyTorrents.forEach(standbyRSS -> TorrentUtil.delete(standbyRSS, true, true));
 
         if (preExistingFiles == null) {
             // 没有提交前快照就不碰文件：避免把刚落地的主RSS版本误删
             return;
         }
+        sweepStandbyFiles(new File(downloadPath), "", episode, preExistingFiles, 0);
+    }
 
-        File[] files = FileUtils.listFiles(downloadPath);
-        for (File file : files) {
-            // 只清提交前就已存在的文件（主版本可能是同名的新文件）
-            if (!preExistingFiles.contains(file.getName())) {
+    /**
+     * 洗版递归深度上限（BDMV 等目录结构可能很深，防失控）
+     */
+    private static final int SWEEP_MAX_DEPTH = 8;
+
+    /**
+     * 递归清扫本集旧版本：只删「提交前快照里就有」且「名字里的 SxxExx 与本次整体相等」的条目。
+     * <p>
+     * 递归是必要的：旧版本可能落在子目录里，只扫一层会漏清。
+     * 目录若自身就命中本集则整棵删除（与旧行为一致），否则递归进去继续找。
+     *
+     * @param prefix 当前目录相对下载根的前缀——快照键就是相对路径，避免子目录重名互相干扰
+     */
+    private void sweepStandbyFiles(File dir, String prefix, String episode,
+                                   Set<String> preExistingFiles, int depth) {
+        if (depth > SWEEP_MAX_DEPTH) {
+            return;
+        }
+        for (File file : FileUtils.listFiles(dir)) {
+            if (file == null || !file.exists()) {
                 continue;
             }
-            String fileMainName = FileUtil.mainName(file);
-            if (StrUtil.isBlank(fileMainName)) {
+            String relative = prefix.isEmpty() ? file.getName() : prefix + "/" + file.getName();
+            // 只清提交前就已存在的条目（主版本可能是同名的新文件）
+            if (!preExistingFiles.contains(relative)) {
                 continue;
             }
-            if (!ReUtil.contains(StringEnum.SEASON_REG, fileMainName)) {
-                continue;
-            }
-            fileMainName = ReUtil.get(StringEnum.SEASON_REG, fileMainName, 0);
-            if (!fileMainName.equalsIgnoreCase(episode)) {
-                continue;
-            }
-            boolean isDel = false;
-            // 文件在删除前先判断其格式
-            if (file.isFile()) {
-                String extName = FileUtil.extName(file);
-                // 没有后缀 跳过
-                if (StrUtil.isBlank(extName)) {
-                    continue;
-                }
-                if (FileUtils.isVideoFormat(extName)) {
-                    isDel = true;
-                }
-                if (List.of("nfo", "bif").contains(extName)) {
-                    isDel = true;
-                }
-                if (file.getName().endsWith("-thumb.jpg")) {
-                    isDel = true;
-                }
-            }
-            if (file.isDirectory()) {
-                isDel = true;
-            }
-            if (isDel) {
+            if (isWashableEntry(file, episode)) {
                 log.info("已开启备用RSS, 自动删除 {}", FileUtils.getAbsolutePath(file));
                 try {
                     FileUtil.del(file);
@@ -852,8 +835,46 @@ public class DownloadService {
                     log.error("删除失败 {}", FileUtils.getAbsolutePath(file));
                     log.error(e.getMessage(), e);
                 }
+                // 目录整棵已删 / 文件已处理，都不需要再往下走
+                continue;
+            }
+            if (file.isDirectory()) {
+                sweepStandbyFiles(file, relative, episode, preExistingFiles, depth + 1);
             }
         }
+    }
+
+    /**
+     * 该条目是否属于「本集的旧版本」：名字里的 SxxExx 必须与本次<b>整体相等</b>（忽略大小写）。
+     * <p>
+     * 不能退化成 {@code contains}：那会让 {@code S01E01} 命中 {@code S01E010} / {@code S01E01.5}，
+     * 把别的集删掉。目录一律算（旧版本可能是目录结构）；文件只认 视频 / nfo / bif / -thumb.jpg。
+     */
+    static boolean isWashableEntry(File file, String episode) {
+        if (file == null || StrUtil.isBlank(episode)) {
+            return false;
+        }
+        String mainName = FileUtil.mainName(file);
+        if (StrUtil.isBlank(mainName) || !ReUtil.contains(StringEnum.SEASON_REG, mainName)) {
+            return false;
+        }
+        String found = ReUtil.get(StringEnum.SEASON_REG, mainName, 0);
+        if (found == null || !found.equalsIgnoreCase(episode)) {
+            return false;
+        }
+        if (file.isDirectory()) {
+            return true;
+        }
+        if (!file.isFile()) {
+            return false;
+        }
+        String extName = FileUtil.extName(file);
+        if (StrUtil.isBlank(extName)) {
+            return false;
+        }
+        return FileUtils.isVideoFormat(extName)
+                || List.of("nfo", "bif").contains(extName)
+                || file.getName().endsWith("-thumb.jpg");
     }
 
     /**
@@ -904,19 +925,34 @@ public class DownloadService {
      * 拍下目录内现有文件名快照：洗版清扫只清这些文件（见 {@link #deleteStandbyRss}）。
      * 读取失败时返回空集，等价于"本次不清理文件"，绝不误删。
      */
-    private Set<String> snapshotExistingFiles(String downloadPath) {
-        Set<String> names = new HashSet<>();
+    Set<String> snapshotExistingFiles(String downloadPath) {
+        Set<String> paths = new HashSet<>();
         try {
-            for (File file : FileUtils.listFiles(downloadPath)) {
-                if (file != null) {
-                    names.add(file.getName());
-                }
-            }
+            collectRelativePaths(new File(downloadPath), "", paths, 0);
         } catch (Exception e) {
             log.warn("读取下载目录失败, 本次不清理备用RSS文件 {}: {}",
                     downloadPath, ExceptionUtils.getMessage(e));
         }
-        return names;
+        return paths;
+    }
+
+    /**
+     * 递归收集相对路径：键与 {@link #sweepStandbyFiles} 完全一致（相对路径，避免子目录重名干扰）。
+     */
+    private static void collectRelativePaths(File dir, String prefix, Set<String> out, int depth) {
+        if (dir == null || depth > SWEEP_MAX_DEPTH) {
+            return;
+        }
+        for (File file : FileUtils.listFiles(dir)) {
+            if (file == null) {
+                continue;
+            }
+            String relative = prefix.isEmpty() ? file.getName() : prefix + "/" + file.getName();
+            out.add(relative);
+            if (file.isDirectory()) {
+                collectRelativePaths(file, relative, out, depth + 1);
+            }
+        }
     }
 
     public boolean download(Ani ani, Item item, String savePath, File torrentFile) {
