@@ -62,6 +62,7 @@ build.info
 /.workbuddy-ai/
 /.codex-tmp/
 /.mimocode/
+/.pi/
 /.reasonix/
 /.rss-samples/
 /ani-rss-ui/design/

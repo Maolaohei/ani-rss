@@ -242,6 +242,42 @@
                     <mainClass>ani.rss.AniRssApplication</mainClass>
                 </configuration>
             </plugin>
+            <!--
+              测试分两段执行：
+              1) 默认执行 = 普通单测，单个 JVM 复用（快），用 excludedGroups 把端到端测试挡掉；
+              2) e2e-tests = 端到端测试（@Tag("e2e")），单独 JVM 且不复用 fork。
+
+              为什么要分开：端到端测试会把整个应用跑起来（Spring 上下文、真实 Tomcat、
+              后台任务线程），并设置 -DCONFIG 指向临时目录、把 HTTP 客户端指向假公网。
+              这些静态状态与单测共享 JVM 时会互相污染（谁先跑谁说了算，结果不确定）。
+              分开后：单测保持快，端到端测试每次都在干净 JVM 里跑，结论可复现。
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <excludedGroups>e2e</excludedGroups>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>e2e-tests</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>test</goal>
+                        </goals>
+                        <configuration>
+                            <groups>e2e</groups>
+                            <excludedGroups combine.self="override"/>
+                            <reuseForks>false</reuseForks>
+                            <forkCount>1</forkCount>
+                            <!-- 端到端测试结束后工件留在 target/e2e-artifact -->
+                            <systemPropertyVariables>
+                                <file.encoding>UTF-8</file.encoding>
+                            </systemPropertyVariables>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>exec-maven-plugin</artifactId>

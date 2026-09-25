@@ -15,8 +15,21 @@ jobs:
           cache: maven
       - name: Build with Project
         run: |
-          mvn -B package \
-              -DskipTests \
+          mvn -B test \
               --file pom.xml
           version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f pom.xml)
           echo "version=v$version" >> $GITHUB_ENV
+      # 端到端测试会生成可验证工件（report.json / report.md / inputs/），失败时也要留证据
+      - name: Upload e2e artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-artifact
+          path: ani-rss-application/target/e2e-artifact/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Package
+        run: |
+          mvn -B package \
+              -DskipTests \
+              --file pom.xml
