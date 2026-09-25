@@ -22,6 +22,27 @@
 
 ---
 
+## 3.4.28 增量（2026-09）
+
+### 用 TorrentMetadata 替换 2007 年的 Eclipse TorrentFile 库（移植上游 #730 修复）
+
+上游审计发现 `6fbf55af`：古董库 `org.eclipse.bittorrent.TorrentFile`（0.3.0-v20070627）对部分真实种子解析报错（上游 close #730），并整体替换为自写的 `TorrentMetadata`。fork 仍在三条链路使用旧库：
+
+- **OpenList 期望文件计划构建**：解析失败静默降级为启发式扫描（计划质量退化，不易察觉）
+- **CollectionController 合集下载**：解析失败直接报错
+- **qBittorrent 偏移缓存键**（3.4.26）：解析失败回退 `item.infoHash`，对 .torrent 直链源退化为错误键
+
+移植内容：
+
+- 上游 `TorrentMetadata`（`dampcake:bencode 1.4.1` 纯 Java 解析；正确处理 v1/v2/hybrid 的 info hash 与磁力 URI），补 fork 所需的 `getName()`（上游无此用法，OpenList 拿种子根名作网盘临时目录名）
+- 替换全部 5 处调用点并移除 `org.eclipse:bittorrent` 依赖；测试脚手架 `TestTorrent` 同步切换
+
+#### 验证
+
+后端 `mvn test` 全量 **976 + 4 e2e / 0 失败 / 0 跳过**。
+
+---
+
 ## 3.4.27 增量（2026-09）
 
 ### 偏移缓存条目对齐既有生命周期
