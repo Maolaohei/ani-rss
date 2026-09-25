@@ -211,9 +211,12 @@ public class Aria2 implements BaseDownload {
         boolean v2 = RenameUtil.isNamingV2(ani);
         if (!ova || v2) {
             RenameCacheUtil.put(id, name);
-            // 多文件合集 rename 时要把源命名集数平移成目标口径，按 gid 缓存来源偏移
-            RenameCacheUtil.put(RSS_OFFSET_CACHE_PREFIX + id,
-                    String.valueOf(BaseDownload.rssOffsetOf(item)));
+            // 多文件合集 rename 时要把源命名集数平移成目标口径，按 gid 缓存来源偏移。
+            // 偏移为 0（绝大多数订阅）时条目缺省即回退 0，不写缓存避免表无谓膨胀
+            int rssOffset = BaseDownload.rssOffsetOf(item);
+            if (rssOffset != 0) {
+                RenameCacheUtil.put(RSS_OFFSET_CACHE_PREFIX + id, String.valueOf(rssOffset));
+            }
         }
 
         // addTorrent 返回 gid 即已入队，无需 3×10s 轮询确认；状态由 RenameTask 周期性兜底
@@ -326,6 +329,8 @@ public class Aria2 implements BaseDownload {
             return false;
         }
         RenameCacheUtil.remove(id);
+        // 偏移条目与名称条目同一生命周期：rename 成功后一并清理（失败保留供下轮重试）
+        RenameCacheUtil.remove(RSS_OFFSET_CACHE_PREFIX + id);
 
         return true;
     }

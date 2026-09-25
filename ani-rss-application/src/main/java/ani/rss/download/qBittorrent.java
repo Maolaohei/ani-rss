@@ -311,23 +311,27 @@ public class qBittorrent implements BaseDownload {
             return false;
         }
         // 多文件合集 rename 时要把源命名集数平移成目标口径，按 infoHash 缓存来源偏移。
-        // 磁力提交（空种子文件）没有 item.infoHash 时用磁力 hash（文件名即 btih）兜底；
-        // 都拿不到则不缓存，rename 侧回退 0 = 改造前行为
-        String offsetHash = StrUtil.blankToDefault(item.getInfoHash(),
-                torrentFile.length() == 0 ? FileUtil.mainName(torrentFile) : null);
-        if (torrentFile.length() > 0 && !"txt".equalsIgnoreCase(FileUtil.extName(torrentFile))) {
-            try {
-                // .torrent 直链且源 XML 不带 infohash 时 item.infoHash 是下载 URL 的 sha256，
-                // 与 qB 上报的真实 btih 对不上 ⇒ 缓存键必须用种子文件解析出的真实 hash
-                offsetHash = new TorrentFile(torrentFile).getHexHash();
-            } catch (Exception e) {
-                log.debug("解析种子真实 infoHash 失败(回退 item.infoHash) {}: {}",
-                        name, ExceptionUtils.getMessage(e));
+        // 偏移为 0（绝大多数订阅）时条目缺省即回退 0，不写缓存避免表无谓膨胀
+        int rssOffset = BaseDownload.rssOffsetOf(item);
+        if (rssOffset != 0) {
+            // 磁力提交（空种子文件）没有 item.infoHash 时用磁力 hash（文件名即 btih）兜底；
+            // 都拿不到则不缓存，rename 侧回退 0 = 改造前行为
+            String offsetHash = StrUtil.blankToDefault(item.getInfoHash(),
+                    torrentFile.length() == 0 ? FileUtil.mainName(torrentFile) : null);
+            if (torrentFile.length() > 0 && !"txt".equalsIgnoreCase(FileUtil.extName(torrentFile))) {
+                try {
+                    // .torrent 直链且源 XML 不带 infohash 时 item.infoHash 是下载 URL 的 sha256，
+                    // 与 qB 上报的真实 btih 对不上 ⇒ 缓存键必须用种子文件解析出的真实 hash
+                    offsetHash = new TorrentFile(torrentFile).getHexHash();
+                } catch (Exception e) {
+                    log.debug("解析种子真实 infoHash 失败(回退 item.infoHash) {}: {}",
+                            name, ExceptionUtils.getMessage(e));
+                }
             }
-        }
-        if (StrUtil.isNotBlank(offsetHash)) {
-            RenameCacheUtil.put(RSS_OFFSET_CACHE_PREFIX + offsetHash.toLowerCase(),
-                    String.valueOf(BaseDownload.rssOffsetOf(item)));
+            if (StrUtil.isNotBlank(offsetHash)) {
+                RenameCacheUtil.put(RSS_OFFSET_CACHE_PREFIX + offsetHash.toLowerCase(),
+                        String.valueOf(rssOffset));
+            }
         }
         // 不再持锁 3×10s 轮询确认：提交成功即视为已入队，重命名/状态由 RenameTask 周期性兜底
         log.info("qBittorrent 添加任务成功 {}", name);
@@ -678,6 +682,8 @@ public class qBittorrent implements BaseDownload {
         log.info("开始任务 {}", reName);
 
         if (newNames.isEmpty()) {
+            // 偏移条目与名称条目同一生命周期：rename 成功后一并清理（失败保留供下轮重试）
+            RenameCacheUtil.remove(RSS_OFFSET_CACHE_PREFIX + StrUtil.nullToEmpty(hash).toLowerCase());
             return true;
         }
 
@@ -686,6 +692,7 @@ public class qBittorrent implements BaseDownload {
             ThreadUtil.sleep(1000);
             names = torrentsInfo.getFiles().get();
             if (new HashSet<>(names).containsAll(newNames)) {
+                RenameCacheUtil.remove(RSS_OFFSET_CACHE_PREFIX + StrUtil.nullToEmpty(hash).toLowerCase());
                 return true;
             }
         }
