@@ -187,7 +187,7 @@
 </template>
 
 <script setup>
-import {computed, onActivated, onDeactivated, onMounted, onUnmounted, ref} from "vue";
+import {computed, onActivated, onDeactivated, onUnmounted, ref} from "vue";
 import {ArrowLeft, ArrowRight, CircleCheck, Download, List, Upload} from "@element-plus/icons-vue";
 import {formatDate, fromNow} from "@/js/format.js";
 import * as http from "@/js/http.js";
@@ -412,8 +412,12 @@ const stopPolling = () => {
   timer = undefined
 }
 
-onMounted(loadAll)
-onActivated(startPolling)
+// 移植上游 0a544f8a: 首页被 keep-alive 复用时不走 onMounted,
+// 切回首页必须重新拉数据, 否则展示的是离开前的陈旧内容
+onActivated(() => {
+  loadAll()
+  startPolling()
+})
 onDeactivated(stopPolling)
 onUnmounted(stopPolling)
 </script>
