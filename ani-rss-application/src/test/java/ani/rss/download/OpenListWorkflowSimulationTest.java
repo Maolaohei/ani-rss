@@ -62,8 +62,12 @@ class OpenListWorkflowSimulationTest {
     }
 
     @AfterEach
-    void tearDown() {
+    void tearDown() throws Exception {
         server.stop();
+        // 制造过列举失败的用例会把 OpenListApi 的静态熔断状态留下来（连续失败 → 冷却），
+        // 后续用例的严格列举会被「冷却中」瞬时拒绝，表现为级联假失败。
+        OpenListApi.resetRateLimitState();
+        restoreSubscriptions();
     }
 
     // ============ 场景 1：单文件种子 + 115 任务目录嵌套（目标路径） ============
@@ -317,6 +321,175 @@ class OpenListWorkflowSimulationTest {
         }
     }
 
+    // ============ 场景 9：清理路径不得把「查询失败」读成「目录为空」 ============
+    //
+    // 统一不变量：清理路径的破坏性动作（fs/remove）只允许在「查得清、且确实为空」时发生。
+    // 宽容版 fsList 内部 catch → List.of()，会把网盘抖动读成「这个目录是空的」，
+    // 而 115 对非空目录的 fs/remove 是整树删除 ⇒ 一次抖动就能删掉仍含未归位视频的目录，
+    // 且网盘文件不可恢复。这与判定路径的「查询失败绝不能降级成确认没有」是同一条不变量。
+    // 下面每个用例都用 MockAlistServer.failingListPaths 注入一次真实失败（code=500）。
+
+    /**
+     * 失败模式清单：
+     * ① 子目录列举失败被当作「空子目录」→ 该子目录被 fs/remove 整树删掉（含未归位视频）；
+     * ② 返回值谎称「子树已清空」→ 骗过调用方，后续删掉整个源目录。
+     */
+    @Test
+    void purge_keeps_subdir_whose_listing_failed() {
+        String taskDir = "/云下载/[VCB] Show";
+        server.putFile(taskDir + "/S01E04.mkv", 1000L);
+        server.putFile(taskDir + "/Subs/CHS.ass", 100L);
+        server.failingListPaths.add(taskDir + "/Subs");
+
+        OpenList openList = openList("/追番/Show/Season 1");
+        openList.purgeJunkAndEmptyDirsBottomUp(taskDir);
+
+        assertTrue(server.exists(taskDir + "/Subs/CHS.ass"),
+                "子目录列举失败不得被当作「空目录」而整树删除，全树=" + server.allPaths());
+        assertTrue(server.exists(taskDir + "/S01E04.mkv"), "本层非垃圾文件应保留");
+    }
+
+    /**
+     * 失败模式清单：
+     * ① 目录列举失败被当作「空目录」→ 沿空链上溯把它整树删掉；
+     * ② 上溯越界（越过云下载根）—— 由 effectiveRoot 前缀校验负责，本用例同时钉住它。
+     */
+    @Test
+    void delete_empty_chain_stops_when_listing_failed() {
+        String cloudRoot = "/云下载";
+        String taskDir = cloudRoot + "/[VCB] Show";
+        server.putFile(taskDir + "/S01E04.mkv", 1000L);
+        server.failingListPaths.add(taskDir);
+
+        OpenList openList = openList("/追番/Show/Season 1");
+        openList.deleteEmptyChainUnderCloudRoot(taskDir, cloudRoot);
+
+        assertTrue(server.exists(taskDir + "/S01E04.mkv"),
+                "列举失败不得被当作空目录而整树删除，全树=" + server.allPaths());
+        assertTrue(server.exists(taskDir), "任务目录本身也应保留");
+    }
+
+    /**
+     * 失败模式清单：
+     * ① 归位后 srcDir 列举失败被当作「空壳」→ 连同其中未归位的其它文件一起删掉；
+     * ② 上溯越过 topDir（由 while 条件挡住，本用例一并钉住）。
+     * <p>
+     * 这里必须让「发现阶段」拿到真实清单、只把失败隔离到「空壳清理」那一步：
+     * {@code repairNestedUnder} 先用递归 findFiles 发现嵌套文件，若直接让 savePath 的列举失败，
+     * 发现阶段就返回 0 了，根本走不到被断言的那段代码。
+     */
+    @Test
+    void empty_chain_cleanup_stops_when_listing_failed() {
+        String savePath = "/追番/Show/Season 1";
+        String nested = savePath + "/Nested";
+        server.putFile(nested + "/" + RAW_FILE_NAME, 1000L);
+        server.putFile(nested + "/Subs/CHS.ass", 100L);
+
+        OpenList openList = openList(savePath);
+        warmRecursiveListing(openList, savePath);
+        server.failingListPaths.add(nested);
+
+        openList.repairNestedUnder(savePath, new ArrayList<>());
+
+        assertTrue(server.exists(nested + "/Subs/CHS.ass"),
+                "空壳清理的列举失败不得把仍有内容的目录整树删掉，全树=" + server.allPaths());
+    }
+
+    /**
+     * 失败模式清单：
+     * ① 临时目录列举失败被当作「没有受保护媒体」→ 谨慎模式直接放行，随后整树删除；
+     * ② 失败被当作「空目录」→ removeEmptyDirsBottomUp 把子目录删掉。
+     */
+    @Test
+    void cautious_temp_dir_cleanup_skips_when_listing_failed() {
+        String savePath = "/追番/Show/Season 1";
+        String tempDirName = "Show S01E04";
+        String tempPath = savePath + "/" + tempDirName;
+        server.putFile(tempPath + "/S01E04.mkv", 1000L);
+        server.failingListPaths.add(tempPath);
+
+        OpenList openList = openList(savePath);
+        openList.cleanupTempDownloadDir(savePath, tempDirName, false);
+
+        assertTrue(server.exists(tempPath + "/S01E04.mkv"),
+                "谨慎模式下列举失败必须放弃清理，不得整树删除仍有媒体的临时目录，全树=" + server.allPaths());
+    }
+
+    /**
+     * 失败模式清单：
+     * ① 子目录列举失败被当作「空子目录」→ 该子目录被删（含受保护字幕）；
+     * ② 同层其它子目录的清理被连带跳过（保守方向，不构成失败）。
+     */
+    @Test
+    void temp_dir_subdir_kept_when_its_listing_failed() {
+        String savePath = "/追番/Show/Season 1";
+        String tempDirName = "Show S01E05";
+        String tempPath = savePath + "/" + tempDirName;
+        server.putFile(tempPath + "/Subs/CHS.ass", 100L);
+        server.failingListPaths.add(tempPath + "/Subs");
+
+        OpenList openList = openList(savePath);
+        openList.cleanupTempDownloadDir(savePath, tempDirName, false);
+
+        assertTrue(server.exists(tempPath + "/Subs/CHS.ass"),
+                "子目录列举失败不得被当作空子目录而删除，全树=" + server.allPaths());
+    }
+
+    /**
+     * 失败模式清单：
+     * ① 顶层列举失败被当作「顶层没有同名」→ fsMove 覆盖顶层已有成片（网盘不可恢复）；
+     * ② 修复数量虚高（把「跳过」报成「已归位」）。
+     * <p>
+     * 同样需要把失败隔离到守卫那一步：先预热递归列举缓存，让发现阶段拿到真实清单。
+     */
+    @Test
+    void legacy_repair_does_not_overwrite_when_top_listing_failed() {
+        String savePath = "/追番/Show/Season 1";
+        String nested = savePath + "/Nested";
+        server.putFile(savePath + "/" + RAW_FILE_NAME, 1000L);
+        server.putFile(nested + "/" + RAW_FILE_NAME, 700L);
+
+        OpenList openList = openList(savePath);
+        warmRecursiveListing(openList, savePath);
+        server.failingListPaths.add(savePath);
+
+        List<String> details = new ArrayList<>();
+        int repaired = openList.repairNestedUnder(savePath, details);
+
+        assertEquals(1000L, server.sizeOf(savePath + "/" + RAW_FILE_NAME),
+                "顶层列举失败时不得无守卫地移动，覆盖顶层已有成片（details=" + details + "）");
+        assertTrue(server.exists(nested + "/" + RAW_FILE_NAME), "嵌套文件应原样保留");
+        assertEquals(0, repaired, "查不清顶层同名情况时应放弃本次修复，不应报成已归位");
+    }
+
+    /**
+     * 失败模式清单：
+     * ① 临时目录内部列举失败被当作「仅垃圾或为空」→ 预览判为可清理，随后一键清理 force=true 整树删除；
+     * ② 同类误判对用户构成「确认这里没内容」的虚假保证。
+     * <p>
+     * 目录名刻意不带集数标识：带 SxxExx 时会因「顶层已有同集成片」直接 FORCE_CLEAN，测不出差异。
+     */
+    @Test
+    void temp_dir_residual_scan_keeps_dir_when_inner_listing_failed() throws Exception {
+        String savePath = "/追番/Show/Season 1";
+        String tempDirName = "[VCB] Show";
+        server.putFile(savePath + "/Show S01E03.mkv", 1000L);
+        server.putFile(savePath + "/" + tempDirName + "/S01E03.mkv", 1000L);
+        server.failingListPaths.add(savePath + "/" + tempDirName);
+
+        OpenList openList = openList(savePath);
+        primeSubscriptions(savePath);
+
+        OpenList.TempDirResidualSnapshot snap = openList.scanTempDirResiduals(true);
+        OpenList.TempDirResidualItem item = snap.getItems() == null ? null : snap.getItems().stream()
+                .filter(i -> i != null && tempDirName.equals(i.getName()))
+                .findFirst().orElse(null);
+        assertNotNull(item, "应扫到临时目录 " + tempDirName + "，实际=" + snap.getItems());
+        assertFalse(Boolean.TRUE.equals(item.getCleanable()),
+                "内部列举失败时不得判为可清理（否则一键清理会整树删除仍有媒体的目录）：state="
+                        + item.getState() + " action=" + item.getAction());
+    }
+
     // ============ 辅助 ============
 
     private OpenList openList(String savePath) {
@@ -380,6 +553,44 @@ class OpenListWorkflowSimulationTest {
         File tmp = new File(dir, hash);
         tmp.deleteOnExit();
         return tmp;
+    }
+
+    /**
+     * 预热递归列举缓存：让「发现阶段」拿到真实清单，从而把注入的列举失败隔离到其后某一步。
+     * 缓存 TTL 是 30s，用例内不会过期。
+     */
+    private void warmRecursiveListing(OpenList openList, String path) {
+        assertFalse(openList.findFiles(path).isEmpty(), "预热失败：应能列举 " + path);
+    }
+
+    private Object originalAniList;
+
+    /**
+     * 把订阅塞进 {@code AniUtil} 的静态 ANI_LIST（走「自定义下载路径」分支，不需要 Spring 上下文）。
+     * {@code scanTempDirResiduals} 只从订阅列表推导要扫描的 savePath，没有订阅就没有候选目录。
+     */
+    @SuppressWarnings("unchecked")
+    private void primeSubscriptions(String savePath) throws Exception {
+        java.lang.reflect.Field field = ani.rss.util.other.AniUtil.class.getDeclaredField("ANI_LIST");
+        field.setAccessible(true);
+        originalAniList = field.get(null);
+        List<Ani> list = new java.util.concurrent.CopyOnWriteArrayList<>();
+        list.add(ani("Show")
+                .setEnable(true)
+                .setCustomDownloadPath(true)
+                .setDownloadPath(savePath)
+                .setSeason(1));
+        field.set(null, list);
+    }
+
+    private void restoreSubscriptions() throws Exception {
+        if (originalAniList == null) {
+            return;
+        }
+        java.lang.reflect.Field field = ani.rss.util.other.AniUtil.class.getDeclaredField("ANI_LIST");
+        field.setAccessible(true);
+        field.set(null, originalAniList);
+        originalAniList = null;
     }
 
     private void awaitFinalTopLevel(String dir, List<String> expected, long timeoutMs)
@@ -487,6 +698,12 @@ class OpenListWorkflowSimulationTest {
 
         boolean exists(String path) {
             return entries.containsKey(norm(path));
+        }
+
+        /** 条目字节数；不存在返回 -1（用于断言「顶层文件未被覆盖」） */
+        long sizeOf(String path) {
+            Entry e = entries.get(norm(path));
+            return e == null ? -1L : e.size;
         }
 
         void putFile(String path, long size) {

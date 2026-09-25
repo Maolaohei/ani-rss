@@ -3412,10 +3412,18 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             return 0;
         }
         String top = trimTrailingSlash(dir);
-        Set<String> topNames = fsList(dir, true).stream()
-                .map(OpenListFileInfo::getName)
-                .filter(Objects::nonNull)
-                .collect(Collectors.toSet());
+        // 顶层同名守卫必须建立在"查得清"之上：列举失败时若被当作"顶层没有同名"，
+        // 下面的 fsMove 会直接覆盖顶层已有成片（网盘上不可恢复）。查不清就整体放弃本次修复。
+        Set<String> topNames;
+        try {
+            topNames = fsListForCleanup(dir).stream()
+                    .map(OpenListFileInfo::getName)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toSet());
+        } catch (Exception e) {
+            log.warn("遗留修复：顶层列举失败，放弃本次修复 {}: {}", dir, ExceptionUtils.getMessage(e));
+            return 0;
+        }
         for (OpenListFileInfo file : files) {
             if (!FileUtils.isVideoFormat(file.getName())) {
                 continue;
@@ -3447,7 +3455,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         String top = trimTrailingSlash(topDir);
         while (!current.isEmpty() && !current.equals(top) && !"/".equals(current)) {
             try {
-                List<OpenListFileInfo> children = fsList(current, true);
+                // 查不清一律停止上溯：宽容版会把"查询失败"读成"空目录"，把仍有内容的目录整树删掉
+                List<OpenListFileInfo> children = fsListForCleanup(current);
                 if (!children.isEmpty()) {
                     break;
                 }
@@ -3501,26 +3510,28 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     /**
      * 自底向上清理 dir 子树内的垃圾文件与空子目录；视频/字幕等普通内容一律保留。
      * 返回子树是否已全部清空（供上层直接删除，避免重复列目录）。
+     * <p>
+     * 列举一律走 {@link #fsListForCleanup}：<b>查不清的子目录跳过不删</b>。原先用宽容版
+     * {@link #fsList}，"网盘抖动"会被读成"这个子目录是空的"，紧接着 {@code fs/remove}
+     * 就把仍含未归位视频的目录整树删掉（115 对非空目录是整树删除，不可恢复）。
+     * 包级便于测试。
      */
-    private boolean purgeJunkAndEmptyDirsBottomUp(String dir) {
+    boolean purgeJunkAndEmptyDirsBottomUp(String dir) {
         String current = trimTrailingSlash(dir);
         if (StrUtil.isBlank(current) || "/".equals(current)) {
             return false;
         }
         List<OpenListFileInfo> children;
         try {
-            children = fsList(current, true);
+            children = fsListForCleanup(current);
         } catch (Exception e) {
             log.debug("清理云下载残留列目录失败 {}: {}", current, e.getMessage());
             return false;
         }
-        // 先递归子目录（自底向上）；任一子树非空则本层必非空
-        boolean allChildrenEmpty = true;
+        // 先递归子目录（自底向上），让更深的层级先被清理
         for (OpenListFileInfo entry : children) {
             if (Boolean.TRUE.equals(entry.getIsDir())) {
-                if (!purgeJunkAndEmptyDirsBottomUp(current + "/" + entry.getName())) {
-                    allChildrenEmpty = false;
-                }
+                purgeJunkAndEmptyDirsBottomUp(current + "/" + entry.getName());
             }
         }
         try {
@@ -3533,14 +3544,22 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 log.info("清理 115 云下载残留垃圾 {}/{}", current, junkNames);
                 fsRemove(current, junkNames);
             }
-            // 删已空的子目录：递归已确认空的直接删，未确认的逐个确认
+            // 删已空的子目录：必须逐个「查得清且确实为空」才删，查不清的跳过
             List<String> emptyDirNames = new ArrayList<>();
             for (OpenListFileInfo child : children) {
                 if (!Boolean.TRUE.equals(child.getIsDir())) {
                     continue;
                 }
                 String childPath = current + "/" + child.getName();
-                if (!fsList(childPath, true).isEmpty()) {
+                List<OpenListFileInfo> grandChildren;
+                try {
+                    grandChildren = fsListForCleanup(childPath);
+                } catch (Exception e) {
+                    // 查不清 ≠ 空：只跳过这个子目录，保留其内容（其余子目录仍可清理）
+                    log.debug("清理云下载残留：子目录列举失败，跳过删除 {}: {}", childPath, e.getMessage());
+                    continue;
+                }
+                if (!grandChildren.isEmpty()) {
                     continue;
                 }
                 emptyDirNames.add(child.getName());
@@ -3548,7 +3567,6 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             if (!emptyDirNames.isEmpty()) {
                 log.info("清理 115 云下载空子目录 {}/{}", current, emptyDirNames);
                 fsRemove(current, emptyDirNames);
-                allChildrenEmpty = true;
             }
         } catch (Exception e) {
             log.debug("清理云下载残留失败 {}: {}", current, e.getMessage());
@@ -3556,7 +3574,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         }
         // 仅剩本层自身（无文件残留）时视为已空
         try {
-            return fsList(current, true).isEmpty();
+            return fsListForCleanup(current).isEmpty();
         } catch (Exception e) {
             log.debug("清理云下载残留复查失败 {}: {}", current, e.getMessage());
             return false;
@@ -3567,8 +3585,11 @@ public class OpenList implements BaseDownload, OfflineDownloader {
      * 目录已空时删除并沿空目录链向上清理；
      * 只清理云下载根目录内部（前缀校验），根目录自身与外部路径不动；
      * 未解析到根目录（cloudRoot 为空）时以源目录自身为上溯边界，保持旧行为。
+     * <p>
+     * 列举走 {@link #fsListForCleanup}：<b>查不清一律停止上溯</b>。原先用宽容版 {@link #fsList}，
+     * 查询失败被读成"这个目录是空的"，于是沿链把仍有内容的目录整树删掉。包级便于测试。
      */
-    private void deleteEmptyChainUnderCloudRoot(String dir, String cloudRoot) {
+    void deleteEmptyChainUnderCloudRoot(String dir, String cloudRoot) {
         String origin = trimTrailingSlash(dir);
         // 单一不变量：cursor 必须严格位于 effectiveRoot 之下（根自身与外部一律不动）
         String effectiveRoot = StrUtil.isBlank(cloudRoot)
@@ -3591,7 +3612,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             }
             List<OpenListFileInfo> children;
             try {
-                children = fsList(cursor, true);
+                children = fsListForCleanup(cursor);
             } catch (Exception e) {
                 log.debug("清理云下载空壳列目录失败 {}: {}", cursor, e.getMessage());
                 return;
@@ -3631,8 +3652,17 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         String tempPath = savePath + "/" + tempDirName;
         try {
             if (!force) {
-                // 谨慎模式：必须先列举确认没有受保护媒体，否则宁可不清
-                List<OpenListFileInfo> remaining = listFilesWithRetry(tempPath, 2);
+                // 谨慎模式：必须先列举确认没有受保护媒体，否则宁可不清。
+                // 这次列举必须是严格版：宽容版会把"查询失败"读成"空目录"，于是"确认没有受保护媒体"
+                // 成立，紧接着就整树删除 —— 谨慎模式反而成了最危险的模式。
+                List<OpenListFileInfo> remaining;
+                try {
+                    remaining = listFilesWithRetry(tempPath, 2);
+                } catch (Exception e) {
+                    log.warn("未强制清理：临时目录列举失败，跳过清理 {}: {}",
+                            tempPath, ExceptionUtils.getMessage(e));
+                    return;
+                }
                 List<OpenListFileInfo> mediaLeft = remaining.stream()
                         .filter(OpenList::isProtectedTempFile)
                         .toList();
@@ -3754,18 +3784,35 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 || name.equals(".ds_store");
     }
 
+    /**
+     * 递归列举 + 重试；<b>每次都用严格版</b>，失败向上抛。
+     * <p>
+     * 原先用宽容版 {@link #findFiles}，失败被读成"空目录"，调用方据此认为"没有受保护媒体"，
+     * 随后整树删除临时目录 —— 那是"谨慎模式"里最危险的一步。空目录与查询失败必须由调用方
+     * 区分对待，故这里只负责重试，不负责把失败吞成空。
+     */
     private List<OpenListFileInfo> listFilesWithRetry(String path, int attempts) {
-        List<OpenListFileInfo> last = List.of();
+        RuntimeException last = null;
         int n = Math.max(1, attempts);
         for (int i = 0; i < n; i++) {
             api.invalidateFindFilesCache(path);
-            last = findFiles(path);
-            if (!last.isEmpty() || i == n - 1) {
-                return last;
+            try {
+                List<OpenListFileInfo> files = api.findFilesStrict(path);
+                if (!files.isEmpty() || i == n - 1) {
+                    return files;
+                }
+            } catch (RuntimeException e) {
+                last = e;
+                if (i == n - 1) {
+                    break;
+                }
             }
             ThreadUtil.sleep(500L * (i + 1));
         }
-        return last;
+        if (last != null) {
+            throw last;
+        }
+        return List.of();
     }
 
     /**
@@ -3776,51 +3823,57 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         if (StrUtil.isBlank(path)) {
             return;
         }
-        List<OpenListFileInfo> entries = fsList(path, true);
+        List<OpenListFileInfo> entries;
+        try {
+            entries = fsListForCleanup(path);
+        } catch (Exception e) {
+            log.debug("删除空子目录：列举失败，跳过 {}: {}", path, ExceptionUtils.getMessage(e));
+            return;
+        }
         for (OpenListFileInfo entry : entries) {
             if (!Boolean.TRUE.equals(entry.getIsDir())) {
                 continue;
             }
             String childPath = path + "/" + entry.getName();
             removeEmptyDirsBottomUp(childPath);
-
-            for (OpenListFileInfo child : fsList(childPath, true)) {
-                if (Boolean.TRUE.equals(child.getIsDir())) {
-                    continue;
-                }
-                if (!isJunkTempFile(child)) {
-                    continue;
-                }
-                try {
-                    fsRemove(childPath, List.of(child.getName()));
-                } catch (Exception e) {
-                    log.debug("删除空子目录残留失败 {}/{}: {}", childPath, child.getName(), e.getMessage());
-                }
-            }
-
-            List<OpenListFileInfo> after = fsList(childPath, true);
-            boolean hasProtected = after.stream().anyMatch(f ->
-                    Boolean.TRUE.equals(f.getIsDir()) || isProtectedTempFile(f));
-            if (!hasProtected && after.stream().allMatch(f -> Boolean.TRUE.equals(f.getIsDir()) || isJunkTempFile(f))) {
-                for (OpenListFileInfo junk : after) {
-                    if (Boolean.TRUE.equals(junk.getIsDir())) {
+            // 列举一律走严格版：查不清就跳过这个子目录，绝不能把"查询失败"当成"它是空的"再删掉
+            try {
+                for (OpenListFileInfo child : fsListForCleanup(childPath)) {
+                    if (Boolean.TRUE.equals(child.getIsDir())) {
+                        continue;
+                    }
+                    if (!isJunkTempFile(child)) {
                         continue;
                     }
                     try {
-                        fsRemove(childPath, List.of(junk.getName()));
+                        fsRemove(childPath, List.of(child.getName()));
                     } catch (Exception e) {
-                        log.debug("删除垃圾失败 {}/{}: {}", childPath, junk.getName(), e.getMessage());
+                        log.debug("删除空子目录残留失败 {}/{}: {}", childPath, child.getName(), e.getMessage());
                     }
                 }
-                after = fsList(childPath, true);
-            }
-            if (after.isEmpty()) {
-                try {
+
+                List<OpenListFileInfo> after = fsListForCleanup(childPath);
+                boolean hasProtected = after.stream().anyMatch(f ->
+                        Boolean.TRUE.equals(f.getIsDir()) || isProtectedTempFile(f));
+                if (!hasProtected && after.stream().allMatch(f -> Boolean.TRUE.equals(f.getIsDir()) || isJunkTempFile(f))) {
+                    for (OpenListFileInfo junk : after) {
+                        if (Boolean.TRUE.equals(junk.getIsDir())) {
+                            continue;
+                        }
+                        try {
+                            fsRemove(childPath, List.of(junk.getName()));
+                        } catch (Exception e) {
+                            log.debug("删除垃圾失败 {}/{}: {}", childPath, junk.getName(), e.getMessage());
+                        }
+                    }
+                    after = fsListForCleanup(childPath);
+                }
+                if (after.isEmpty()) {
                     fsRemove(path, List.of(entry.getName()));
                     log.info("删除空子目录 {}/{}", path, entry.getName());
-                } catch (Exception e) {
-                    log.debug("删除空子目录失败 {}/{}: {}", path, entry.getName(), e.getMessage());
                 }
+            } catch (Exception e) {
+                log.debug("删除空子目录：列举失败，跳过 {}: {}", childPath, ExceptionUtils.getMessage(e));
             }
         }
     }
@@ -3854,6 +3907,26 @@ public class OpenList implements BaseDownload, OfflineDownloader {
      */
     public List<OpenListFileInfo> fsList(String path, Boolean refresh) {
         return api.fsList(path, refresh);
+    }
+
+    /**
+     * <b>清理路径</b>专用的单层列举：与 {@link #fsList} 同样是「单层、一次」，但<b>查询失败时抛出</b>。
+     * <p>
+     * 为什么清理路径不能用宽容版：{@link OpenListApi#fsList} 内部 {@code catch (Exception) { return List.of(); }}，
+     * 于是"网盘抖动"被读成"这个目录是空的"，而清理路径的下一步动作恰恰是
+     * {@code fs/remove}——115 对非空目录是<b>整树删除</b>。一次抖动就能删掉仍含未归位视频的目录，
+     * 且网盘文件不可恢复。这与判定路径的"查询失败绝不能降级成确认没有"是同一条不变量，
+     * 只是方向从"误判没下完"变成了"误删已下完"。
+     * <p>
+     * 「目录不存在」按既定口径是业务事实（= 确认没有），返回空列表；其余失败一律抛出，
+     * 由调用方<b>放弃本次清理</b>。清理是幂等的、可以下次再做，而删除不可逆。
+     */
+    List<OpenListFileInfo> fsListForCleanup(String path) {
+        try {
+            return api.fsListStrict(path, true);
+        } catch (OpenListApi.OpenListDirNotFoundException e) {
+            return List.of();
+        }
     }
 
     /**
@@ -4643,11 +4716,11 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 boolean empty = true;
                 Set<String> innerEpisodeKeys = new HashSet<>();
                 try {
-                    // 浅层 list：残留分类只需一级信号，避免递归 findFiles 打爆 API
-                    List<OpenListFileInfo> inside = fsList(tempPath, false);
-                    if (inside == null) {
-                        inside = List.of();
-                    }
+                    // 浅层 list：残留分类只需一级信号，避免递归 findFiles 打爆 API。
+                    // 必须用严格版：下面那段 catch 把"查不到"降级为 junkOnly=false（= KEEP，需人工确认），
+                    // 但宽容版从不抛异常 ⇒ 那段 catch 是死代码，查询失败会被判成"仅垃圾/为空"，
+                    // 随后 cleanTempDirResiduals 用 force=true 整树删掉仍有媒体的目录。
+                    List<OpenListFileInfo> inside = fsListForCleanup(tempPath);
                     for (OpenListFileInfo f : inside) {
                         if (f == null) continue;
                         empty = false;
@@ -4671,6 +4744,12 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                         }
                     }
                 } catch (Exception e) {
+                    // 查不到 ≠ 空：信息不足时按「仍有内容」处理，交给 TempDirResidualPolicy 判 KEEP。
+                    // empty 也必须置 false —— 否则下面的 `if (empty) { junkOnly = true; }` 会把它翻回来，
+                    // 失败就又变回「仅垃圾或为空」，一键清理随后整树删除。
+                    log.debug("临时目录残留分类：列举失败，按需人工确认处理 {}: {}",
+                            tempPath, ExceptionUtils.getMessage(e));
+                    empty = false;
                     junkOnly = false;
                 }
                 if (empty) {
