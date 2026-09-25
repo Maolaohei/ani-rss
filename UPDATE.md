@@ -22,6 +22,21 @@
 
 ---
 
+## 3.4.26 增量（2026-09）
+
+### qB 偏移缓存键改用种子文件解析的真实 infoHash
+
+来源偏移审计的收尾：源 XML 不带 infohash 的 .torrent 直链，其 `item.infoHash` 是下载 URL 的 sha256（`ItemsUtil` 兜底），与 qB 上报的真实 btih **对不上** ⇒ v3.4.25 按 infoHash 写入的偏移缓存永远查不中，这类源的多文件合集重命名仍回退 0（旧错误行为）。
+
+- 提交 .torrent 时用 `TorrentFile.getHexHash()` 解析真实 btih 作为缓存键（权威值），解析失败回退 `item.infoHash` 保持既有覆盖
+- 磁力提交（.txt 记录，文件名即 btih）与 XML 自带 infohash 的源不受影响；Aria2/Transmission 按各自 gid 作键，两侧一致，无此问题
+
+#### 验证
+
+后端 `mvn test` 全量 **976 + 4 e2e / 0 失败 / 0 跳过**。
+
+---
+
 ## 3.4.25 增量（2026-09）
 
 ### qB/Aria2 多文件合集重命名接入来源 RSS 集数偏移
