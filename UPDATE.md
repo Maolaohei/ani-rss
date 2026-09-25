@@ -22,6 +22,23 @@
 
 ---
 
+## 3.4.25 增量（2026-09）
+
+### qB/Aria2 多文件合集重命名接入来源 RSS 集数偏移
+
+来源偏移审计发现的同族隐患：种子内文件是**源命名**，而重命名模板（种子名 = `item.reName`）是**目标口径**——`getFileReNameMulti` 此前把源集数直接替换进模板，RSS 配了集数偏移时（主源偏移 ≠ 0 或备用源偏移与订阅不同）产出 E96 的错误命名，与 3.4.23 实测事故同根。单文件路径模板原样使用，不受影响；OpenList 离线路径已在 3.4.23/24 修复。
+
+- `shiftEpisode` / `rssOffsetOf` 上移到 `BaseDownload` 共享，OpenList 委托同一份实现
+- `getFileReNameMulti` 增加偏移重载：文件名集数先按来源偏移平移再替换进模板
+- Aria2 提交时按 gid、qBittorrent 按 infoHash 把 `item.rssOffset` 写入 `RenameCacheUtil`（`rssOffset:` 前缀），重命名时读回；缺失或不可解析回退 0 = 改造前行为
+- Transmission 无逐文件重命名，不涉及
+
+#### 验证
+
+后端 `mvn test` 全量 **976 + 4 e2e / 0 失败 / 0 跳过**；偏移比较点全库审计（`extractEpisodeFromFileName` / `parseEpisodeNumber`）仅剩 `isMultiEpisode`（偏移不变的集数多样性判定）。
+
+---
+
 ## 3.4.24 增量（2026-09）
 
 ### 按集数匹配的兜底链接入来源 RSS 集数偏移（3.4.23 已知边界收尾）
