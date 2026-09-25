@@ -22,6 +22,56 @@
 
 ---
 
+## 3.4.22 增量（2026-09）
+
+上一版收的是「启动恢复」上的宽容/严格混用；这一版把同一类问题在**清理路径**上收干净。
+这一批比上一版更严重：上一版丢的是可以重建的计划快照，这一版删的是**网盘上不可恢复的文件**。
+
+### 清理路径：查询失败不再被当成「目录为空」而整树删除
+
+`OpenListApi.fsList()` 内部是 `catch (Exception) { return List.of(); }` —— **从不抛异常**。
+清理路径上有 7 处直接用它判空，于是「网盘抖一下」被读成「这个目录是空的」，紧接着就是 `fs/remove`；
+而 115 对非空目录的 `fs/remove` 是**整树删除**（本仓库自己的注释就写着这一点）——
+一次抖动就能删掉仍含未归位视频的目录。多处 `try/catch` 也因此是死代码：被包的调用根本不抛。
+
+| 位置 | 原先的判空 | 后果 |
+| --- | --- | --- |
+| `purgeJunkAndEmptyDirsBottomUp` | `fsList(childPath).isEmpty()` | 子目录被整树删 |
+| `deleteEmptyChainUnderCloudRoot` | `!children.isEmpty()` | 沿「空链」上溯删掉非空目录 |
+| `cleanupEmptyChain` | 同上 | 同上（任务管理器「遗留修复」） |
+| `removeEmptyDirsBottomUp` | `after.isEmpty()` | 子目录被删 |
+| `repairNestedUnder` 的顶层同名守卫 | `topNames` 取自宽容版 | 守卫失效 ⇒ `fsMove` **覆盖顶层已有成片** |
+| `cleanupTempDownloadDir(force=false)` 的谨慎模式 | `listFilesWithRetry` 用宽容版 | 「确认没有受保护媒体」假成立 ⇒ 整树删临时目录 |
+| 临时目录残留扫描的分类 | `fsList(tempPath)` 失败被读成「仅垃圾/为空」 | 预览判为可清理 ⇒ 一键清理整树删 |
+
+新增 `fsListForCleanup(path)`：走严格版，`isDirNotFoundMessage`（目录确实不存在）按既定口径视为空列表，
+其余失败一律抛出，由调用方**放弃本次清理**。清理是幂等的、可以下次再做，而删除不可逆 ——
+这与判定路径「查询失败绝不能降级成确认没有」是同一条不变量，只是方向从「误判没下完」变成了「误删已下完」。
+
+顺带两处收尾：
+
+- 临时目录残留扫描里 `catch (Exception e) { junkOnly = false; }` 本就写着「查不到 → 交人工确认」的意图，
+  只因宽容版从不抛异常而是**死代码**。这次让那段 catch 真正可达，并补上 `empty = false`
+  （否则紧随其后的 `if (empty) { junkOnly = true; }` 会把它翻回来）。
+- `purgeJunkAndEmptyDirsBottomUp` 里的 `allChildrenEmpty` 写了三处、从不被读（返回值用的是末尾的实时列举），
+  已删除，避免继续误导。
+
+### 测试
+
+`OpenListWorkflowSimulationTest` 新增 7 条用例（场景 9「清理路径不得把查询失败读成目录为空」）：
+每条先用 mock 注入一次真实列举失败（`failingListPaths`，`code=500`，文案刻意不含
+`not found`/`timeout` 关键词，以免被当成「目录不存在」或触发重试），再断言「目录/文件必须存活」。
+
+**已做反向验证**：把两处严格调用临时改回宽容版后，7 条全部失败，症状与预期一致 ——
+顶层成片被覆盖（1000 → 700 字节）、整树目录从文件树上消失、残留扫描判成 `JUNK_CLEAN`。
+
+#### 验证
+
+- 定向 `OpenListWorkflowSimulationTest`：**16 通过 / 0 失败 / 0 跳过**（9 条原有 + 7 条新增）。
+- 后端 `mvn test` 全量 **974 通过 / 0 失败 / 0 跳过**（另 e2e **4 通过**）。
+
+---
+
 ## 3.4.21 增量（2026-09）
 
 上一版把「归位对账」的请求放大器消掉了，这一版把同一类问题在**启动恢复**链路上收干净，
