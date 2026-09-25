@@ -22,6 +22,22 @@
 
 ---
 
+## 3.4.24 增量（2026-09）
+
+### 按集数匹配的兜底链接入来源 RSS 集数偏移（3.4.23 已知边界收尾）
+
+3.4.23 把「期望文件计划」与启发式归位接入了来源偏移，但当时留下已知边界：期望计划不可用（磁力元数据拿不到）时，剩余兜底判定（本集存在检查、超时终检快照覆盖判定、savePath 递归兜底、云下载兜底、归位对账的临时目录/云下载残留）仍按 0 偏移比较文件名集数——备用源偏移与订阅不同的订阅会在这些路径上把本集文件当成不存在，表现为反复重提交或超时误判失败。
+
+- 集数匹配三基元（`expectedEpisodeVideos` / `validateCollectionEpisodes` / `snapshotCoversExpectedEpisodes`）增加偏移参数：文件名集数先按来源偏移平移再与期望集数比较；覆盖判定用采集批次实际使用的偏移反向平移期望集数
+- 全部兜底链路（`scanEpisodeFilesOnce` / `inspectTimeoutFiles` / `hasEpisodeVideos` / `findCloudDownloadEpisodeVideos` / `relocateEpisodeFiles`）按文件批次实际口径传递偏移：源命名批次（临时目录、云下载、递归兜底）用来源偏移，模板名批次（已按 reName 过滤）用 0
+- 抽出 `isTempDirLike` 统一「临时目录本身」判定；计划路径按字节数匹配，不受影响
+
+#### 验证
+
+后端 `mvn test` 全量 **976 + 4 e2e / 0 失败 / 0 跳过**；全调用点 `grep` 复核闭合。
+
+---
+
 ## 3.4.23 增量（2026-09）
 
 ### 归位集数按「来源 RSS 的偏移」换算，备用 RSS 偏移不再被订阅偏移顶掉
