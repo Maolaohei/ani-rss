@@ -22,6 +22,18 @@
 
 ---
 
+## 3.4.29 增量（2026-09）
+
+### 首页切回时重新拉取数据，不再展示陈旧内容
+
+移植上游 `0a544f8a`：DashboardView 被 keep-alive 复用时 `onActivated` 只重启轮询、不重新拉数据，切回首页展示的是离开前的陈旧内容。改为 `onActivated` 时同时 `loadAll()` + `startPolling()`。
+
+#### 验证
+
+前端 `vite build` 通过；后端 `mvn test` 全量 **976 + 4 e2e / 0 失败 / 0 跳过**。
+
+---
+
 ## 3.4.28 增量（2026-09）
 
 ### 用 TorrentMetadata 替换 2007 年的 Eclipse TorrentFile 库（移植上游 #730 修复）
