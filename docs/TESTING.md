@@ -132,6 +132,34 @@ CI（`.github/workflows/build-test.yml`）会跑测试并上传 `target/e2e-arti
 
 基线：**999 → 971**（另 e2e 4）。
 
+### 已执行的第二、三轮清理（2026-09-25，净减 7 个用例 + 2 个孤儿资源）
+
+第二轮的判据是「**类级**：这个类的存在目的就是钉死文案/格式 ⇒ 删」。第三轮把判据下沉到
+**方法级**：类里有真行为用例、但个别方法只是"证明重构没改行为"，就只删那个方法。
+
+| 删除对象 | 理由 |
+|---|---|
+| `DoctorLocalStateCacheTest`(1) | 自称验证"每个计数器都要露面"，实际只 `contains("增量追加 1 次")` —— **它没验证自己声称的不变量**，纯粹钉死一个中文字面量 |
+| `DoctorUpstreamSuggestionTest`(2) | 6 个断言全是 `contains("DNS")`/`contains("curl -4")` 文案钉死 |
+| `VcbAnalyzeTest`(1) | **零断言**，只往 stdout 打统计 —— 一个永远不会失败的测试不是测试 |
+| `TvFailClassifyTest`(1) | 不引用任何生产类，断言只检查它自己的分类是否漏项 |
+| `HttpRequestPlusNormalizeTest` 的 2 个方法 | 「与重构前的内联正则逐条对齐」= 变更检测（旧实现不是规格）；「钉住 quirk 防止误以为幂等」→ 注释写清即可 |
+| 资源 `vcb-titles.json`(138K) / `tv-fail-titles.txt`(22K) | 随上述两个类一起成为孤儿 |
+
+**顺带收口**：`DoctorController` 里三个"为测试而抽出的 package-private 纯函数"改回 `private`
+—— 它们的用例已删，留着就是死面，而 javadoc 里那句"抽成 package-private 是为了能测"会变成假话。
+
+**明确保留**（引用过线上事故，但守的是**通用契约**而非"一事一测"）：`AniLocksTest`（互斥矩阵）、
+`OpenListRateLimitTest`（限流/预算）、`QuiescentWindowTest`（静默判定）、`DownloadPresenceDecisionTest`
+（三态决策表）、`TaskServiceGenerationTest`（代际语义）、`LocalStateCacheTest`/`CacheUtilsTest`/
+`TmdbUtilsCacheTest`/`MikanServiceCacheTest` 等（缓存语义与线程安全）、`TorrentUtilSaveTorrentTest`
+（幂等 + 日志诚实）、`ConfigLocalStateInvalidationTest`（新增配置项忘了接失效逻辑）。
+
+> 事故写在 javadoc 里**不构成**删除理由。判别方法只有一条：**这个断言去掉之后，
+> 有没有某种失败会变得无法被发现？** 上表删掉的都是"答不会"，保留下来的都是"答会"。
+
+基线：**971 → 964**（清理本身）；加上本轮新增的「归位对账定点列举」用例 1 个 → **965**（另 e2e 4）。
+
 ## 四、常见坑
 
 - 本机/CI 必须用 `-Dexec.skip=true`：`generate-resources` 会跑 `bash ./generate-resources.sh`

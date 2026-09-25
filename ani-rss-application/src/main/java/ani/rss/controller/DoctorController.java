@@ -634,10 +634,13 @@ public class DoctorController extends BaseController {
     }
 
     /**
-     * 三态判定文案。抽成 package-private 纯函数：这些字串本身就是可排查性——
-     * 「存疑」与「失败」必须是两个独立的数，合并回一句话就分不清"网盘在抖"与"真下不动"。
+     * 三态判定文案：这些字串本身就是可排查性——「存疑」与「失败」必须是两个独立的数，
+     * 合并回一句话就分不清"网盘在抖"与"真下不动"。
+     * <p>
+     * 不写单元测试：任何断言都只能钉死中文字面量，改一次措辞就红，抓不到真正的退化。
+     * 见 {@code docs/TESTING.md}。
      */
-    static String outcomeEvidence(long success, long uncertain, long failed,
+    private static String outcomeEvidence(long success, long uncertain, long failed,
                                   long relocate, long waitExpired, long readFailure, long taskState,
                                   long planEarlyChecks, long directListing, long recursiveListing) {
         return StrUtil.format(
@@ -652,10 +655,12 @@ public class DoctorController extends BaseController {
     /**
      * 上游失败类别 → 可执行建议。
      * <p>
-     * 抽成纯函数是为了能直接固化：建议本身就是本项的价值，
-     * 把"TLS 握手超时"笼统地说成"检查网络"等于什么都没说。
+     * 建议本身就是本项的价值：把"TLS 握手超时"笼统地说成"检查网络"等于什么都没说。
+     * <p>
+     * 不写单元测试：断言「建议里必须出现 DNS / MTU / curl -4 这些字」只会把文案钉死，
+     * 改一次措辞就红，却抓不到真正的退化。见 {@code docs/TESTING.md}。
      */
-    static String upstreamSuggestion(String category) {
+    private static String upstreamSuggestion(String category) {
         if (StrUtil.isBlank(category)) {
             return "看 OpenList 自己的日志确认上游错误的完整原因";
         }
@@ -695,12 +700,16 @@ public class DoctorController extends BaseController {
     /**
      * 自检页「本地状态快照缓存」的展示文案。
      * <p>
-     * 抽成 package-private 纯函数是为了能测：{@link LocalStateCache} 的每个计数器都必须在
-     * 这里露面，否则等于"埋了指标没人看"。曾漏过「增量追加」——而增量追加正是网盘 TTL 敢用
-     * 24h 的前提，看不见它就无法判断追加链路是否真在工作（若它一直是 0，说明每集仍在走
-     * 整份失效 + 重列，网盘 API 消耗会悄悄回到改造前的量级）。
+     * {@link LocalStateCache} 的每个计数器都要在这里露面，否则等于"埋了指标没人看"。
+     * 曾漏过「增量追加」——而增量追加正是网盘 TTL 敢用 24h 的前提，看不见它就无法判断
+     * 追加链路是否真在工作（若它一直是 0，说明每集仍在走整份失效 + 重列，
+     * 网盘 API 消耗会悄悄回到改造前的量级）。
+     * <p>
+     * 不写单元测试：把计数器渲染进一句话之后，任何断言都只能钉死中文字面量；
+     * 而真正要防的"新增计数器忘了展示"本来就断言不到（除非改造成结构化输出）。
+     * 见 {@code docs/TESTING.md}。
      */
-    static String localStateCacheEvidence() {
+    private static String localStateCacheEvidence() {
         long hit = LocalStateCache.getHit();
         long miss = LocalStateCache.getMiss();
         return StrUtil.format(
