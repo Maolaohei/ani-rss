@@ -2092,25 +2092,6 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     }
 
     /**
-     * 严格列举：目录不存在按空处理，<b>其余失败一律抛出</b>。
-     * <p>
-     * 启动恢复必须用严格版：把"查询失败/限流/超时"当成"目录里没有"，
-     * 会直接把计划快照丢掉（等于放弃了这次补救）——与归位对账的
-     * {@code UNVERIFIABLE ≠ NOT_FOUND} 同一条原则。
-     */
-    private List<OpenListFileInfo> listStrictOrEmpty(String path) {
-        try {
-            return api.findFilesStrict(path);
-        } catch (Exception e) {
-            String message = ExceptionUtils.getMessage(e);
-            if (OpenListApi.isDirNotFoundMessage(message)) {
-                return List.of();
-            }
-            throw new IllegalStateException("列举失败 " + path + ": " + message, e);
-        }
-    }
-
-    /**
      * 恢复单个计划：候选目录只读比对 → 齐了才归位 → 标记完成 → 删除快照。
      */
     private void recoverOnePlan(TorrentPlanRecord record, Ani ani) {
@@ -2127,21 +2108,30 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             OfflinePlanStore.delete(infoHash);
             return;
         }
-        String tempDownloadDir = StrUtil.isBlank(tempDirName) ? null : trimTrailingSlash(savePath) + "/" + tempDirName;
-
+        // 候选 = 最终目录「顶层」文件 + 本次「临时目录」里的文件。
+        // 定点列举，不递归整个 savePath：递归的代价是「1 + savePath 下全部子目录数」次请求，
+        // 而子目录数恰恰就是残留临时目录数 —— 残留越多扫描越贵、越容易撞上上游抖动、失败后残留更多。
+        // 口径与归位对账（{@link #relocateEpisodeFiles}）保持一致：两处对"候选文件在哪"必须同一口径。
         Map<String, OpenListFileInfo> candidates = new LinkedHashMap<>();
-        if (StrUtil.isNotBlank(tempDownloadDir)) {
-            addCandidates(candidates, listStrictOrEmpty(tempDownloadDir));
+        List<OpenListFileInfo> topLevel;
+        try {
+            topLevel = api.listDirectChildrenCached(savePath);
+        } catch (OpenListApi.OpenListDirNotFoundException e) {
+            // 「下载目录在网盘上不存在」按既定口径是业务事实（= 确认没有），不是查询失败
+            topLevel = List.of();
         }
-        addCandidates(candidates, listStrictOrEmpty(savePath).stream()
-                .filter(f -> !isUnderPath(f, tempDownloadDir)).toList());
+        addCandidates(candidates, topLevel);
+        addCandidates(candidates, listTempDirFiles(topLevel, savePath, tempDirName));
         TorrentPlanMatcher.Result result =
                 TorrentPlanMatcher.match(plan, new ArrayList<>(candidates.values()));
         Set<String> cloudSourceDirs = new HashSet<>();
         if (!result.videosComplete()) {
             String cloudDir = resolveCloudDownloadDir();
             List<String> titleTokens = titleTokensOf(ani, null);
-            addCandidates(candidates, findCloudDownloadFiles().stream()
+            // 必须用严格版：宽容版把"查询失败"吞成空列表，于是"云目录里没有本集"成了一个
+            // 建立在失败之上的结论，紧接着下面的 OfflinePlanStore.delete 就把快照删了 ——
+            // 一次网盘抖动 = 永久放弃这次补救。抛出后由 recoverOfflinePlans 兜住并保留快照。
+            addCandidates(candidates, findCloudDownloadFilesStrict().stream()
                     .filter(f -> !cloudEntryLacksTitleToken(f.getName(), f.getPath(), cloudDir, titleTokens))
                     .toList());
             result = TorrentPlanMatcher.match(plan, new ArrayList<>(candidates.values()));
@@ -2772,7 +2762,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 return RelocateResult.ALREADY_AT_TOP;
             }
             // 云下载残留目录兜底（115 完成后文件可能落在根「云下载」而非目标路径）
-            List<OpenListFileInfo> source = new ArrayList<>(listTempDirFiles(topLevel, savePath, item));
+            List<OpenListFileInfo> source = new ArrayList<>(
+                    listTempDirFiles(topLevel, savePath, resolveTempDirName(item)));
             List<OpenListFileInfo> cloudFiles = findCloudDownloadFilesStrict();
             String cloudDirForGuard = resolveCloudDownloadDir();
             List<String> cloudTitleTokens = titleTokensOf(ani, item);
@@ -2916,20 +2907,22 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     }
 
     /**
-     * 定点列举「本次下载的临时目录」下的文件（归位对账用）。
+     * 定点列举「本次下载的临时目录」下的文件。
      * <p>
-     * 只走两条边：临时目录本身（名 = 本次下载的 {@code tempDirName}，见 {@link #submitOffline}），
+     * 只走两条边：临时目录本身（名 = 本次下载的 {@code tempDirName}，见 {@link #resolveTempDirName}），
      * 以及它下面那一层 115 任务目录——115 会在临时目录里再建一层
      * 「任务目录 = 种子文件名含扩展名」，视频落在那一层里。
      * <p>
-     * 刻意<b>不</b>做通用递归：归位对账是按 item 调的，请求数一旦随 savePath 下的子目录数放大，
+     * 刻意<b>不</b>做通用递归：本方法在归位对账里是按 item 调的，请求数一旦随 savePath 下的子目录数放大，
      * 就会形成"残留越多扫描越贵 → 越容易撞上上游抖动 → 失败后残留更多"的正反馈。
+     * 启动恢复（{@link #recoverOnePlan}）与归位对账（{@link #relocateEpisodeFiles}）
+     * 对"候选文件在哪"必须同一口径，所以两边共用本方法（名字由调用方给，避免两处各算一次）。
      * <p>
      * 临时目录不存在（或顶层那份列举里根本没有同名目录）= 没什么可归位的，返回空列表，
      * 交给调用方的兜底校验去判定——这不是错误。
      */
-    private List<OpenListFileInfo> listTempDirFiles(List<OpenListFileInfo> topLevel, String savePath, Item item) {
-        String tempDirName = resolveTempDirName(item);
+    private List<OpenListFileInfo> listTempDirFiles(List<OpenListFileInfo> topLevel, String savePath,
+                                                    String tempDirName) {
         if (StrUtil.isBlank(tempDirName)) {
             return List.of();
         }
@@ -3181,7 +3174,14 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             return List.of();
         }
         try {
-            api.invalidateFindFilesCache(cloudDir);
+            // 每轮只强制刷新一次（与严格版 {@link #findCloudDownloadFilesStrict} 同一口径）：
+            // 本方法会被 planScan 以「每集 × 每轮 × 每个早退检查点」的频次调用，
+            // 原先每次调用都 invalidate + 递归重走，请求数于是随「集数 × 检查点 × 云目录子目录数」
+            // 放大 —— 一个 12 集的订阅就是几十次 fs/list，网盘一抖就是几十次失败。
+            // "刷新一次"的语义不变（刚提交的离线任务可能刚落盘），其余调用复用共享列举缓存。
+            if (OpenListApi.markCloudListingRefreshedThisRound(cloudDir)) {
+                api.invalidateFindFilesCache(cloudDir);
+            }
             return findFiles(cloudDir);
         } catch (Exception e) {
             log.debug("扫描 115 云下载目录失败 {}: {}", cloudDir, ExceptionUtils.getMessage(e));

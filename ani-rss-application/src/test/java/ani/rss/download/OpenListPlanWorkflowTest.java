@@ -64,6 +64,10 @@ class OpenListPlanWorkflowTest {
     void tearDown() {
         server.stop();
         LocalStateCache.clear();
+        // OpenListApi 的失败记忆/熔断/每轮计数都是 JVM 级静态状态：
+        // 本类有用例会刻意制造列举失败（见 startup_recovery_keeps_snapshot_when_cloud_dir_listing_fails），
+        // 不清就会让后面的用例撞上"冷却中"，表现为"某用例秒败"的级联假失败。
+        OpenListApi.resetRateLimitState();
         if (previousConfigDir == null) {
             System.clearProperty("CONFIG");
         } else {
@@ -302,6 +306,76 @@ class OpenListPlanWorkflowTest {
 
         assertTrue(OfflinePlanStore.planFile(HASH).isFile(),
                 "订阅列表未就绪时不能因为'查不到订阅'就删快照");
+    }
+
+    /**
+     * 云下载目录<b>查询失败</b>（网盘故障）时必须保留快照。
+     * <p>
+     * 与 {@link #startup_recovery_drops_snapshot_when_files_not_ready} 的区别就是本用例的全部意义：
+     * 那个是"查过了，确实没有"（NOT_FOUND）→ 丢快照交回 RSS 正常轮次；
+     * 本用例是"这次没查成"（UNVERIFIABLE）→ <b>必须保留</b>。
+     * <p>
+     * 旧实现里 {@code findCloudDownloadFiles()} 把查询失败吞成空列表，于是"网盘抖一下"被读成
+     * "云目录里没有本集"，紧接着 {@code OfflinePlanStore.delete} 把快照删了 —— 一次网络故障
+     * 就永久放弃了这次补救，与该方法的注释（"保留快照：可能是网盘暂时不可用，下次启动再试"）
+     * 和"查询失败绝不能降级成确认没有"直接矛盾。
+     */
+    @Test
+    void startup_recovery_keeps_snapshot_when_cloud_dir_listing_fails() throws Exception {
+        server.placeTaskDirInTarget = false;
+        String cloudDir = "/云下载";
+        server.putFile(cloudDir + "/keep.txt", 1L); // 目录存在，但列举会失败
+        server.failingListPaths.add(cloudDir);
+
+        File torrent = TestTorrent.temp("p4f", "Show S01E03", List.of(
+                TestTorrent.file("Show S01E03/Show - 03.mkv", 1031L)));
+        Ani ani = ani();
+        OfflinePlanStore.save(HASH, ani.getId(), savePath, tempDirName, "Show S01E03", planOf(torrent));
+
+        openList(cloudDir).recoverOfflinePlans(List.of(ani));
+
+        assertTrue(server.fsListCalls.contains(cloudDir),
+                "应确实尝试过扫描云下载目录，实际 fs/list=" + server.fsListCalls);
+        assertTrue(OfflinePlanStore.planFile(HASH).isFile(),
+                "云下载目录查询失败（网盘故障）时必须保留快照，不能降级成'确认没有'");
+    }
+
+    /**
+     * 启动恢复的候选文件必须"定点列举"，不能递归整个 savePath。
+     * <p>
+     * 递归列举的代价是「1 + savePath 下全部子目录数」次请求，而 savePath 下的子目录数
+     * 恰恰就是残留临时目录数 —— 残留越多扫描越贵、越容易撞上上游抖动、失败后残留更多，是个正反馈。
+     * 本用例堆 20 个无关子目录，断言它们<b>一个都不被列举</b>（请求数与子目录数解耦），
+     * 同时功能上仍要能把本次临时目录里的文件归位。
+     */
+    @Test
+    void startup_recovery_lists_only_the_expected_temp_dir_not_every_subdirectory() throws Exception {
+        server.placeTaskDirInTarget = false;
+        server.putFile(savePath + "/" + tempDirName + "/mystery.mkv", 1031L);
+        for (int i = 0; i < 20; i++) {
+            server.putFile(savePath + "/无关残留 " + i + "/x.mkv", 10L);
+        }
+
+        File torrent = TestTorrent.temp("p4g", "Show S01E03", List.of(
+                TestTorrent.file("Show S01E03/Show - 03.mkv", 1031L)));
+        List<Item> plan = planOf(torrent);
+        String expectedVideo = plan.get(0).getReName();
+
+        Ani ani = ani();
+        OfflinePlanStore.save(HASH, ani.getId(), savePath, tempDirName, "Show S01E03", plan);
+
+        openList().recoverOfflinePlans(List.of(ani));
+
+        assertTrue(server.topLevel(savePath).contains(expectedVideo),
+                "启动恢复应把临时目录里的文件搬到顶层并改名，实际=" + server.allPaths());
+        assertTrue(server.fsListCalls.contains(savePath),
+                "应单层列举最终目录本身，实际 fs/list=" + server.fsListCalls);
+        assertTrue(server.fsListCalls.contains(savePath + "/" + tempDirName),
+                "必须定点列举本次的临时目录（文件在那里），实际 fs/list=" + server.fsListCalls);
+        for (int i = 0; i < 20; i++) {
+            assertFalse(server.fsListCalls.contains(savePath + "/无关残留 " + i),
+                    "无关子目录不得被列举：请求数不能随子目录数放大，实际 fs/list=" + server.fsListCalls);
+        }
     }
 
     @Test

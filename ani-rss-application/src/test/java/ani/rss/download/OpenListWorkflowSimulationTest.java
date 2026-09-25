@@ -432,6 +432,16 @@ class OpenListWorkflowSimulationTest {
         volatile boolean preserveExtOnRename = false;
         /** 记录 fs/list 被访问过的路径（验证兜底路径真实触发） */
         final java.util.Set<String> fsListCalls = ConcurrentHashMap.newKeySet();
+        /**
+         * 让这些路径的 fs/list 返回<b>真实失败</b>（code=500），用于验证
+         * "查询失败 ≠ 目录为空"这条口径 —— 失败必须走"保留/存疑"，绝不能降级成"确认没有"。
+         * <p>
+         * 文案刻意<b>不含</b>任何关键词（既不是 "not found" 这类"目录不存在"，也不是
+         * "timeout"/"handshake" 这类瞬时故障标记）：前者会被判成"确认没有"（那就测不到失败路径了），
+         * 后者会触发 {@code retryIdempotent} 的 3 次重试（{500ms,1500ms}），把用例拖慢且引入时序抖动。
+         * 生产上瞬时故障走的是同一条"抛异常"分支，行为一致，只是更慢。
+         */
+        final java.util.Set<String> failingListPaths = ConcurrentHashMap.newKeySet();
 
         private final Gson gson = new Gson();
 
@@ -596,6 +606,13 @@ class OpenListWorkflowSimulationTest {
                     case "fs/list": {
                         String path = str(req, "path");
                         fsListCalls.add(path);
+                        if (failingListPaths.contains(norm(path))) {
+                            // 真实失败：不是"目录不存在"，也不是瞬时故障（见 failingListPaths 注释）
+                            JsonObject failed = new JsonObject();
+                            failed.addProperty("code", 500);
+                            failed.addProperty("message", "mock fs/list failure");
+                            return failed;
+                        }
                         JsonArray content = new JsonArray();
                         String parent = norm(path);
                         entries.forEach((p, e) -> {
