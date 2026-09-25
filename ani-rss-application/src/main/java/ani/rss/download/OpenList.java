@@ -834,20 +834,11 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         // 最终重命名始终使用订阅模板结果；合集临时目录可单独使用源标题
         String finalRenameBase = item.getReName();
         String reName = finalRenameBase;
-        String tempDirName = finalRenameBase;
+        // 临时目录名与归位对账共用同一实现（resolveTempDirName），避免两处算出来的名字漂移
+        String tempDirName = resolveTempDirName(item);
 
         boolean isCollection = item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty();
         if (isCollection) {
-            String collectionName = item.getTitle();
-            // 清理标题中的路径分隔符，取第一层文件夹名
-            collectionName = collectionName.replace("\\", "/");
-            if (collectionName.contains("/")) {
-                collectionName = collectionName.substring(0, collectionName.indexOf("/"));
-            }
-            collectionName = RenameUtil.getName(collectionName);
-            if (StrUtil.isNotBlank(collectionName)) {
-                tempDirName = collectionName;
-            }
             log.info("合集下载，使用原始标题作为临时目录: {}，最终命名仍使用模板: {}", tempDirName, finalRenameBase);
         }
 
@@ -2748,16 +2739,17 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         // 季数守卫：优先用订阅季数，reName 无 SxxExx 时回退
         Integer expectedSeason = ani.getSeason() != null ? ani.getSeason() : expectedSeasonOf(finalRenameBase);
         try {
-            // 必须用严格版列举：宽容版 findFiles 会把异常吞成空列表，
+            // 顶层必须用严格版列举：宽容版 findFiles 会把异常吞成空列表，
             // 于是"网盘查询失败"在这一层就被伪装成"目录里什么都没有"，
             // 归位对账便一路走到 NOT_FOUND —— 调用方据此删记录重下。
             // 2026-09-18 日志里「递归列出网盘目录失败 …TLS handshake timeout」紧跟着
             // 「归位对账未找到」就是这个链条。
-            List<OpenListFileInfo> files;
+            // 列举方式用「定点单层」而非递归 findFilesStrict：后者代价是「1 + 全部子目录数」
+            // 次请求，而 savePath 下的子目录数恰恰就是残留临时目录数 —— 残留越多扫描越贵、
+            // 越容易撞上上游抖动、失败后残留更多，是个正反馈。定点列举把请求数钉成常数。
+            List<OpenListFileInfo> topLevel;
             try {
-                files = api.findFilesStrict(savePath).stream()
-                        .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
-                        .toList();
+                topLevel = api.listDirectChildrenCached(savePath);
             } catch (OpenListApi.OpenListDirNotFoundException e) {
                 // 「下载目录在网盘上不存在」按既定口径是业务事实（= 确认没有），不是查询失败。
                 // 落在外层 catch(Exception) 会把这条变成 UNVERIFIABLE，于是该目录下每条记录
@@ -2769,7 +2761,10 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 return RelocateResult.NOT_FOUND;
             }
             String saveNorm = trimTrailingSlash(savePath);
-            List<OpenListFileInfo> topVideos = files.stream()
+            List<OpenListFileInfo> topFiles = topLevel.stream()
+                    .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
+                    .toList();
+            List<OpenListFileInfo> topVideos = topFiles.stream()
                     .filter(f -> FileUtils.isVideoFormat(f.getName()))
                     .filter(f -> Objects.equals(trimTrailingSlash(f.getPath()), saveNorm))
                     .toList();
@@ -2777,9 +2772,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 return RelocateResult.ALREADY_AT_TOP;
             }
             // 云下载残留目录兜底（115 完成后文件可能落在根「云下载」而非目标路径）
-            List<OpenListFileInfo> source = new ArrayList<>(files.stream()
-                    .filter(f -> !Objects.equals(trimTrailingSlash(f.getPath()), saveNorm))
-                    .toList());
+            List<OpenListFileInfo> source = new ArrayList<>(listTempDirFiles(topLevel, savePath, item));
             List<OpenListFileInfo> cloudFiles = findCloudDownloadFilesStrict();
             String cloudDirForGuard = resolveCloudDownloadDir();
             List<String> cloudTitleTokens = titleTokensOf(ani, item);
@@ -2854,7 +2847,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             for (Map.Entry<String, String> entry : renameMap.entrySet()) {
                 String srcName = entry.getKey();
                 String newName = Boolean.TRUE.equals(config.getRename()) ? entry.getValue() : srcName;
-                String dirPath = files.stream()
+                String dirPath = topFiles.stream()
                         .filter(f -> srcName.equals(f.getName()))
                         .findFirst()
                         .map(OpenListFileInfo::getPath)
@@ -2920,6 +2913,86 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                     savePath, item.getReName(), ExceptionUtils.getMessage(e));
             return RelocateResult.UNVERIFIABLE;
         }
+    }
+
+    /**
+     * 定点列举「本次下载的临时目录」下的文件（归位对账用）。
+     * <p>
+     * 只走两条边：临时目录本身（名 = 本次下载的 {@code tempDirName}，见 {@link #submitOffline}），
+     * 以及它下面那一层 115 任务目录——115 会在临时目录里再建一层
+     * 「任务目录 = 种子文件名含扩展名」，视频落在那一层里。
+     * <p>
+     * 刻意<b>不</b>做通用递归：归位对账是按 item 调的，请求数一旦随 savePath 下的子目录数放大，
+     * 就会形成"残留越多扫描越贵 → 越容易撞上上游抖动 → 失败后残留更多"的正反馈。
+     * <p>
+     * 临时目录不存在（或顶层那份列举里根本没有同名目录）= 没什么可归位的，返回空列表，
+     * 交给调用方的兜底校验去判定——这不是错误。
+     */
+    private List<OpenListFileInfo> listTempDirFiles(List<OpenListFileInfo> topLevel, String savePath, Item item) {
+        String tempDirName = resolveTempDirName(item);
+        if (StrUtil.isBlank(tempDirName)) {
+            return List.of();
+        }
+        boolean present = topLevel.stream().anyMatch(f -> Boolean.TRUE.equals(f.getIsDir())
+                && tempDirName.equalsIgnoreCase(StrUtil.trim(f.getName())));
+        if (!present) {
+            return List.of();
+        }
+        String tempPath = trimTrailingSlash(savePath) + "/" + tempDirName;
+        List<OpenListFileInfo> inside;
+        try {
+            inside = api.listDirectChildrenCached(tempPath);
+        } catch (OpenListApi.OpenListDirNotFoundException e) {
+            log.debug("归位对账: 临时目录已不存在 {}", tempPath);
+            return List.of();
+        }
+        List<OpenListFileInfo> files = new ArrayList<>();
+        for (OpenListFileInfo f : inside) {
+            if (!Boolean.TRUE.equals(f.getIsDir())) {
+                files.add(f);
+                continue;
+            }
+            String childName = StrUtil.trim(f.getName());
+            if (StrUtil.isBlank(childName)) {
+                continue;
+            }
+            try {
+                api.listDirectChildrenCached(tempPath + "/" + childName).stream()
+                        .filter(nested -> !Boolean.TRUE.equals(nested.getIsDir()))
+                        .forEach(files::add);
+            } catch (OpenListApi.OpenListDirNotFoundException e) {
+                log.debug("归位对账: 任务目录已不存在 {}/{}", tempPath, childName);
+            }
+        }
+        return files;
+    }
+
+    /**
+     * 本次离线下载使用的临时目录名。
+     * <p>
+     * 非合集 = 最终命名（{@code item.getReName()}）；合集 = 源标题的首段
+     * （整季包用原始标题建目录，最终命名仍走模板）。
+     * <p>
+     * <b>必须与 {@link #submitOffline} 共用同一实现</b>：归位对账靠这个名字定点找到文件，
+     * 两边算出来的名字一旦漂移，就会"下载完了却永远找不到"，进而被判成需要重新下载。
+     */
+    static String resolveTempDirName(Item item) {
+        if (item == null) {
+            return null;
+        }
+        String finalRenameBase = item.getReName();
+        boolean isCollection = item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty();
+        if (!isCollection) {
+            return finalRenameBase;
+        }
+        String collectionName = StrUtil.blankToDefault(item.getTitle(), finalRenameBase);
+        // 清理标题中的路径分隔符，取第一层文件夹名
+        collectionName = collectionName.replace("\\", "/");
+        if (collectionName.contains("/")) {
+            collectionName = collectionName.substring(0, collectionName.indexOf("/"));
+        }
+        collectionName = RenameUtil.getName(collectionName);
+        return StrUtil.isNotBlank(collectionName) ? collectionName : finalRenameBase;
     }
 
     /**

@@ -277,6 +277,46 @@ class OpenListWorkflowSimulationTest {
         awaitFinalTopLevel(savePath, List.of("A季 S01E13.mp4"), 30_000);
     }
 
+    // ============ 场景 8：归位对账只定点列举「本次的临时目录」 ============
+
+    /**
+     * v3 的「单层、一次」不变量：归位对账的请求数<b>不得随 savePath 下的子目录数放大</b>。
+     * <p>
+     * 原先它走递归 {@code findFilesStrict(savePath)}，代价是「1 + 全部子目录数」次 {@code fs/list}。
+     * 而 savePath 下的子目录数恰恰就是<b>残留临时目录数</b>——残留越多扫描越贵、越容易撞上上游抖动、
+     * 失败后残留更多，是个正反馈。这里堆 20 个无关子目录把这个放大器钉出来：它们一个都不该被列举。
+     * <p>
+     * 同时保留两层嵌套（临时目录 / 115 任务目录）的归位能力——那才是本集文件的真实位置，
+     * 定点列举必须把它扫到，否则"消除放大器"就变成了"看不见文件"。
+     */
+    @Test
+    void relocate_lists_only_the_expected_temp_dir_not_every_subdirectory() {
+        String savePath = "/追番/Show/Season 1";
+        String tempDirName = "Show S01E03";
+        // 真实形态：115 在临时目录下再建一层「任务目录 = 种子文件名含扩展名」
+        server.putFile(savePath + "/" + tempDirName + "/" + RAW_FILE_NAME + "/" + RAW_FILE_NAME, 1000L);
+        // 无关子目录：递归列举会为每一个都发一次 fs/list
+        for (int i = 0; i < 20; i++) {
+            server.putFile(savePath + "/无关残留 " + i + "/x.mkv", 10L);
+        }
+
+        OpenList openList = openList(savePath);
+        assertEquals(OfflineDownloader.RelocateResult.RELOCATED,
+                openList.relocateEpisodeFiles(ani(), item(HASH7, "Show", 3.0), savePath),
+                "两层嵌套下的本集文件应被归位到顶层，实际顶层=" + server.topLevel(savePath));
+        assertTrue(server.topLevel(savePath).contains(tempDirName + ".mkv"),
+                "应出现最终文件，实际顶层=" + server.topLevel(savePath));
+
+        assertTrue(server.fsListCalls.contains(savePath + "/" + tempDirName),
+                "必须定点列举本次的临时目录，实际 fs/list=" + server.fsListCalls);
+        assertTrue(server.fsListCalls.contains(savePath + "/" + tempDirName + "/" + RAW_FILE_NAME),
+                "临时目录下的 115 任务目录也要列到（文件在那里），实际 fs/list=" + server.fsListCalls);
+        for (int i = 0; i < 20; i++) {
+            assertFalse(server.fsListCalls.contains(savePath + "/无关残留 " + i),
+                    "无关子目录不得被列举：请求数不能随子目录数放大，实际 fs/list=" + server.fsListCalls);
+        }
+    }
+
     // ============ 辅助 ============
 
     private OpenList openList(String savePath) {

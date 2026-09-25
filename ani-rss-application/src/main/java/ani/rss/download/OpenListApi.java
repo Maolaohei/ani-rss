@@ -159,6 +159,18 @@ public class OpenListApi {
     private static final Map<String, CachedFileList> findFilesCache = new ConcurrentHashMap<>();
 
     /**
+     * 判定路径「定点列举」用的单层缓存：只存<b>直接子项</b>，与递归版同量级的 30s TTL。
+     * <p>
+     * 不能与 {@link #findFilesCache} 混用：同一个 path 在两张表里语义不同
+     * （递归整棵树 vs 只此一层），混存会让调用方读到错误粒度的列表。
+     * 两者的失效时机完全同步，见 {@link #invalidateFindFilesCache}。
+     */
+    private static final long DIRECT_CHILDREN_TTL_MS = java.util.concurrent.TimeUnit.SECONDS.toMillis(30);
+    private static final Map<String, CachedFileList> directChildrenCache = new ConcurrentHashMap<>();
+    private static final Map<String, CompletableFuture<List<OpenListFileInfo>>> directChildrenInFlight =
+            new ConcurrentHashMap<>();
+
+    /**
      * 缓存世代号：每次失效自增。构建开始时快照，写缓存前比对，防止"失效后旧结果回填"。
      * <p>
      * 场景：线程 A 正在递归列举（HTTP 慢），期间目录发生 rename/move 触发失效；
@@ -912,6 +924,65 @@ public class OpenListApi {
                 .map(OpenListFileInfo::getName)
                 .filter(StrUtil::isNotBlank)
                 .collect(Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    /**
+     * 判定路径的「定点列举」：只读一个目录的直接子项，结果进 30s 短缓存（与递归版同量级）。
+     * <p>
+     * 与 {@link #listDirectChildrenStrict(String, boolean)} 的唯一区别是缓存——
+     * 那个是"每次都必须新鲜"的<b>确认</b>读（收尾确认靠它），
+     * 这个是"先看一眼"的<b>判定</b>读，允许与递归版相同的陈旧窗口。
+     * <p>
+     * <b>为什么必须缓存</b>：{@code OpenList.relocateEpisodeFiles} 是<b>按 item</b> 调的，
+     * 一个 12 集的订阅会走 12 次。若每次真发请求，就等于把「1 + 子目录数」换成了「订阅集数」——
+     * 只是换了个放大器。缓存后同一目录在一个窗口内只真列一次。
+     * <p>
+     * <b>为什么不能用 {@link #findFilesStrict(String)} 代替</b>：那个会把每个子目录都列一遍，
+     * 请求数是「1 + 子目录数」。而 savePath 下的子目录数恰恰就是<b>残留临时目录数</b>——
+     * 残留越多扫描越贵、越容易撞上上游抖动、失败后残留更多，是个正反馈。
+     * <p>
+     * 失败语义与单层严格版一致：查询失败照样抛出（不吞成空列表），调用方据此报「存疑」；
+     * 失败结果不入缓存，只由 {@code listingFailures} 的失败记忆挡住重复请求。
+     */
+    public List<OpenListFileInfo> listDirectChildrenCached(String path) {
+        CachedFileList cached = directChildrenCache.get(path);
+        if (cached != null && cached.expireAt > System.currentTimeMillis()) {
+            listingCacheHit.incrementAndGet();
+            return cached.files;
+        }
+        CompletableFuture<List<OpenListFileInfo>> mine = new CompletableFuture<>();
+        CompletableFuture<List<OpenListFileInfo>> existing = directChildrenInFlight.putIfAbsent(path, mine);
+        if (existing != null) {
+            listingCoalesced.incrementAndGet();
+            return awaitCoalescedFiles(path, existing);
+        }
+        try {
+            // 只有真的要发请求时才消耗"每轮列举预算"（与 buildFileList 同一口径：
+            // 缓存命中与被合并的等待方都不消耗）
+            listingCacheMiss.incrementAndGet();
+            listingCallCountRound.incrementAndGet();
+            long epoch = cacheEpoch.get();
+            List<OpenListFileInfo> files;
+            try {
+                files = listDirectChildrenStrict(path, true);
+            } catch (RuntimeException e) {
+                mine.completeExceptionally(e);
+                throw e;
+            }
+            mine.complete(files);
+            if (cacheEpoch.get() == epoch) {
+                CachedFileList published = new CachedFileList(files, DIRECT_CHILDREN_TTL_MS);
+                directChildrenCache.put(path, published);
+                if (cacheEpoch.get() != epoch) {
+                    // "检查→写入"之间仍可能被失效抢占：精确回滚自己写的那条，
+                    // remove(key, value) 不会误删新构建者的结果
+                    directChildrenCache.remove(path, published);
+                }
+            }
+            return files;
+        } finally {
+            directChildrenInFlight.remove(path, mine);
+        }
     }
 
     /**
@@ -1792,9 +1863,11 @@ public class OpenListApi {
         cacheEpoch.incrementAndGet();
         if (changedPaths == null || changedPaths.stream().allMatch(StrUtil::isBlank)) {
             findFilesCache.clear();
+            directChildrenCache.clear();
             listNamesCache.clear();
             listNamesExpire.clear();
             findFilesInFlight.clear();
+            directChildrenInFlight.clear();
             listNamesInFlight.clear();
             return;
         }
@@ -1804,9 +1877,13 @@ public class OpenListApi {
                 .distinct()
                 .toList();
         findFilesCache.keySet().removeIf(k -> isAffectedByChange(k, roots));
+        // 定点列举缓存与递归缓存必须同生共死：否则目录变更后递归读已刷新、定点读还是旧的，
+        // 归位对账会拿着"变更前"的顶层去判 ALREADY_AT_TOP
+        directChildrenCache.keySet().removeIf(k -> isAffectedByChange(k, roots));
         listNamesCache.keySet().removeIf(k -> isAffectedByChange(k, roots));
         listNamesExpire.keySet().removeIf(k -> isAffectedByChange(k, roots));
         findFilesInFlight.keySet().removeIf(k -> isAffectedByChange(k, roots));
+        directChildrenInFlight.keySet().removeIf(k -> isAffectedByChange(k, roots));
         listNamesInFlight.keySet().removeIf(k -> isAffectedByChange(k, roots));
         // 目录已经变了，失败记忆也必须跟着失效：否则一次抖动会把"新目录已经能列了"也拦 30s
         listingFailures.keySet().removeIf(k -> isAffectedByChange(k, roots));
