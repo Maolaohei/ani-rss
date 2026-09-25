@@ -211,6 +211,9 @@ public class Aria2 implements BaseDownload {
         boolean v2 = RenameUtil.isNamingV2(ani);
         if (!ova || v2) {
             RenameCacheUtil.put(id, name);
+            // 多文件合集 rename 时要把源命名集数平移成目标口径，按 gid 缓存来源偏移
+            RenameCacheUtil.put(RSS_OFFSET_CACHE_PREFIX + id,
+                    String.valueOf(BaseDownload.rssOffsetOf(item)));
         }
 
         // addTorrent 返回 gid 即已入队，无需 3×10s 轮询确认；状态由 RenameTask 周期性兜底
@@ -255,6 +258,8 @@ public class Aria2 implements BaseDownload {
             log.debug("未获取到重命名 => id: {}", id);
             return false;
         }
+        // 提交时缓存的来源集数偏移：多文件合集的源命名集数要平移成目标口径
+        int episodeOffset = BaseDownload.cachedRssOffset(RenameCacheUtil.get(RSS_OFFSET_CACHE_PREFIX + id));
 
         List<File> files = torrentsInfo.getFiles().get()
                 .stream()
@@ -296,7 +301,7 @@ public class Aria2 implements BaseDownload {
 
             String fileReName;
             if (isMultiFile) {
-                fileReName = getFileReNameMulti(name, reName, isSub);
+                fileReName = getFileReNameMulti(name, reName, isSub, episodeOffset);
             } else {
                 fileReName = getFileReName(name, reName);
             }

@@ -479,10 +479,10 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     /**
      * 条目「来源 RSS 的集数偏移」：条目自带则用它；没带（老数据 / 非 RSS 入口）按 0 处理，
      * 即保持改造前的行为——文件名里的集数直接当最终集数，不做平移。
+     * 实现在 {@link BaseDownload#rssOffsetOf}（qB/Aria2 重命名链路共用同一份）。
      */
     static int sourceOffsetOf(Item item) {
-        Integer sourceOffset = item == null ? null : item.getRssOffset();
-        return sourceOffset == null ? 0 : sourceOffset;
+        return BaseDownload.rssOffsetOf(item);
     }
 
     /**
@@ -2610,19 +2610,10 @@ public class OpenList implements BaseDownload, OfflineDownloader {
      * 平移量必须来自<b>产生该条目的那条 RSS</b>，而不是订阅的 {@code ani.offset}：
      * 备用 RSS 各自带偏移时两者不同（实测 96 应归到 24，用订阅偏移则仍是 96）。
      * 偏移为 0 或集数不是数字时原样返回，行为与改造前一致。
+     * 实现在 {@link BaseDownload#shiftEpisode}（qB/Aria2 重命名链路共用同一份）。
      */
     private static String shiftEpisode(String episode, int episodeOffset) {
-        if (episodeOffset == 0 || StrUtil.isBlank(episode)) {
-            return episode;
-        }
-        try {
-            double shifted = Double.parseDouble(episode) + episodeOffset;
-            return shifted == Math.floor(shifted)
-                    ? String.valueOf((long) shifted)
-                    : String.valueOf(shifted);
-        } catch (NumberFormatException e) {
-            return episode;
-        }
+        return BaseDownload.shiftEpisode(episode, episodeOffset);
     }
 
     private static String formatEpisode(String episode) {

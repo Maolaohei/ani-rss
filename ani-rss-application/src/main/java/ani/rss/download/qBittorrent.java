@@ -11,6 +11,7 @@ import ani.rss.enums.StringEnum;
 import ani.rss.enums.TorrentsTags;
 import ani.rss.service.DownloadService;
 import ani.rss.util.basic.HttpReq;
+import ani.rss.util.basic.RenameCacheUtil;
 import ani.rss.util.other.ConfigUtil;
 import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.io.FileUtil;
@@ -308,6 +309,15 @@ public class qBittorrent implements BaseDownload {
             log.error("qBittorrent 添加任务失败 {}", name);
             return false;
         }
+        // 多文件合集 rename 时要把源命名集数平移成目标口径，按 infoHash 缓存来源偏移。
+        // 磁力提交（空种子文件）没有 item.infoHash 时用磁力 hash（文件名即 btih）兜底；
+        // 都拿不到则不缓存，rename 侧回退 0 = 改造前行为
+        String offsetHash = StrUtil.blankToDefault(item.getInfoHash(),
+                torrentFile.length() == 0 ? FileUtil.mainName(torrentFile) : null);
+        if (StrUtil.isNotBlank(offsetHash)) {
+            RenameCacheUtil.put(RSS_OFFSET_CACHE_PREFIX + offsetHash.toLowerCase(),
+                    String.valueOf(BaseDownload.rssOffsetOf(item)));
+        }
         // 不再持锁 3×10s 轮询确认：提交成功即视为已入队，重命名/状态由 RenameTask 周期性兜底
         log.info("qBittorrent 添加任务成功 {}", name);
         return true;
@@ -594,6 +604,10 @@ public class qBittorrent implements BaseDownload {
                 .toList();
         boolean isMultiFile = isMultiEpisode(videoNames);
 
+        // 提交时缓存的来源集数偏移：多文件合集的源命名集数要平移成目标口径
+        int episodeOffset = BaseDownload.cachedRssOffset(
+                RenameCacheUtil.get(RSS_OFFSET_CACHE_PREFIX + StrUtil.nullToEmpty(hash).toLowerCase()));
+
         for (FileEntity fileEntity : files) {
             String name = fileEntity.getName();
             String ext = FileUtil.extName(name);
@@ -601,8 +615,8 @@ public class qBittorrent implements BaseDownload {
 
             String newPath;
             if (isMultiFile && isNamingV2) {
-                // 多文件合集：从原始文件名提取集数
-                newPath = getFileReNameMulti(name, reName, isSub);
+                // 多文件合集：从原始文件名提取集数（按来源偏移平移成目标口径）
+                newPath = getFileReNameMulti(name, reName, isSub, episodeOffset);
             } else {
                 // 单文件：使用原逻辑
                 newPath = getFileReName(name, reName);

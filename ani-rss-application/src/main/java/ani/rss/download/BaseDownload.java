@@ -6,6 +6,7 @@ import ani.rss.entity.Config;
 import ani.rss.entity.Item;
 import ani.rss.entity.TorrentsInfo;
 import ani.rss.enums.TorrentsTags;
+import ani.rss.util.basic.RenameCacheUtil;
 import ani.rss.util.other.ConfigUtil;
 import cn.hutool.core.collection.CollectionUtil;
 import cn.hutool.core.io.FileUtil;
@@ -143,13 +144,27 @@ public interface BaseDownload {
      * @return 最终命名
      */
     default String getFileReNameMulti(String name, String reName, boolean isSubtitle) {
+        return getFileReNameMulti(name, reName, isSubtitle, 0);
+    }
+
+    /**
+     * 多文件合集重命名（带来源偏移）。
+     * <p>
+     * 模板（种子名 = {@code item.reName}）是<b>目标口径</b>，而种子内文件是<b>源命名</b>：
+     * RSS 配了集数偏移时两者相差一个偏移量（如源 E96 应落到 S04E24），
+     * 必须先把文件名集数按来源偏移平移再替换进模板，否则产出 E96 的错误命名。
+     * 偏移取 {@code item.rssOffset}（下载提交时按任务 id/hash 缓存，见各实现）。
+     *
+     * @param episodeOffset 文件名集数 → 最终集数的平移量（来源 RSS 的集数偏移），0 保持旧行为
+     */
+    default String getFileReNameMulti(String name, String reName, boolean isSubtitle, int episodeOffset) {
         String ext = FileUtil.extName(name);
         if (StrUtil.isBlank(ext)) {
             return name;
         }
 
-        // 从原始文件名尝试提取集数
-        String originalEpisode = extractEpisodeFromFileName(name);
+        // 从原始文件名尝试提取集数（源命名 → 按来源偏移平移成目标口径）
+        String originalEpisode = shiftEpisode(extractEpisodeFromFileName(name), episodeOffset);
 
         String newPath;
         if (originalEpisode != null) {
@@ -360,5 +375,56 @@ public interface BaseDownload {
         }
 
         return tags;
+    }
+
+    /**
+     * {@link RenameCacheUtil} 里「任务 → 来源集数偏移」缓存键前缀。
+     * 下载提交时由各实现写入（qB 按 infoHash、Aria2 按 gid），rename 时读回；
+     * 值为整数字符串，缺失/不可解析按 0 处理（= 改造前行为）。
+     */
+    String RSS_OFFSET_CACHE_PREFIX = "rssOffset:";
+
+    /**
+     * 条目的来源集数偏移：主 RSS 用订阅偏移，备用 RSS 用该源自己的偏移；
+     * 未携带（老数据 / 非 RSS 入口）回退 0。
+     */
+    static int rssOffsetOf(Item item) {
+        Integer sourceOffset = item == null ? null : item.getRssOffset();
+        return sourceOffset == null ? 0 : sourceOffset;
+    }
+
+    /**
+     * 读取 rename 缓存里的来源偏移值，缺失/不可解析回退 0。
+     */
+    static int cachedRssOffset(String raw) {
+        if (StrUtil.isBlank(raw)) {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(raw.trim());
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    /**
+     * 文件名里的集数 → 最终集数：加上「来源 RSS 的集数偏移」。
+     * <p>
+     * 平移量必须来自<b>产生该条目的那条 RSS</b>，而不是订阅的 {@code ani.offset}：
+     * 备用 RSS 各自带偏移时两者不同（实测 96 应归到 24，用订阅偏移则仍是 96）。
+     * 偏移为 0 或集数不是数字时原样返回，行为与改造前一致。
+     */
+    static String shiftEpisode(String episode, int episodeOffset) {
+        if (episodeOffset == 0 || StrUtil.isBlank(episode)) {
+            return episode;
+        }
+        try {
+            double shifted = Double.parseDouble(episode) + episodeOffset;
+            return shifted == Math.floor(shifted)
+                    ? String.valueOf((long) shifted)
+                    : String.valueOf(shifted);
+        } catch (NumberFormatException e) {
+            return episode;
+        }
     }
 }
