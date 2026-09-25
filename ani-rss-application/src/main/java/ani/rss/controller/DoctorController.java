@@ -5,6 +5,7 @@ import ani.rss.commons.ExceptionUtils;
 import ani.rss.commons.FileUtils;
 import ani.rss.download.BaseDownload;
 import ani.rss.download.OfflineDownloader;
+import ani.rss.download.OpenList;
 import ani.rss.download.OpenListApi;
 import ani.rss.entity.Config;
 import ani.rss.entity.NotificationConfig;
@@ -71,6 +72,7 @@ public class DoctorController extends BaseController {
         checks.add(checkTasks());
         checks.add(checkOpenListRateLimit(config));
         checks.add(checkOpenListUpstream(config));
+        checks.add(checkOpenListOutcome(config));
         checks.add(checkLocalStateCache(config));
 
         Map<String, Integer> summary = new LinkedHashMap<>();
@@ -583,6 +585,68 @@ public class DoctorController extends BaseController {
                 OpenListApi.getListingFailureMemoHit(),
                 StrUtil.maxLength(message, 300));
         return timed(DoctorCheck.warn(key, label, evidence, upstreamSuggestion(category)), start);
+    }
+
+    /**
+     * v3 三态判定状态：成功 / 存疑 / 失败，以及存疑的成因分布 + 判定路径不变量。
+     * <p>
+     * 为什么这一项必须存在：v3 之后「存疑」成为默认态，它<b>不删任何东西</b>、不写失败队列、
+     * 不发失败通知——好处是网盘抖一下不会毁数据，代价是"抖动"变得安静了。
+     * 没有这一项，用户只能看到"这一集一直没下完"，却分不清是：
+     * <ul>
+     *   <li>网盘一直在抖（存疑多、失败少）→ 等，或调低「网盘 API 限流」速率；</li>
+     *   <li>归位参数对不上（relocate 多）→ 看计划快照 / 计划内缺集；</li>
+     *   <li>下载器真的下不动（taskState 多）→ 去 115 / OpenList 侧看离线任务。</li>
+     * </ul>
+     * 同时把<b>判定路径的列举次数</b>摊开：递归列举应为 0（见
+     * {@link OpenListApi#getJudgementRecursiveListing()}）。
+     * <p>
+     * <b>这个指标的覆盖范围有限，别把它读成"整条判定链都合规"</b>：守卫
+     * （{@code OpenListApi.inJudgementPath}）是"自愿包裹"式的——<b>没被包住的判定链不记账</b>。
+     * 因此"递归列举 = 0"只说明<b>已包守卫的那部分</b>没有退化。目前判定路径上仍有
+     * 未包裹的递归列举（启动恢复 / 归位对账 / 云下载兜底），
+     * 详见 {@code OpenList判定回退方案.md} §12.6。
+     */
+    private DoctorCheck checkOpenListOutcome(Config config) {
+        String key = "openListOutcome";
+        String label = "离线下载判定";
+        long start = System.currentTimeMillis();
+        if (!RssTask.isOpenListTool(config)) {
+            return timed(DoctorCheck.skip(key, label, "当前下载器不是 OpenList / Alist，无离线三态判定"), start);
+        }
+        String evidence = outcomeEvidence(
+                OpenList.getOutcomeSuccess(), OpenList.getOutcomeUncertain(), OpenList.getOutcomeFailed(),
+                OpenList.getUncertainRelocate(), OpenList.getUncertainWaitExpired(),
+                OpenList.getUncertainReadFailure(), OpenList.getUncertainTaskState(),
+                OpenList.getPlanEarlyChecks(), OpenListApi.getJudgementDirectListing(),
+                OpenListApi.getJudgementRecursiveListing());
+        if (OpenListApi.getJudgementRecursiveListing() > 0L) {
+            return timed(DoctorCheck.warn(key, label, evidence,
+                    "判定路径出现递归列举：请求数会随集数放大，一次网盘抖动就能拖垮整条判定链；"
+                            + "请把该调用点改为单层列举（OpenListApi.listDirectChildrenStrict）"), start);
+        }
+        if (OpenList.getOutcomeUncertain() > 0L) {
+            return timed(DoctorCheck.warn(key, label, evidence,
+                    "存疑不删任何东西（pending / 计划快照 / 临时目录 / 网盘文件都保留），下一轮会自动重做归位；"
+                            + "若长期只增不减，看上面的成因分布区分「网盘抖动」与「归位参数对不上」"), start);
+        }
+        return timed(DoctorCheck.ok(key, label, evidence), start);
+    }
+
+    /**
+     * 三态判定文案。抽成 package-private 纯函数：这些字串本身就是可排查性——
+     * 「存疑」与「失败」必须是两个独立的数，合并回一句话就分不清"网盘在抖"与"真下不动"。
+     */
+    static String outcomeEvidence(long success, long uncertain, long failed,
+                                  long relocate, long waitExpired, long readFailure, long taskState,
+                                  long planEarlyChecks, long directListing, long recursiveListing) {
+        return StrUtil.format(
+                "成功 {} 次，存疑 {} 次（成因：归位未通过 {}、等待期无信号 {}、读失败 {}、"
+                        + "任务状态/10008/重试耗尽 {}），失败 {} 次；"
+                        + "判定路径单层列举 {} 次、递归列举 {} 次（应恒为 0；"
+                        + "仅覆盖已包守卫的调用点，未包裹的判定链不计入），完成前复核 {} 次",
+                success, uncertain, relocate, waitExpired, readFailure, taskState,
+                failed, directListing, recursiveListing, planEarlyChecks);
     }
 
     /**

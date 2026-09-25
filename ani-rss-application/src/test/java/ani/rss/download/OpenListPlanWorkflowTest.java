@@ -224,6 +224,15 @@ class OpenListPlanWorkflowTest {
         awaitPath(30_000, () -> server.topLevel(savePath).contains(expectedVideo),
                 "到位的 E03 应被归位，实际=" + server.topLevel(savePath));
 
+        // 注意：文件出现在顶层只是归位的<b>中间态</b> —— 移动校验重试、清理临时目录、
+        // 以及 promote（把本集并入快照）都发生在那之后。所以这里要等"快照真的被并入"，
+        // 而不是文件一露头就断言（那是在断言中间态，时序一变就假失败）。
+        awaitPath(30_000, () -> {
+                    LocalStateCache.Snapshot s = snapshotOrNull(ani, savePath);
+                    return s != null && s.episodeIndex().contains("1:3.0");
+                },
+                "归位流程结束后应把真正到位的集并入快照，实际=" + describeSnapshot(ani, savePath));
+
         // 只标记 E03：整个 episodeRange 都被标成已下载正是"部分成功"造成永久漏下的根因
         LocalStateCache.Snapshot snapshot = snapshotOrNull(ani, savePath);
         assertNotNull(snapshot, "归位后应能读回快照");
@@ -345,6 +354,12 @@ class OpenListPlanWorkflowTest {
             Thread.sleep(200);
         }
         fail("等待超时：" + message);
+    }
+
+    /** 断言/等待失败信息用：快照不存在时直说，而不是报一个空集合 */
+    private static String describeSnapshot(Ani ani, String path) {
+        LocalStateCache.Snapshot snapshot = snapshotOrNull(ani, path);
+        return snapshot == null ? "(无快照)" : snapshot.episodeIndex().toString();
     }
 
     /** 供断言使用的快照读取（快照不存在时返回 null） */

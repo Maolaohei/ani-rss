@@ -194,6 +194,77 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     private static final long POST_SUCCESS_FILE_GRACE_POLL_MS = TimeUnit.SECONDS.toMillis(15);
 
     /**
+     * P1「完成前复核」的触发点：占离线等待窗口的比例，整轮最多按这几个点各跑一次。
+     * <p>
+     * <b>为什么不是"每次轮询都跑"</b>（原实现）：{@code planScan} 内部是递归列举
+     * （请求数 = 1 + 子目录数，未命中还会继续扫最终目录与云下载目录），
+     * 每轮都跑等于把请求量乘以轮询次数；一次网盘抖动就能把整条等待链拖垮。
+     * <p>
+     * <b>为什么也不能"只跑一次、且必须等很久"</b>：115 的"假 Running / 报部分成功"
+     * 通常在提交后很早就文件齐了，复核必须<b>早做</b>才有价值，晚了就只剩白等离线超时。
+     * <p>
+     * 比例点同时满足两者：<b>早</b>（第一个点取 0，提交后立刻可命中"文件早就在盘上"的形态，
+     * 例如复用已有任务/残留文件）、<b>少</b>（次数恒为 3，与等待时长、轮询次数无关）、
+     * <b>可伸缩</b>（跟随 {@code alistDownloadTimeout}：1 分钟窗口 → 0s/15s/36s，
+     * 30 分钟窗口 → 0s/7.5min/18min）。
+     */
+    private static final double[] PLAN_EARLY_CHECK_RATIOS = {0.0, 0.25, 0.6};
+
+    /**
+     * P1 复核的第 {@code index} 个触发点是否已到期。
+     * <p>
+     * 抽成纯函数是为了让"短窗口也必须有机会复核"这条不变量可被单测直接固化——
+     * 曾经用"轮询下标 &ge; 3"当门槛，在 {@code alistDownloadTimeout=1}（1 分钟）下
+     * 轮询根本走不到第 3 次，早退路径被静默关闭，只表现为"文件明明齐了却等到超时"。
+     *
+     * @param index     第几个触发点（0 起；超出预算返回 false）
+     * @param elapsedMs 已等待毫秒
+     * @param waitMs    整个离线等待窗口毫秒
+     */
+    static boolean planEarlyCheckDue(int index, long elapsedMs, long waitMs) {
+        if (index < 0 || index >= PLAN_EARLY_CHECK_RATIOS.length || waitMs <= 0) {
+            return false;
+        }
+        return elapsedMs >= (long) (waitMs * PLAN_EARLY_CHECK_RATIOS[index]);
+    }
+
+    /** P1 复核的整轮次数上界（与等待时长、轮询次数无关）。 */
+    static int planEarlyCheckBudget() {
+        return PLAN_EARLY_CHECK_RATIOS.length;
+    }
+
+    // ---- v3 三态判定可观测计数（自检页读这些，见 DoctorController）----
+    /** 判定为成功（最终文件已确认 + 临时目录已删 + 记录已落盘）的次数 */
+    private static final java.util.concurrent.atomic.AtomicLong outcomeSuccess =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+    /**
+     * 判定为「存疑」的次数（保留现场，下轮重做归位，绝不重下）。
+     * <p>
+     * 这是 v3 之后<b>最需要被看见</b>的一个数：它长期只增不减说明网盘一直在抖，
+     * 而不是"下载都失败了"——两者在旧口径下都会显示成失败。
+     */
+    private static final java.util.concurrent.atomic.AtomicLong outcomeUncertain =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+    /** 真正判为失败（本地可确定不可恢复）的次数 */
+    private static final java.util.concurrent.atomic.AtomicLong outcomeFailed =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+    /** P1「完成前复核」实际执行次数（v3 起整轮最多 1 次） */
+    private static final java.util.concurrent.atomic.AtomicLong planEarlyChecks =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+    /** 存疑成因：归位校验未通过（rename/move 没搬成 / 确认缺名） */
+    private static final java.util.concurrent.atomic.AtomicLong uncertainRelocate =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+    /** 存疑成因：等待期结束仍无完成信号（含超时终检未通过） */
+    private static final java.util.concurrent.atomic.AtomicLong uncertainWaitExpired =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+    /** 存疑成因：读失败 / 冷却 / 限流 / 未预期异常 */
+    private static final java.util.concurrent.atomic.AtomicLong uncertainReadFailure =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+    /** 存疑成因：任务状态 Failed/Error/Canceled 或 10008 去重死锁或重试耗尽 */
+    private static final java.util.concurrent.atomic.AtomicLong uncertainTaskState =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+
+    /**
      * fsMove 后顶层校验失败时的重试次数与间隔（990009 异步移动/并发冲突下 move 可能假成功）
      */
     private static final int MOVE_VERIFY_MAX_ATTEMPTS = 3;
@@ -230,6 +301,39 @@ public class OpenList implements BaseDownload, OfflineDownloader {
      */
     private static final Comparator<OpenListFileInfo> FILE_SIZE_DESC =
             Comparator.comparingLong(OpenListFileInfo::getSize).reversed();
+
+    /**
+     * v3 三态判定：取代原来的 {@code Boolean}。
+     * <p>
+     * <b>为什么必须三态</b>：在 {@code Boolean} 下，"网盘抖动（TLS 超时 / 500 / 冷却中）"
+     * 与"网盘上确实没有"都收敛成 {@code false}，于是"查不清"被当成"没有"——
+     * 清 pending、写失败队列、下轮重下，而文件其实已经躺在网盘上
+     * （2026-09-18 删记录重下事故的形状）。
+     * <p>
+     * <b>语义边界（严格照此判定，不得放宽）</b>：
+     * <ul>
+     *   <li>{@link #SUCCESS}：最终文件已在 savePath 顶层被<b>确认</b>（单层列举命中），
+     *       且临时目录已强制删除、种子记录已 promote。三者由同一次归位动作产生，不跨轮拼接。</li>
+     *   <li>{@link #UNCERTAIN}：<b>默认态，覆盖其余一切</b>——rename/move 抛异常（含冷却、限流、超时）、
+     *       计划为空、等待期结束仍无完成信号、确认那一次读失败、确认部分缺失、
+     *       任务状态 Failed/Error/Canceled、10008 去重死锁、自动重试次数耗尽。
+     *       统一处置：<b>保留</b> pending、计划快照、临时目录、网盘文件、种子记录；
+     *       不重下、不删、不写失败队列、不发失败通知；只记日志 + 计数 + 成因。
+     *       下一轮用计划快照<b>重做归位</b>（不是重新提交离线任务）。</li>
+     *   <li>{@link #FAILED}：<b>收紧到只剩"本地可确定"</b>——infoHash 解析失败、
+     *       种子记录写入失败、提交返回明确业务失败（非 10008、非瞬时）、用户显式取消（独立态）。</li>
+     * </ul>
+     * 用户显式取消不在此枚举内单独表达：它优先级最高，由
+     * {@link #finalizeOfflineDownload} 的取消分支拦截（清 pending、不记失败、不发通知）。
+     */
+    enum Outcome {
+        /** 最终文件已确认 + 临时目录已删 + 种子记录已落盘 */
+        SUCCESS,
+        /** 查不清 / 没搬成 / 没等到：一律保留现场，下轮重做归位，绝不重下 */
+        UNCERTAIN,
+        /** 本地即可确定不可恢复 */
+        FAILED
+    }
 
     @Override
     public boolean isOffline() {
@@ -470,33 +574,27 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     }
 
     /**
-     * 后台完成离线下载：等待结束后提升 pending / 记录失败（原 DownloadService 同步流程迁移）。
+     * 后台完成离线下载：等待结束后按三态分流（提升 pending / 保留现场 / 记录失败）。
      * 在独立长任务池执行，最长等待至离线超时。
+     * <p>
+     * <b>v3：这里是唯一的 Outcome 分流点（N5）。</b>
+     * 分流顺序固定为「取消 → 成功 → 存疑 → 失败」：
+     * <ol>
+     *   <li><b>取消优先</b>（N6）：清 pending、不记失败、不发通知；</li>
+     *   <li><b>成功</b>：确认已成立 → 才做不可逆动作（提升种子记录）；</li>
+     *   <li><b>存疑</b>（默认态）：保留 pending / 计划快照 / 临时目录 / 网盘文件 / 种子记录，
+     *       不重下、不删、不写失败队列、不发失败通知，只记日志与计数；</li>
+     *   <li><b>失败</b>：仅剩"本地可确定不可恢复"（§3.3）。</li>
+     * </ol>
      */
     private void finalizeOfflineDownload(OfflineDownloadContext ctx, Ani ani, Item item, String savePath) {
+        // 提前取值，别在 finally 里现取：finally 中抛异常会掩盖真正的异常
+        // （未登录时 config 为空是既有分支，见 cancelCurrentOffline 的同类处理）
+        Boolean delete = config == null ? null : config.getDelete();
         try {
-            Boolean ok = awaitAndFinalize(ctx, ani, item, savePath);
-            if (Boolean.TRUE.equals(ok)) {
-                try {
-                    // 精确标记：计划可用时只标记"真正归位的文件"对应的集，
-                    // 而不是 item 的整个 episodeRange（否则部分成功会被整段标成已下载）
-                    Collection<String> resolvedKeys = ctx.finalizedItems == null || ctx.finalizedItems.isEmpty()
-                            ? null
-                            : TorrentPlanUtil.episodeIndexKeys(ani, ctx.finalizedItems);
-                    TorrentUtil.promoteTorrent(ani, item, savePath, resolvedKeys);
-                } catch (Exception e) {
-                    // 文件可能已落盘, 下轮 itemDownloaded 会恢复记录
-                    log.error("提升种子记录失败(文件可能已落盘) {}: {}", ctx.reName, ExceptionUtils.getMessage(e));
-                    try {
-                        TorrentUtil.deletePendingTorrent(ani, item);
-                    } catch (Exception ignored) {
-                    }
-                }
-                TorrentUtil.refreshTorrentsCache();
-                return;
-            }
+            Outcome outcome = awaitAndFinalize(ctx, ani, item, savePath);
+            // N6：取消优先级最高，先于三态分流。取消是独立态：清 pending、不记失败、不发通知。
             if (CANCEL_REQUESTED_HASHES.contains(ctx.infoHash) || RssTask.isCancelRequested()) {
-                // 用户取消：仅清 pending，不误发"下载失败"通知/不记失败队列
                 log.info("离线下载被用户取消，清理 pending {}", ctx.reName);
                 try {
                     TorrentUtil.deletePendingTorrent(ani, item);
@@ -504,13 +602,62 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 }
                 return;
             }
-            handleOfflineFailure(ani, item, ctx.reName, "离线下载未完成（OpenList 返回失败，非坏种）");
-        } catch (ani.rss.download.OfflineTimeoutException e) {
-            handleOfflineFailure(ani, item, ctx.reName, ExceptionUtils.getMessage(e));
+            if (outcome == Outcome.SUCCESS) {
+                outcomeSuccess.incrementAndGet();
+                promoteAfterConfirmed(ctx, ani, item, savePath);
+                return;
+            }
+            if (outcome == Outcome.UNCERTAIN) {
+                // §3.2 统一处置：保留 pending、计划快照、临时目录、网盘文件、种子记录。
+                // 下一轮由 pending 在途有效期（TorrentUtil.isPendingExpired）决定是"继续等"
+                // 还是"打开允许重新提交的闸门"——过期 ≠ 重下。
+                outcomeUncertain.incrementAndGet();
+                log.warn("离线下载存疑（保留现场，下一轮重做归位；不重下、不记失败、不发通知） {}",
+                        ctx.reName);
+                TorrentUtil.refreshTorrentsCache();
+                return;
+            }
+            // FAILED：只剩"本地可确定不可恢复"（§3.3）
+            outcomeFailed.incrementAndGet();
+            handleOfflineFailure(ani, item, ctx.reName, "离线下载失败（本地可确定）");
         } catch (Exception e) {
-            log.error(e.getMessage(), e);
-            handleOfflineFailure(ani, item, ctx.reName, "离线下载异常: " + ExceptionUtils.getMessage(e));
+            // 走到这里说明连分流都没跑成（纯本地异常）：仍按存疑处理，绝不删记录。
+            // 旧实现会一路走到 handleOfflineFailure → 清 pending + 记失败 + 下轮重下，
+            // 而"收尾代码自己出错"恰恰最不该被解读成"网盘上没有文件"。
+            outcomeUncertain.incrementAndGet();
+            log.error("离线收尾异常（存疑：保留 pending / 计划快照 / 临时目录 / 网盘文件）: {}",
+                    ExceptionUtils.getMessage(e), e);
+        } finally {
+            // 释放点在这里（而不是 awaitAndFinalize 的 finally）：RssTask 的 openListBusy
+            // 由 currentInfoHashes 派生，必须覆盖 promoteAfterConfirmed（写正式种子记录）这一步，
+            // 否则"离线不忙"会在记录落盘之前就成立 —— 那时残留清理的 protectHashes
+            // 也已经把这条 hash 的保护撤掉，而它的临时目录可能还在用。
+            // 顺带把 OfflinePlanStore.delete 一起后移：崩溃在 promote 之前时计划快照仍在，
+            // 启动恢复流程仍能接管（原来快照先删、记录后写，中间崩溃就两头落空）。
+            releaseOfflinePlaceholder(ctx.infoHash, ctx.tid, ctx.claimedInFlight,
+                    delete, ctx.newlySubmittedTid);
         }
+    }
+
+    /**
+     * 确认成功之后的收尾：提升 pending → 正式种子记录（N3：不可逆动作只在确认成功后执行）。
+     * <p>
+     * 提升失败时<b>保留 pending</b>：文件已在网盘落盘，下轮 itemDownloaded 会重新认领；
+     * 删 pending 反而会让它被当成"没下过"而重下（旧实现正是这么做的）。
+     */
+    private void promoteAfterConfirmed(OfflineDownloadContext ctx, Ani ani, Item item, String savePath) {
+        try {
+            // 精确标记：计划可用时只标记"真正归位的文件"对应的集，
+            // 而不是 item 的整个 episodeRange（否则部分成功会被整段标成已下载）
+            Collection<String> resolvedKeys = ctx.finalizedItems == null || ctx.finalizedItems.isEmpty()
+                    ? null
+                    : TorrentPlanUtil.episodeIndexKeys(ani, ctx.finalizedItems);
+            TorrentUtil.promoteTorrent(ani, item, savePath, resolvedKeys);
+        } catch (Exception e) {
+            log.error("提升种子记录失败（文件已确认落盘，保留 pending 下轮重试） {}: {}",
+                    ctx.reName, ExceptionUtils.getMessage(e));
+        }
+        TorrentUtil.refreshTorrentsCache();
     }
 
     /**
@@ -543,6 +690,69 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             TorrentUtil.deletePendingTorrent(ani, item);
         } catch (Exception ignored) {
         }
+    }
+
+    // ---- v3 三态判定计数（自检页读这些，见 DoctorController）----
+
+    /** 判定为成功的次数（最终文件已确认 + 临时目录已删 + 记录已落盘） */
+    public static long getOutcomeSuccess() {
+        return outcomeSuccess.get();
+    }
+
+    /**
+     * 判定为「存疑」的次数。
+     * <p>
+     * 这是 v3 之后最需要被看见的一个数：它长期只增不减说明网盘一直在抖，
+     * 而<b>不是</b>"下载都失败了"——两者在旧口径下都会显示成失败。
+     */
+    public static long getOutcomeUncertain() {
+        return outcomeUncertain.get();
+    }
+
+    /** 判为失败的次数（仅"本地可确定不可恢复"） */
+    public static long getOutcomeFailed() {
+        return outcomeFailed.get();
+    }
+
+    /** P1「完成前复核」实际执行次数（v3 起整轮最多 {@code PLAN_EARLY_CHECK_RATIOS.length} 次） */
+    public static long getPlanEarlyChecks() {
+        return planEarlyChecks.get();
+    }
+
+    /** 存疑成因：归位校验未通过（rename/move 没搬成 / 确认缺名） */
+    public static long getUncertainRelocate() {
+        return uncertainRelocate.get();
+    }
+
+    /** 存疑成因：等待期结束仍无完成信号（含超时终检未通过） */
+    public static long getUncertainWaitExpired() {
+        return uncertainWaitExpired.get();
+    }
+
+    /** 存疑成因：读失败 / 冷却 / 限流 / 未预期异常 */
+    public static long getUncertainReadFailure() {
+        return uncertainReadFailure.get();
+    }
+
+    /** 存疑成因：任务状态 Failed/Error/Canceled、10008 去重死锁、重试耗尽 */
+    public static long getUncertainTaskState() {
+        return uncertainTaskState.get();
+    }
+
+    /**
+     * 仅供测试/诊断：复位三态与成因计数。
+     * <p>
+     * 与"存疑"相关的一切都是累计诊断量，不随轮次复位——排查"网盘是不是一直在抖"看的就是长期趋势。
+     */
+    public static void resetOutcomeStats() {
+        outcomeSuccess.set(0L);
+        outcomeUncertain.set(0L);
+        outcomeFailed.set(0L);
+        planEarlyChecks.set(0L);
+        uncertainRelocate.set(0L);
+        uncertainWaitExpired.set(0L);
+        uncertainReadFailure.set(0L);
+        uncertainTaskState.set(0L);
     }
 
     /**
@@ -1003,8 +1213,20 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     /**
      * 等待阶段 + 后处理：等待离线完成（可取消/超时/重试），完成后重命名/移动/校验。
      * 与 submitOffline 分离，为「提交即返回 + 独立长任务池等待」提供接缝。
+     * <p>
+     * v3：返回值由 {@code Boolean} 改为 {@link Outcome}。本方法<b>永不返回 {@link Outcome#FAILED}</b>——
+     * 它的每一种结束方式（超时、读失败、终态失败、10008、重试耗尽）在 §3.2 里都属于「存疑」，
+     * 处置是"保留现场、下轮重做归位"，而不是"删 pending 重下"。
+     * <p>
+     * <b>本方法不释放 inFlight 占位 / {@code currentInfoHashes}</b>：释放点后移到
+     * {@link #finalizeOfflineDownload} 的 finally。原因：{@code currentInfoHashes} 是
+     * {@code RssTask.openListBusy} 的唯一来源，而"成功"之后的 {@code promoteAfterConfirmed}
+     * （写正式种子记录）也是这条 hash 的离线处理的一部分。若在这里释放，
+     * {@code openListBusy} 会在种子记录落盘<b>之前</b>就变 false，
+     * 于是"离线不忙"不再等价于"这条 hash 的离线处理已结束"，
+     * 残留清理的 {@code protectHashes} 也会提前撤掉保护。
      */
-    private Boolean awaitAndFinalize(OfflineDownloadContext ctx, Ani ani, Item item, String savePath) {
+    private Outcome awaitAndFinalize(OfflineDownloadContext ctx, Ani ani, Item item, String savePath) {
         String reName = ctx.reName;
         String finalRenameBase = ctx.finalRenameBase;
         String tempDirName = ctx.tempDirName;
@@ -1015,7 +1237,9 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         int waitMinutes = ctx.waitMinutes;
         // (E5) deadline 在开工时刻计算(而非提交时刻): OFFLINE_WAIT_POOL 有界队列可能排队,
         // 排队时间若计入离线超时会误杀正常任务(提交后迟迟不进入等待即被超时 purge)
-        long deadlineMs = System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(waitMinutes);
+        long startedMs = System.currentTimeMillis();
+        long waitMs = TimeUnit.MINUTES.toMillis(waitMinutes);
+        long deadlineMs = startedMs + waitMs;
         ctx.deadlineMs = deadlineMs;
         int pollIndex = 0;
         // tid 会随 10008 切换，需写回 ctx 供 finally 清理使用
@@ -1023,13 +1247,14 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         long retry = ctx.retry;
         // (E7) 旧配置可能缺 alistDownloadRetryNumber(拆箱 NPE), 默认 5
         long retryLimit = ObjectUtil.defaultIfNull(config.getAlistDownloadRetryNumber(), 5L);
-        Boolean delete = config.getDelete();
-        boolean claimedInFlight = ctx.claimedInFlight;
         // 本集判定参数一次解析，等待循环与各兜底分支复用
         // （expectedEpisodesOf/expectedSeasonOf/titleTokensOf 均含清洗开销，勿在循环内重复计算）
         List<Double> expectedEpisodes = expectedEpisodesOf(item);
         Integer expectedSeason = expectedSeasonOf(finalRenameBase);
         List<String> titleTokens = titleTokensOf(ani, item);
+        // v3：整轮最多做 PLAN_EARLY_CHECK_RATIOS.length 次"完成前复核"（见下方 P1 注释），
+        // 用它替代原先"每次轮询都扫一遍"
+        int planEarlyCheckIndex = 0;
         try {
             while (DateTime.now().getTime() < deadlineMs) {
                 if (shouldAbortWait(infoHash)) {
@@ -1040,13 +1265,23 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                         log.warn("取消清理 OpenList 失败 {}: {}", infoHash, purgeEx.getMessage());
                     }
                     clearDuplicateMagnet(infoHash);
-                    return false;
+                    // 取消不是失败：由 finalizeOfflineDownload 的取消分支拦截（清 pending、不记失败、不发通知）
+                    return Outcome.UNCERTAIN;
                 }
                 // P1: 计划内文件（视频）按字节数全部到位即可收尾，不等下载器自报状态。
-                // 115 常见"任务一直 Running / 报部分成功，其实文件全在"，
-                // 旧的"等 SUCCESS 或等超时终检"会让这类集白等到超时。
+                // 115 常见"任务一直 Running / 报部分成功，其实文件全在"，没有这一格要白等到离线超时。
+                // v3 收紧了执行频率：planScan 内部是<b>递归</b>列举（请求数 = 1 + 子目录数，
+                // 未命中还会继续扫最终目录与云下载目录），原先每次轮询都跑，一次网盘抖动就能把
+                // 整条等待链拖垮（实测单集合计数百次请求）。
+                // 现在整轮最多跑 PLAN_EARLY_CHECK_RATIOS.length 次，触发点按"等待窗口比例"排布：
+                // 第一个点取 0 保证"文件早就在盘上"（复用任务/残留文件）能立刻收尾，
+                // 后两个点随 alistDownloadTimeout 缩放。把"早退"这个能力留下，把请求放大去掉。
                 // 计划不可用（磁力元数据未抓到 / ed2k / 解析失败）时本块直接跳过，行为与旧版一致。
-                if (ctx.plan != null && !ctx.plan.isEmpty()) {
+                if (ctx.plan != null && !ctx.plan.isEmpty()
+                        && planEarlyCheckDue(planEarlyCheckIndex,
+                        System.currentTimeMillis() - startedMs, waitMs)) {
+                    planEarlyCheckIndex++;
+                    planEarlyChecks.incrementAndGet();
                     EpisodeScanResult planScan = planScan(ctx, path, savePath, tempDownloadDir, expectedEpisodes, titleTokens);
                     if (planScan != null) {
                         log.info("计划内视频已全部就位（按字节数比对），不再等待下载器状态 {}", reName);
@@ -1075,8 +1310,12 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                         break;
                     }
                     if (policy == OpenListTaskInfo.RetryPolicy.NO_RETRY) {
-                        log.error("离线任务不可重试 {} state={} error={}", reName, state, taskInfo.getError());
-                        return false;
+                        // §3.2：任务状态类结束一律「存疑」——下载器说"不可重试"只说明这一次没下成，
+                        // 不等于"网盘上没有文件"，更不该据此清 pending 重下
+                        log.warn("离线任务不可重试（存疑，保留现场下轮重做归位） {} state={} error={}",
+                                reName, state, taskInfo.getError());
+                        uncertainTaskState.incrementAndGet();
+                        return Outcome.UNCERTAIN;
                     }
 
                     // Pending/Running：等待；本次新提交任务做无进度卡住检测
@@ -1154,7 +1393,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                                         StrFormatter.format("{} 下载完成", item.getReName()),
                                         NotificationStatusEnum.DOWNLOAD_END);
                                 recordHistory(ani, item, "离线下载完成(10008 兜底)");
-                                return true;
+                                return Outcome.SUCCESS;
                             }
                             if (!dupScan.videoList().isEmpty()) {
                                 log.info("10008 死锁但兜底发现本集文件 videos={}，继续后处理归位 {}",
@@ -1169,9 +1408,14 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                             } catch (Exception purgeEx) {
                                 log.debug("清理 OpenList 任务失败 {}: {}", infoHash, purgeEx.getMessage());
                             }
-                            throw new OfflineTimeoutException(StrFormatter.format(
-                                    "{} 115 云端存在该磁力历史任务导致去重死锁(10008)，已进入24h长冷却；"
-                                            + "请到 115 离线列表删除同名旧任务后等下一轮自动重试", reName));
+                            // §3.2：10008 去重死锁属于「存疑」——不是"网盘上没有文件"，而是"这一跳问不通"。
+                            // 旧实现抛 OfflineTimeoutException 一路走到 handleOfflineFailure，
+                            // 会清掉 pending 并写失败队列；v3 只保留现场 + 长冷却 + 提示人工处理。
+                            log.warn("{} 115 云端存在该磁力历史任务导致去重死锁(10008)，已进入 24h 长冷却"
+                                            + "（存疑：保留 pending / 计划快照 / 网盘文件）；"
+                                            + "请到 115 离线列表删除同名旧任务后等下一轮自动重试", reName);
+                            uncertainTaskState.incrementAndGet();
+                            return Outcome.UNCERTAIN;
                         }
                         sleepUntilNextPoll(infoHash, deadlineMs, pollIndex++);
                         continue;
@@ -1203,13 +1447,21 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                                 continue;
                             }
                         }
-                        log.error("离线任务已终结 state={} error={}，放弃重试（非坏种判定）", state, taskInfo.getError());
-                        return false;
+                        // §3.2：任务状态 Failed/Error/Canceled 属于「存疑」。Failed 不等于坏种，
+                        // 更不等于"网盘上没有文件"——保留现场，下轮用计划快照重做归位。
+                        log.warn("离线任务已终结 state={} error={}（存疑：保留现场，下轮重做归位）",
+                                state, taskInfo.getError());
+                        uncertainTaskState.incrementAndGet();
+                        return Outcome.UNCERTAIN;
                     }
                     // 非终态异常（Failing 等）：按次数重试
                     if (retryLimit > -1 && retry >= retryLimit) {
-                        log.error("离线下载失败 {} (已重试{}次)", taskInfo.getError(), retry);
-                        return false;
+                        // §3.2 / N7：自动重试次数耗尽 = 「存疑的停推」，不是失败。
+                        // 停推只是不再自动重提，pending 与快照都保留，用户可手动重试。
+                        log.warn("离线下载重试已耗尽 {} (已重试{}次)（存疑停推，可手动重试）",
+                                taskInfo.getError(), retry);
+                        uncertainTaskState.incrementAndGet();
+                        return Outcome.UNCERTAIN;
                     }
                     retry++;
                     log.info("离线任务重试 {}/{} state={}", retry, retryLimit, state);
@@ -1243,18 +1495,18 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                             reName, tid, finalState, inspection.videoCount(), inspection.totalBytes(), inspection.stable());
                     clearDuplicateMagnet(infoHash);
                 } else {
-                    log.error("{} 超过离线超时 {} 分钟，终检未发现稳定的本集视频，强制失败并清理 "
-                                    + "OpenList/本地占用 tid={} state={} videos={} totalBytes={} stable={}",
+                    // §3.2：等待期结束仍无完成信号 = 「存疑」。绝不能清 pending / 写失败队列：
+                    // 超时只说明"这一轮没等到"，下一轮用计划快照重做归位即可（N2：读失败 ≠ 文件不在）。
+                    // 这里也不再 purgeHashTasks：存疑期间不动网盘任何东西（D6），
+                    // 进行中的远端任务留给下一轮 adoptOrCleanResidualTasks 复用。
+                    log.warn("{} 超过离线超时 {} 分钟，终检未发现稳定的本集视频"
+                                    + "（存疑：保留 pending / 计划快照 / 临时目录 / 网盘文件）"
+                                    + " tid={} state={} videos={} totalBytes={} stable={}",
                             reName, waitMinutes, tid, finalState, inspection.videoCount(),
                             inspection.totalBytes(), inspection.stable());
-                    try {
-                        purgeHashTasks(infoHash);
-                    } catch (Exception purgeEx) {
-                        log.warn("超时清理 OpenList 任务失败 {}: {}", infoHash, purgeEx.getMessage());
-                    }
                     clearDuplicateMagnet(infoHash);
-                    throw new OfflineTimeoutException(StrFormatter.format(
-                            "{} 超过离线超时 {} 分钟", reName, waitMinutes));
+                    uncertainWaitExpired.incrementAndGet();
+                    return Outcome.UNCERTAIN;
                 }
             }
             // ① finally 前先扫描文件：临时目录优先；否则最终目录中本集相关文件
@@ -1281,7 +1533,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                             StrFormatter.format("{} 下载完成", item.getReName()),
                             NotificationStatusEnum.DOWNLOAD_END);
                     recordHistory(ani, item, "离线下载完成");
-                    return true;
+                    return Outcome.SUCCESS;
                 }
                 if (!scan.videoList().isEmpty()) {
                     return finalizeFromScan(ctx, ani, item, savePath, scan);
@@ -1296,7 +1548,13 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                     return finalizeFromScan(ctx, ani, item, savePath, byPlan);
                 }
                 if (System.currentTimeMillis() >= fileGraceDeadlineMs) {
-                    return false;
+                    // §3.2：任务报完成但文件一直不可见 = 「存疑」。
+                    // 旧实现这里 return false → 清 pending + 记失败 + 下轮重下，
+                    // 而 115 的落盘滞后常常就在下一分钟到位，于是重复下单在网盘堆出第二份产物。
+                    log.warn("任务已完成但本集文件在 {}s 宽限期内始终不可见（存疑：保留现场，下轮重做归位） {}",
+                            POST_SUCCESS_FILE_GRACE_MS / 1000, reName);
+                    uncertainWaitExpired.incrementAndGet();
+                    return Outcome.UNCERTAIN;
                 }
                 log.info("任务已完成但本集文件尚未可见，{}s 后重扫 {}",
                         POST_SUCCESS_FILE_GRACE_POLL_MS / 1000, reName);
@@ -1305,24 +1563,27 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 api.invalidateFindFilesCache(savePath, tempDownloadDir);
                 ThreadUtil.sleep(POST_SUCCESS_FILE_GRACE_POLL_MS);
             }
-        } catch (OfflineTimeoutException e) {
-            // 超时必须向上抛给 DownloadService，避免被当成普通 false/坏种
-            throw e;
         } catch (Exception e) {
-            log.error(e.getMessage(), e);
-            return false;
-        } finally {
-            releaseOfflinePlaceholder(ctx.infoHash, ctx.tid, ctx.claimedInFlight, delete, ctx.newlySubmittedTid);
+            // §3.2：任何未预期异常都是「查不清」，一律存疑。
+            // 旧实现 return false 会一路走到清 pending + 记失败 + 下轮重下——
+            // 而异常恰恰最可能发生在"文件其实已经在网盘上"的时候（读超时 / 冷却 / 限流 / 预算耗尽）。
+            log.error("离线等待异常（存疑：保留 pending / 计划快照 / 临时目录 / 网盘文件）: {}",
+                    ExceptionUtils.getMessage(e), e);
+            uncertainReadFailure.incrementAndGet();
+            return Outcome.UNCERTAIN;
         }
     }
 
     /**
      * 后处理：对一次扫描命中的本集文件执行重命名 → 移动 → 顶层校验（失败重试）→ 清理临时/云下载
      * 空壳 → 合集缺集校验 → 完成通知。等待循环与 10008 死锁快速路径共用。
-     *
-     * @return true=全部归位并通知完成；false=归位校验未通过（调用方按失败收尾）
+     * <p>
+     * v3：返回 {@link Outcome}。本方法只产出两种结果——
+     * {@link Outcome#SUCCESS}（归位 + 确认 + 清临时目录 + 通知全部完成）或
+     * {@link Outcome#UNCERTAIN}（归位/确认没成，<b>保留临时目录与 pending</b>，下轮重做归位）。
+     * 它<b>不会</b>返回 FAILED：这里没有任何"本地可确定不可恢复"的信息。
      */
-    private Boolean finalizeFromScan(OfflineDownloadContext ctx, Ani ani, Item item, String savePath,
+    private Outcome finalizeFromScan(OfflineDownloadContext ctx, Ani ani, Item item, String savePath,
                                      EpisodeScanResult scan) {
         String reName = ctx.reName;
         List<OpenListFileInfo> openListFileInfos = scan.openListFileInfos();
@@ -1331,11 +1592,15 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         Boolean rename = config.getRename();
         List<ResolvedFile> resolved = resolveFiles(ctx, ani, scan);
         if (resolved.isEmpty()) {
-            // 无任何可归位文件: 判失败并保留临时目录, 避免"空归位→清临时目录→误报完成"把产物一并清掉
-            log.error("归位失败: 未匹配到任何可移动文件, 保留临时目录 {} tempDir={} videos={} plan={}",
+            // 无任何可归位文件：存疑并保留临时目录，避免"空归位→清临时目录→误报完成"把产物一并清掉。
+            // 不能判失败：这里说不清"是没下完"还是"下完了但认不出来"（计划缺失 / 115 改名），
+            // 判失败会清 pending 重下，而文件可能已经在网盘上。
+            log.warn("归位未匹配到任何可移动文件（存疑：保留 pending / 计划快照 / 临时目录） {} "
+                            + "tempDir={} videos={} plan={}",
                     reName, ctx.tempDirName, scan.videoList().size(),
                     ctx.plan == null ? -1 : ctx.plan.size());
-            return false;
+            uncertainRelocate.incrementAndGet();
+            return Outcome.UNCERTAIN;
         }
 
         // 目标名去重：撞名时退回原名避让，绝不抛异常
@@ -1354,23 +1619,43 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         // 重命名 + 移动 + 顶层校验 + 清理临时/云下载空壳（启动恢复流程共用同一实现）
         String fallbackDir = scan.videoList().isEmpty() ? savePath : scan.videoList().get(0).getPath();
         if (!relocateResolved(resolved, pathToFiles, savePath, ctx.tempDirName, fallbackDir, cloudSourceDirs)) {
-            return false;
+            // §3.2 / N1：rename / move 没搬成（含冷却、限流、超时、990009 假成功、确认缺名）
+            // 只说明"这次没搬成"，不说明文件没下完 → 存疑，下轮<b>重做归位</b>，
+            // 绝不重新提交离线任务（那会在网盘堆出第二份产物）。
+            log.warn("归位/顶层确认未通过（存疑：保留 pending / 计划快照 / 临时目录，下轮重做归位） {}",
+                    reName);
+            uncertainRelocate.incrementAndGet();
+            return Outcome.UNCERTAIN;
         }
 
-        // 缺集校验：扫描整季目录，但日志只报告本次声明范围的命中情况。
+        // 缺集校验：只看最终目录<b>顶层</b>——刚刚被 verifyTopLevelNames 确认过的那一层。
+        // v3 两处修正：
+        //  ① 原先用递归的 findFiles(savePath)，会把临时目录里的文件也算成"已到位"，
+        //     于是"缺集校验通过"而文件其实还在临时目录里；归位成功的定义本来就是"在最终目录顶层"；
+        //  ② 递归列举随集数放大请求数，而这里只需要一层名字。
+        // 本段只产出日志，读失败时宁可跳过，也不要报一个假的"全部缺失"。
         if (item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty()) {
-            List<OpenListFileInfo> actualVideos = findFiles(savePath).stream()
-                    // 115 会按文件名建同名目录（可能带 .mkv），必须排除目录
-                    .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
-                    .filter(f -> FileUtils.isVideoFormat(f.getName()))
-                    .toList();
-            EpisodeValidation validation = validateCollectionEpisodes(item.getEpisodeRange(), actualVideos);
-            if (validation.missing().isEmpty()) {
-                log.info("合集集数校验通过: {} 本次期望 {}, 已命中 {}",
-                        reName, validation.expected(), validation.matched());
-            } else {
-                log.warn("合集缺集: {} 本次期望 {}, 已命中 {}, 缺失 {}",
-                        reName, validation.expected(), validation.matched(), validation.missing());
+            List<OpenListFileInfo> topLevel = null;
+            try {
+                topLevel = OpenListApi.inJudgementPath(() -> api.listDirectChildrenStrict(savePath, true));
+            } catch (Exception e) {
+                log.warn("缺集校验列举失败，跳过本次校验（不影响已确认的成功判定） {}: {}",
+                        reName, ExceptionUtils.getMessage(e));
+            }
+            if (topLevel != null) {
+                List<OpenListFileInfo> actualVideos = topLevel.stream()
+                        // 115 会按文件名建同名目录（可能带 .mkv），必须排除目录
+                        .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
+                        .filter(f -> FileUtils.isVideoFormat(f.getName()))
+                        .toList();
+                EpisodeValidation validation = validateCollectionEpisodes(item.getEpisodeRange(), actualVideos);
+                if (validation.missing().isEmpty()) {
+                    log.info("合集集数校验通过: {} 本次期望 {}, 已命中 {}",
+                            reName, validation.expected(), validation.matched());
+                } else {
+                    log.warn("合集缺集: {} 本次期望 {}, 已命中 {}, 缺失 {}",
+                            reName, validation.expected(), validation.matched(), validation.missing());
+                }
             }
         }
 
@@ -1390,7 +1675,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 : StrFormatter.format("{} 下载完成", item.getReName());
         NotificationUtil.send(config, ani, message, NotificationStatusEnum.DOWNLOAD_END);
         recordHistory(ani, item, collectionDownload ? "离线合集完成" : "离线下载完成");
-        return true;
+        outcomeSuccess.incrementAndGet();
+        return Outcome.SUCCESS;
     }
 
     /**
@@ -3271,11 +3557,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         }
         String tempPath = savePath + "/" + tempDirName;
         try {
-            // 目录不存在则无需清理
-            List<OpenListFileInfo> top = fsList(tempPath, true);
-            // OpenList 对不存在路径可能返回空列表或抛错；空也继续尝试 remove 幂等
-
             if (!force) {
+                // 谨慎模式：必须先列举确认没有受保护媒体，否则宁可不清
                 List<OpenListFileInfo> remaining = listFilesWithRetry(tempPath, 2);
                 List<OpenListFileInfo> mediaLeft = remaining.stream()
                         .filter(OpenList::isProtectedTempFile)
@@ -3301,9 +3584,12 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                             }
                         });
                 removeEmptyDirsBottomUp(tempPath);
-            } else if (!top.isEmpty()) {
-                log.info("最终文件已确认，强制删除临时目录 {} (entries={})",
-                        tempPath, top.stream().map(OpenListFileInfo::getName).toList());
+            } else {
+                // v3：强制模式（= 最终文件已被单层确认）不再列举。
+                // 原先这次 fsList 只用来打一行 entries 日志，却让"已经确定的收尾"又依赖一次网盘读：
+                // 读超时/冷却会把一次成功收尾拖成存疑，而删除本身是幂等的。
+                // 直接 fsRemove；只有它失败时才走逐层兜底（那条路径才需要列举，且只在异常时触发）。
+                log.info("最终文件已确认，强制删除临时目录 {}", tempPath);
             }
 
             try {

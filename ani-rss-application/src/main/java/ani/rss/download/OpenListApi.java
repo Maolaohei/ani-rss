@@ -25,6 +25,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -193,6 +194,36 @@ public class OpenListApi {
      * 缓存命中与被合并的等待方不计入（它们没有发请求）。
      */
     private static final AtomicLong listingCallCountRound = new AtomicLong(0L);
+
+    // ---- v3 判定路径守卫：判定只允许「单层列举」，绝不允许递归 ----
+    // 背景：一次网盘列举是"1 + 子目录数"次往返（见 buildFileList 的递归）。
+    // 判定路径（回答"网盘上到底有没有这个文件"的链路：本地已存在判定 / 归位对账 / 收尾确认）
+    // 一旦走递归列举，请求数就随集数放大；上游一抖，任意一个子目录超时都会把整条判定链拖垮，
+    // 而全局熔断又把它放大成"所有订阅一起瘫痪"。
+    // v3 的硬约束：判定路径的递归列举次数恒为 0，只允许 fsListStrict（单层、1 次请求）。
+    // 这两个计数器就是这个不变量的观测面——埋了指标必须有人看（自检页见 DoctorController）。
+    /**
+     * 判定路径标记（可重入计数）。
+     * <p>
+     * 只能通过 {@link #inJudgementPath(Supplier)} / {@link #inJudgementPath(Runnable)} 进入，
+     * 保证必然清理；不暴露裸的 enter/exit——判定标记在 ThreadLocal 上，漏掉一次 finally
+     * 就会把同一工作线程上后续无关的列举也算成违规。
+     */
+    private static final ThreadLocal<Integer> JUDGEMENT_DEPTH = new ThreadLocal<>();
+    /**
+     * 递归列举自身深度（同线程内递增）。
+     * <p>
+     * 用来把"判定路径发生了几次递归列举"数成<b>次数</b>而不是"1 + 子目录数"：
+     * 只有最外层那一次才算，递归进去的子目录不算。否则一次 12 集的递归会数成 13 次，
+     * 指标就失去意义（测试断言"== 0"仍成立，但报表上读不出真实违规次数）。
+     */
+    private static final ThreadLocal<Integer> RECURSION_DEPTH = new ThreadLocal<>();
+    /** 判定路径上发生过的递归列举次数（v3 不变量：必须恒为 0） */
+    private static final AtomicLong judgementRecursiveListing = new AtomicLong(0L);
+    /** 判定路径上的单层列举次数（= v3 允许的唯一读操作） */
+    private static final AtomicLong judgementDirectListing = new AtomicLong(0L);
+    /** 违规日志上限：不变量被破坏时会连续触发，限流避免刷满日志（计数照常累计） */
+    private static final int JUDGEMENT_VIOLATION_LOG_LIMIT = 20;
 
     // ---- F7-2 请求合并（coalescing）----
     // 缓存只能挡住"已经算过"的请求，挡不住"正在算"的请求：两个线程同时问同一个目录，
@@ -709,6 +740,7 @@ public class OpenListApi {
      * 后来者等待同一份结果。等待超时/失败一律抛异常，不会把"查不到"变成"没有文件"。
      */
     public List<OpenListFileInfo> findFilesStrict(String path) {
+        noteJudgementRecursiveListing(path);
         CachedFileList cached = findFilesCache.get(path);
         if (cached != null && cached.expireAt > System.currentTimeMillis()) {
             listingCacheHit.incrementAndGet();
@@ -721,7 +753,14 @@ public class OpenListApi {
             return awaitCoalescedFiles(path, existing);
         }
         try {
-            List<OpenListFileInfo> files = buildFileList(path);
+            List<OpenListFileInfo> files;
+            // 标记"已进入递归内部"：子目录的 findFilesStrict 不该再被记成一次判定路径违规
+            enterRecursion();
+            try {
+                files = buildFileList(path);
+            } finally {
+                exitRecursion();
+            }
             mine.complete(files);
             return files;
         } catch (RuntimeException e) {
@@ -730,6 +769,149 @@ public class OpenListApi {
         } finally {
             findFilesInFlight.remove(path, mine);
         }
+    }
+
+    /**
+     * 记录"判定路径上出现了递归列举"（v3 不变量：应为 0）。
+     * <p>
+     * 只数最外层一次：递归进去的子目录（同线程、{@link #RECURSION_DEPTH} &gt; 0）不算，
+     * 否则一次 12 集的递归会数成 13 次，指标就失去意义。
+     * <p>
+     * 为什么只是"记账 + 告警"而不是直接抛异常：这里是被动观测点，
+     * 在判定链上抛异常会把"能查清楚"变成"查不清"（→ 全量「存疑」），
+     * 而 v3 的要求是"读失败也不许产生破坏性动作"。真正的消除靠调用方改走单层列举。
+     */
+    private static void noteJudgementRecursiveListing(String path) {
+        if (!isInJudgementPath() || recursionDepth() > 0) {
+            return;
+        }
+        long n = judgementRecursiveListing.incrementAndGet();
+        if (n <= JUDGEMENT_VIOLATION_LOG_LIMIT) {
+            log.warn("判定路径出现递归列举（v3 不变量应为 0）path={}，第 {} 次。"
+                            + "递归列举是「1 + 子目录数」次请求，一次网盘抖动就能拖垮整条判定链",
+                    path, n);
+        }
+    }
+
+    private static int recursionDepth() {
+        Integer depth = RECURSION_DEPTH.get();
+        return depth == null ? 0 : depth;
+    }
+
+    private static void enterRecursion() {
+        RECURSION_DEPTH.set(recursionDepth() + 1);
+    }
+
+    private static void exitRecursion() {
+        int depth = recursionDepth();
+        if (depth <= 1) {
+            RECURSION_DEPTH.remove();
+        } else {
+            RECURSION_DEPTH.set(depth - 1);
+        }
+    }
+
+    /**
+     * 在「判定路径」中执行一段逻辑。
+     * <p>
+     * 判定路径 = 回答"网盘上到底有没有这个文件"的链路：本地已存在判定、归位对账、收尾确认。
+     * 在这段逻辑里出现的任何递归列举都会被记为一次违规
+     * （见 {@link #getJudgementRecursiveListing()}，可用 {@code DoctorController} 查看）。
+     * <p>
+     * 为什么用 {@code Supplier}/{@code Runnable} 包裹而不是暴露裸的 enter/exit：
+     * 标记存在 ThreadLocal 上，手工 enter/exit 一旦漏掉 finally，就会污染同一工作线程上
+     * 后续无关的列举（把正常业务算成违规），而这种污染只在指标上体现、极难排查。
+     */
+    public static <T> T inJudgementPath(Supplier<T> action) {
+        Integer current = JUDGEMENT_DEPTH.get();
+        JUDGEMENT_DEPTH.set(current == null ? 1 : current + 1);
+        try {
+            return action.get();
+        } finally {
+            Integer depth = JUDGEMENT_DEPTH.get();
+            if (depth == null || depth <= 1) {
+                JUDGEMENT_DEPTH.remove();
+            } else {
+                JUDGEMENT_DEPTH.set(depth - 1);
+            }
+        }
+    }
+
+    /**
+     * 无返回值的 {@link #inJudgementPath(Supplier)}。
+     */
+    public static void inJudgementPath(Runnable action) {
+        inJudgementPath(() -> {
+            action.run();
+            return null;
+        });
+    }
+
+    /**
+     * 当前线程是否处于判定路径。
+     */
+    public static boolean isInJudgementPath() {
+        Integer depth = JUDGEMENT_DEPTH.get();
+        return depth != null && depth > 0;
+    }
+
+    /**
+     * 判定路径上发生过的递归列举次数。
+     * <p>
+     * v3 的目标是<b>恒为 0</b>：判定路径只允许单层列举。一旦不为 0，
+     * 说明又有调用点退回了递归列举，网盘抖动会重新被放大成"整条判定链失败"。
+     * <p>
+     * <b>但它只是"已包守卫的那部分"的指标，不能当成整条判定链的合规证明</b>：
+     * {@link #noteJudgementRecursiveListing} 在 {@code !isInJudgementPath()} 时直接 return，
+     * 因此<b>没被 {@link #inJudgementPath} 包住的调用点不记账</b>。
+     * 目前判定路径上仍有未包裹的递归列举（启动恢复 / 归位对账 / 云下载兜底），
+     * 详见 {@code OpenList判定回退方案.md} §12.6。
+     */
+    public static long getJudgementRecursiveListing() {
+        return judgementRecursiveListing.get();
+    }
+
+    /**
+     * 判定路径上的单层列举次数（v3 允许的唯一读操作）。
+     * <p>
+     * 与 {@link #getJudgementRecursiveListing()} 对照看：单层次数随订阅条数线性增长是正常的，
+     * 递归次数必须为 0。
+     */
+    public static long getJudgementDirectListing() {
+        return judgementDirectListing.get();
+    }
+
+    /**
+     * 单层列举（严格版）：只读一个目录的<b>直接子项</b>，不做任何递归，恒定 1 次请求。
+     * <p>
+     * 这是 v3 允许判定路径使用的<b>唯一</b>读操作。与 {@link #findFilesStrict(String)} 的区别：
+     * <ul>
+     *   <li>请求数恒为 1，不随子目录数放大（递归版是 "1 + 子目录数"）；</li>
+     *   <li>不读写 {@code findFilesCache}，不会把"变更前的旧快照"喂给判定；</li>
+     *   <li>失败仍然抛出（严格语义），调用方据此把条目标为「存疑」而不是「不存在」。</li>
+     * </ul>
+     * 失败记忆（30s）与熔断冷却照旧生效：同一目录刚失败过不会立刻再打一次。
+     *
+     * @param path    目录
+     * @param refresh 是否要求网盘强制刷新目录缓存
+     * @return 直接子项
+     */
+    public List<OpenListFileInfo> listDirectChildrenStrict(String path, boolean refresh) {
+        judgementDirectListing.incrementAndGet();
+        return fsListStrict(path, refresh);
+    }
+
+    /**
+     * 单层列举并取直接子项的名字集合（严格版）。
+     * <p>
+     * 收尾确认回答的是"计划里的目标文件名是否都在顶层"——一个名字集合足够，
+     * 不需要大小/时间，也就没有任何理由去递归。
+     */
+    public Set<String> directChildNamesStrict(String path, boolean refresh) {
+        return listDirectChildrenStrict(path, refresh).stream()
+                .map(OpenListFileInfo::getName)
+                .filter(StrUtil::isNotBlank)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
     }
 
     /**
@@ -1492,6 +1674,12 @@ public class OpenListApi {
         listingCoalesced.set(0L);
         budgetExhausted.set(0L);
         roundBudget.set(0);
+        judgementRecursiveListing.set(0L);
+        judgementDirectListing.set(0L);
+        // 清掉当前线程可能残留的判定/递归标记：正常路径由 inJudgementPath 的 finally 与
+        // findFilesStrict 的 finally 保证，这里只是给测试与诊断一个"从干净状态开始"的兜底
+        JUDGEMENT_DEPTH.remove();
+        RECURSION_DEPTH.remove();
     }
 
     private static int intConfig(Integer value, int fallback, int min, int max) {

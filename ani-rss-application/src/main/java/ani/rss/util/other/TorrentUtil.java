@@ -17,6 +17,7 @@ import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.text.StrFormatter;
 import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.core.util.ClassUtil;
+import cn.hutool.core.util.ObjectUtil;
 import cn.hutool.core.util.ReUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.extra.spring.SpringUtil;
@@ -449,11 +450,21 @@ public class TorrentUtil {
     }
 
     /**
-     * 启动时清理 .pending 残留(启动瞬间本进程必无在途离线任务, 全部 pending 均可安全清理):
-     * - 正式种子记录已存在: 任务已完成(promote 后遗留或历史崩溃残留), 删除标记;
-     * - 正式记录不存在: 孤儿 pending —— 崩溃前离线等待未完成, 若保留会被 RSS 轮次
-     *   "pending 存在即跳过"永久拦截, 该集静默漏下。因此同样删除,
-     *   等待下轮 RSS 重新提交离线任务(远端任务将由 adopt/10008 复用逻辑接管, 不会重复下载)。
+     * 启动时清理 .pending 残留。
+     * <p>
+     * <b>只删"任务确实已完成"的残留</b>：正式种子记录已存在说明 promote 早已跑过，
+     * 标记只是崩溃遗留，删掉无害。
+     * <p>
+     * <b>孤儿 pending（正式记录不存在）一律保留</b>——这是 2026-09-25 方案变更的核心一条：
+     * pending 从"临时标记"升级为<b>在途账本</b>。此前这里把孤儿 pending 全部删掉，
+     * 于是"离线未闭环"这件事跨重启就丢了（既没有记录、也没有标记，只能靠下轮重提交，
+     * 而重提交在 115 侧可能被 10008 挡住），表现为该集静默漏下。
+     * <p>
+     * 保留之后的"会不会永久卡住"由 {@link #isPendingExpired(Ani, Item)} 兜底：
+     * 超过在途有效期后由调用方主动复核（重做归位 + 一次确认），复核不过才允许重新提交。
+     *
+     * @see #pendingTtlMs(Config)
+     * @see #isPendingExpired(Ani, Item)
      */
     public static void cleanupOrphanPending() {
         try {
@@ -473,16 +484,70 @@ public class TorrentUtil {
                 }
                 String rel = pendingRoot.toPath().relativize(f.toPath()).toString();
                 File formal = new File(new File(configDir, "torrents"), rel);
-                FileUtil.del(f);
                 if (formal.exists()) {
+                    FileUtil.del(f);
                     log.info("清理已完成任务的 pending 残留: {}", rel);
                 } else {
-                    log.warn("孤儿 pending 已清除，等待下轮 RSS 重新提交(远端任务将由 10008/adopt 逻辑接管): {}", rel);
+                    // 孤儿 pending：保留为在途账本，等过期复核或下轮判定处理
+                    log.info("保留在途 pending（离线未闭环，等过期复核）: {}", rel);
                 }
             });
         } catch (Exception e) {
             log.warn("清理 pending 残留失败: {}", ExceptionUtils.getMessage(e));
         }
+    }
+
+    /**
+     * 待完成标记的「在途有效期」系数。
+     * <p>
+     * 为什么需要它：OpenList 路径下 pending 存在 = 本轮跳过（{@code DownloadService} 的闸门），
+     * 而"记录有效性判定"只在<b>正式记录</b>存在时才走。于是 pending 若被永久保留，
+     * 该集就既不进入判定、也不再重新提交 —— 变成静默漏下。
+     * 而新方案下存疑必须保留 pending（不能因一次网盘抖动丢掉在途账本），
+     * 所以必须有一个"在途多久算过期"的时限。
+     * <p>
+     * 取 {@code alistDownloadTimeout × 2}：离线任务本就该在超时内完成，
+     * 2 倍余量用于覆盖 {@code OFFLINE_WAIT_POOL} 的排队时间与归位/确认的重试。
+     * 刻意不新增配置项 —— 跟随既有超时自动联动，少一个需要用户理解的概念。
+     */
+    private static final int PENDING_TTL_FACTOR = 2;
+
+    /**
+     * 离线超时缺失时的兜底分钟数（与 {@code OpenList} 内的默认一致）。
+     */
+    private static final int DEFAULT_OFFLINE_TIMEOUT_MINUTES = 30;
+
+    /**
+     * 待完成标记的在途有效期（毫秒）。
+     * <p>
+     * {@code alistDownloadTimeout} 是可空字段（旧配置可能缺），必须兜底后再拆箱，
+     * 否则 {@code null * 2} 直接 NPE。
+     */
+    public static long pendingTtlMs(Config config) {
+        Integer timeout = config == null ? null : config.getAlistDownloadTimeout();
+        int minutes = ObjectUtil.defaultIfNull(timeout, DEFAULT_OFFLINE_TIMEOUT_MINUTES);
+        return TimeUnit.MINUTES.toMillis(Math.max(minutes, 1) * (long) PENDING_TTL_FACTOR);
+    }
+
+    /**
+     * 待完成标记是否已超过在途有效期（"这个在途任务已经不值得再等了"）。
+     * <p>
+     * 标记不存在时返回 {@code false}：<b>"没有在途任务"不是"过期在途"</b>。
+     * 两者混为一谈会让"从未提交过的集"被当成过期条目去重新提交。
+     * <p>
+     * 过期<b>不等于</b>重下：调用方应先用计划快照复核（重做归位 + 一次确认），
+     * 复核不过才允许重新提交（由 10008 / adopt 逻辑保证不重复下单）。
+     */
+    public static boolean isPendingExpired(Ani ani, Item item) {
+        if (ani == null || item == null) {
+            return false;
+        }
+        File pending = getPendingTorrent(ani, item);
+        if (!pending.exists()) {
+            return false;
+        }
+        long ttl = pendingTtlMs(ConfigUtil.CONFIG);
+        return System.currentTimeMillis() - pending.lastModified() > ttl;
     }
 
     /**

@@ -221,6 +221,18 @@ public class DownloadService {
                             continue;
                         }
                     } else {
+                        // D1：正式种子记录只增不删——删除只允许用户显式操作（强制下载 / 精确重下 / 删除记录）。
+                        // 对 OpenList 路径，ABSENT 已不可能由"读失败"产生（读失败一律是 UNVERIFIABLE），
+                        // 所以"删记录重下"这条路径没有存在意义，直接删掉：保留记录、不重下，
+                        // 用户若确认文件已不在，可用「强制下载」显式重下。
+                        // 本地型下载器（qB/TR/Aria2）保留原语义：它的 ABSENT 来自下载器自身的确切答复，
+                        // 且"删记录重下"是既有行为，改动风险大于收益。
+                        if (isOpenListTool()) {
+                            log.warn("种子记录存在但未确认网盘产物，按 v3 保留记录（不删、不重下），"
+                                    + "等下一轮复核 {}", reName);
+                            RssTask.countRoundLocalState(LocalState.UNKNOWN);
+                            continue;
+                        }
                         log.warn("清理过期种子记录(无对应任务/文件) {}", reName);
                         FileUtil.del(torrent);
                     }
@@ -409,9 +421,18 @@ public class DownloadService {
             boolean openListTool = isOpenListTool();
             // OpenList: pending 标记存在表示离线进行中, 本轮跳过, 避免重复提交与通知轰炸
             if (openListTool && TorrentUtil.getPendingTorrent(ani, item).exists()) {
-                log.debug("离线任务进行中, 跳过本轮 {}", reName);
-                RssTask.countRoundLocalState(LocalState.UNKNOWN);
-                continue;
+                if (!TorrentUtil.isPendingExpired(ani, item)) {
+                    log.debug("离线任务进行中, 跳过本轮 {}", reName);
+                    RssTask.countRoundLocalState(LocalState.UNKNOWN);
+                    continue;
+                }
+                // §6.3 在途有效期：超过 alistDownloadTimeout × 2（默认 60 分钟）后不再"只等"，
+                // 放行进入归位/判定链路。
+                // 注意「过期 ≠ 重下」：下面的提交会被 OpenList.adoptOrCleanResidualTasks 复用远端
+                // 进行中的任务（10008 也兜底），这里只是把"重做归位 + 1 次单层确认"这条恢复路径打开，
+                // 让存疑条目有机会自动收敛为成功。没有这一步，"存疑保留 pending"会让该集永远卡住。
+                log.info("离线 pending 已超过在途有效期（{} 分钟），放行重做归位与确认 {}",
+                        TorrentUtil.pendingTtlMs(ConfigUtil.CONFIG) / 60_000L, reName);
             }
             // (E9) 失败队列闸门: 仅非 OpenList 路径(qB/TR/Aria2)。近 24h 内失败过的本集
             // 不再每轮自动重推, 避免坏种/下载器故障时无限重试风暴; 条目保留在失败队列,
@@ -1016,21 +1037,25 @@ public class DownloadService {
                     TorrentUtil.refreshTorrentsCache();
                     return true;
                 }
-                // OpenList/Alist 返回 false：多为 10008 等待、任务 Failed/取消、离线工具侧失败
-                // 不等于坏种；占用已在 OpenList 内部按 hash 清理/释放
+                // OpenList/Alist 返回 false：只可能来自提交阶段（infoHash 解析失败 / 离线等待池拒绝 /
+                // 10008 长冷却 / 同 hash 等待被取消）；提交成功之后的收尾由 OpenList 内部
+                // finalizeOfflineDownload 按三态异步处理，不走这里。
+                // v3（§3.2 / D1 / D2）：这些都属于「存疑」或纯本地失败，**不能**删 pending、不能写失败队列、
+                // 不能发失败通知——删了 pending 下一轮就会当成"没下过"重新提交，在网盘堆出第二份产物。
                 if (openListTool) {
-                    String raw = name + " 离线下载未完成（OpenList 返回失败，非坏种）";
-                    log.error(raw);
-                    recordDownloadFailure(ani, item, raw);
-                    NotificationUtil.send(ConfigUtil.CONFIG, ani,
-                            TaskFailureHumanizer.formatNotify(name, raw),
-                            NotificationStatusEnum.ERROR);
-                    TorrentUtil.deletePendingTorrent(ani, item);
+                    log.warn("OpenList 未受理本次提交（存疑：保留 pending / 计划快照，下一轮复核；"
+                            + "不记失败、不发通知） {}", name);
+                    RssTask.countRoundLocalState(LocalState.UNKNOWN);
                     return false;
                 }
             } catch (ani.rss.download.OfflineTimeoutException e) {
-                // 超时 != 坏种：不删种子、不报疑似坏种；占用已在 OpenList 内清理
+                // 超时 != 坏种，也 != "网盘上没有文件"：存疑，保留 pending 与种子记录
                 String message = ExceptionUtils.getMessage(e);
+                if (openListTool) {
+                    log.warn("离线等待超时（存疑：保留 pending / 计划快照，下一轮重做归位）: {}", message);
+                    RssTask.countRoundLocalState(LocalState.UNKNOWN);
+                    return false;
+                }
                 // message 已包含番剧名（OfflineTimeoutException 构造时拼接），不再重复
                 log.error("离线超时失败: {}", message);
                 recordDownloadFailure(ani, item, message);
@@ -1051,14 +1076,10 @@ public class DownloadService {
         }
 
         if (openListTool) {
-            // OpenList 普通异常:按离线未完成处理, 清 pending, 不报坏种
-            String raw = name + " 离线下载未完成（OpenList 异常，非坏种）";
-            log.error(raw);
-            recordDownloadFailure(ani, item, raw);
-            NotificationUtil.send(ConfigUtil.CONFIG, ani,
-                    TaskFailureHumanizer.formatNotify(name, raw),
-                    NotificationStatusEnum.ERROR);
-            TorrentUtil.deletePendingTorrent(ani, item);
+            // OpenList 普通异常：同样按「存疑」处理——异常最可能发生在"文件其实已经在网盘上"的时候
+            // （提交超时 / 冷却 / 限流），旧实现会清 pending + 记失败 + 下轮重下。
+            log.warn("OpenList 提交过程异常（存疑：保留 pending / 计划快照，下一轮复核）: {}", name);
+            RssTask.countRoundLocalState(LocalState.UNKNOWN);
             return false;
         }
 
@@ -1712,18 +1733,32 @@ public class DownloadService {
     /**
      * OpenList 路径的「记录是否有效」判定（三态 + 存疑成因）。
      * <p>
-     * 判定顺序：熔断冷却 → 失败队列 → 归位对账 → 兜底校验。
+     * 判定顺序：熔断冷却 → <b>本地快照（v3 新增，命中即零请求）</b> → 失败队列 → 归位对账 → 兜底校验。
      * 任一环节"没能查成"都返回 {@link Presence#UNVERIFIABLE}，并带上
      * {@link UnknownReason} 让调用方把"为什么没查成"说清楚，由调用方保留记录。
+     * <p>
+     * package-private：判定表本身要能被单测直接固化（尤其"快照命中 → 零网盘请求"这条不变量）。
      */
-    private PresenceDecision resolveOpenListPresence(Ani ani, Item item, String reName, String savePath,
-                                                    OfflineDownloader offline, Set<String> localEpisodeIndex) {
+    PresenceDecision resolveOpenListPresence(Ani ani, Item item, String reName, String savePath,
+                                            OfflineDownloader offline, Set<String> localEpisodeIndex) {
         // 熔断冷却期：本轮不发网盘请求，直接"无法判断"（不删记录、不重下）。
         // 放在失败队列之前：冷却期连兜底校验都发不出请求，先判冷却才能给出准确成因——
         // 否则一律报成"列举失败"，把"等 60s 就好"说成"网盘坏了"。
         if (OpenListApi.isListingCoolingDown()) {
             OpenListApi.logCooldownSkipOnce("本地状态校验");
             return PresenceDecision.of(Presence.UNVERIFIABLE, UnknownReason.COOLDOWN);
+        }
+        // v3（D4 / 落地清单 #10）：快照已确认本集存在 → 零请求直接采信，不再每轮对账。
+        // 这是"已确认条目零请求"的落点：一份新鲜快照（含主动失效与增量追加）足以回答"在不在"，
+        // 而每轮对每条已确认的集都重做一次归位对账 = 每条一次网盘往返，订阅一多就是整批放大
+        // （用户实测的 fs/list 500 + TLS handshake timeout 正是从这条链路上被放大的）。
+        // 只信"有"不信"没有"：快照过期只会让我们少下一次，代价可接受；
+        // 而用它断言"不存在"会删记录重下，那是绝不能有的方向。
+        // 有意接受的代价：子目录里的历史残留在这份快照存活期内不会被自动归位；
+        // 快照过期后 peek 返回 null，relocateEpisodeFiles 会重新接管——是"延迟"，不是"丢失"。
+        LocalStateCache.Snapshot snapshot = LocalStateCache.peek(ani, getDownloadPath(ani));
+        if (snapshot != null && matchesEpisodeIndex(ani, item, snapshot.episodeIndex())) {
+            return PresenceDecision.of(Presence.EXISTS, UnknownReason.NONE);
         }
         String failKey = FailedDownloadQueue.keyOf(ani.getId(), item.getInfoHash(), reName);
         FailedDownloadQueue.FailedItem queued = FailedDownloadQueue.list().stream()
