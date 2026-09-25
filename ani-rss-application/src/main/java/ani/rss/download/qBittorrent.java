@@ -20,7 +20,7 @@ import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.core.util.EnumUtil;
 import cn.hutool.core.util.ReUtil;
 import cn.hutool.core.util.StrUtil;
-import org.eclipse.bittorrent.TorrentFile;
+import ani.rss.util.other.TorrentMetadata;
 import cn.hutool.http.Header;
 import cn.hutool.http.HttpRequest;
 import cn.hutool.http.HttpResponse;
@@ -322,7 +322,7 @@ public class qBittorrent implements BaseDownload {
                 try {
                     // .torrent 直链且源 XML 不带 infohash 时 item.infoHash 是下载 URL 的 sha256，
                     // 与 qB 上报的真实 btih 对不上 ⇒ 缓存键必须用种子文件解析出的真实 hash
-                    offsetHash = new TorrentFile(torrentFile).getHexHash();
+                    offsetHash = TorrentMetadata.from(torrentFile).getHash();
                 } catch (Exception e) {
                     log.debug("解析种子真实 infoHash 失败(回退 item.infoHash) {}: {}",
                             name, ExceptionUtils.getMessage(e));

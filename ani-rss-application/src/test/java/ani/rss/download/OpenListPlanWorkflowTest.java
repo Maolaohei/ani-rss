@@ -1,5 +1,6 @@
 package ani.rss.download;
 
+import ani.rss.util.other.TorrentMetadata;
 import ani.rss.entity.Ani;
 import ani.rss.entity.Item;
 import ani.rss.entity.TorrentPlanRecord;
@@ -10,7 +11,6 @@ import cn.hutool.core.io.FileUtil;
 import ani.rss.util.other.OfflinePlanStore;
 import ani.rss.util.other.TorrentPlanUtil;
 import ani.rss.util.other.TorrentUtil;
-import org.eclipse.bittorrent.TorrentFile;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -407,7 +407,7 @@ class OpenListPlanWorkflowTest {
 
     private List<Item> planOf(File torrent) throws IOException {
         return TorrentPlanUtil.filterEpisodes(
-                TorrentPlanUtil.build(new TorrentFile(torrent), ani()), List.of());
+                TorrentPlanUtil.build(TorrentMetadata.from(torrent), ani()), List.of());
     }
 
     private String expectedVideoName(File torrent) throws IOException {

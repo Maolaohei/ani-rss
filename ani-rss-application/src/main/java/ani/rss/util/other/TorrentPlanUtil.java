@@ -9,7 +9,6 @@ import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.util.CharsetUtil;
 import cn.hutool.core.util.ReUtil;
 import cn.hutool.core.util.StrUtil;
-import org.eclipse.bittorrent.TorrentFile;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -54,7 +53,7 @@ public final class TorrentPlanUtil {
      * @param ani         订阅信息（匹配/排除/模板/季数）
      * @return 计划条目；入参缺失或全部被过滤时返回空列表
      */
-    public static List<Item> build(TorrentFile torrentFile, Ani ani) {
+    public static List<Item> build(TorrentMetadata torrentFile, Ani ani) {
         if (torrentFile == null || ani == null) {
             return List.of();
         }

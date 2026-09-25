@@ -67,8 +67,8 @@
             <artifactId>thymeleaf</artifactId>
         </dependency>
         <dependency>
-            <groupId>org.eclipse</groupId>
-            <artifactId>bittorrent</artifactId>
+            <groupId>com.dampcake</groupId>
+            <artifactId>bencode</artifactId>
         </dependency>
         <!--
             磁力链接元数据解析（合集下载支持 magnet）。

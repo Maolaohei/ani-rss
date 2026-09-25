@@ -22,7 +22,6 @@ import cn.hutool.core.util.ReUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.extra.spring.SpringUtil;
 import lombok.extern.slf4j.Slf4j;
-import org.eclipse.bittorrent.TorrentFile;
 
 import java.io.File;
 import java.util.ArrayList;
@@ -861,8 +860,7 @@ public class TorrentUtil {
             return FileUtil.readUtf8String(file);
         }
         try {
-            TorrentFile torrentFile = new TorrentFile(file);
-            hexHash = torrentFile.getHexHash();
+            hexHash = TorrentMetadata.from(file).getHash();
         } catch (Exception e) {
             log.error("转换种子为磁力链接时出现错误 {}", FileUtils.getAbsolutePath(file));
             log.error(e.getMessage(), e);

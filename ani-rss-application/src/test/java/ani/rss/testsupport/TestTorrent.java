@@ -1,7 +1,8 @@
 package ani.rss.testsupport;
 
+import ani.rss.util.other.TorrentMetadata;
 import cn.hutool.core.io.FileUtil;
-import org.eclipse.bittorrent.TorrentFile;
+
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -13,7 +14,7 @@ import java.util.List;
 
 /**
  * 测试用最小种子生成器：手写 bencode（不依赖任何"造种"API），生成
- * {@link org.eclipse.bittorrent.TorrentFile} 能解析的多文件/单文件种子。
+ * 能解析的多文件/单文件种子。
  * <p>
  * 为什么需要它：验证「期望文件计划」必须用真实可解析的种子——用空文件 + 文件名当 hash 的
  * 老写法（{@code OpenListWorkflowSimulationTest#torrentFile}）里没有 info dict，
@@ -92,8 +93,8 @@ public final class TestTorrent {
      * 真实 infoHash（40 位 hex），用于断言 hash 一致性
      */
     public static String infoHash(File torrent) throws IOException {
-        TorrentFile parsed = new TorrentFile(torrent);
-        return parsed.getHexHash();
+        TorrentMetadata parsed = TorrentMetadata.from(torrent);
+        return parsed.getHash();
     }
 
     public static String sha1Hex(byte[] data) {

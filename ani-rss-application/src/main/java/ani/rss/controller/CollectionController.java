@@ -10,6 +10,7 @@ import ani.rss.enums.StringEnum;
 import ani.rss.exception.ResultException;
 import ani.rss.service.DownloadService;
 import ani.rss.util.basic.HttpReq;
+import ani.rss.util.other.TorrentMetadata;
 import ani.rss.util.other.AniUtil;
 import ani.rss.util.other.ConfigUtil;
 import ani.rss.util.other.ItemsUtil;
@@ -33,7 +34,7 @@ import cn.hutool.http.HttpResponse;
 import io.swagger.v3.oas.annotations.Operation;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
-import org.eclipse.bittorrent.TorrentFile;
+
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
@@ -82,9 +83,9 @@ public class CollectionController extends BaseController {
         boolean magnet = MagnetTorrentUtil.isMagnet(torrent);
         File tempFile = getTorrentFile(torrent);
         try {
-            TorrentFile torrentFile;
+            TorrentMetadata torrentFile;
             try {
-                torrentFile = new TorrentFile(tempFile);
+                torrentFile = TorrentMetadata.from(tempFile);
             } catch (Exception e) {
                 throw ResultException.exception("种子文件解析失败, 请确认是有效的 .torrent 文件或磁力链接");
             }
@@ -123,7 +124,7 @@ public class CollectionController extends BaseController {
             download(name, tempFile, downloadPath, List.of("ANI-RSS合集下载", subgroup));
 
             TorrentsInfo torrentsInfo = new TorrentsInfo()
-                    .setHash(torrentFile.getHexHash());
+                    .setHash(torrentFile.getHash());
 
             // 合集关联的番剧也写入订阅列表(仅入列、不轮询、去重), 使其在「订阅」里可见可管理。
             // 放在提交后立即执行：后处理已异步化，若等它跑完再入列，用户要 ~32.5s 后才看得到订阅
@@ -307,16 +308,16 @@ public class CollectionController extends BaseController {
         boolean magnet = MagnetTorrentUtil.isMagnet(torrent);
         File tempFile = getTorrentFile(torrent);
         try {
-            TorrentFile torrentFile;
+            TorrentMetadata torrentFile;
             try {
-                torrentFile = new TorrentFile(tempFile);
+                torrentFile = TorrentMetadata.from(tempFile);
             } catch (Exception e) {
                 throw ResultException.exception("种子文件解析失败, 请确认是有效的 .torrent 文件或磁力链接");
             }
             // 计划构建与订阅离线下载共用同一口径（TorrentPlanUtil）
             return TorrentPlanUtil.build(torrentFile, collectionInfo.getAni());
         } finally {
-            // 解析已在内存（TorrentFile），临时文件不再需要，必须清理防 /tmp 堆积；
+            // 解析已在内存（TorrentMetadata），临时文件不再需要，必须清理防 /tmp 堆积；
             // 磁力链接的缓存文件例外（下次还要复用，删了要重新抓元数据）
             if (!magnet) {
                 FileUtil.del(tempFile);

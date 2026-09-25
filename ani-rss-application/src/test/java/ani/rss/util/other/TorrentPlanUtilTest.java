@@ -3,7 +3,6 @@ package ani.rss.util.other;
 import ani.rss.entity.Ani;
 import ani.rss.entity.Item;
 import ani.rss.testsupport.TestTorrent;
-import org.eclipse.bittorrent.TorrentFile;
 import org.junit.jupiter.api.Test;
 
 import java.io.File;
@@ -48,7 +47,7 @@ class TorrentPlanUtilTest {
                 TestTorrent.file("Show S01/Show - 01.ass", 41L),
                 TestTorrent.file("Show S01/Show - 02.mkv", 1032L)));
 
-        List<Item> plan = TorrentPlanUtil.build(new TorrentFile(torrent), ani());
+        List<Item> plan = TorrentPlanUtil.build(TorrentMetadata.from(torrent), ani());
 
         assertEquals(3, plan.size());
         Item video = plan.stream().filter(i -> i.getTitle().endsWith("01.mkv")).findFirst().orElseThrow();
@@ -71,7 +70,7 @@ class TorrentPlanUtilTest {
                 TestTorrent.file("Show S01/Fonts/font.ttf", 200L)));
         Ani ani = ani().setExclude(List.of("Fonts"));
 
-        List<Item> plan = TorrentPlanUtil.build(new TorrentFile(torrent), ani);
+        List<Item> plan = TorrentPlanUtil.build(TorrentMetadata.from(torrent), ani);
 
         assertEquals(1, plan.size(), "Fonts 应被排除规则过滤");
         assertTrue(plan.get(0).getTitle().endsWith(".mkv"));
@@ -83,7 +82,7 @@ class TorrentPlanUtilTest {
                 TestTorrent.file("Show S01/Show - 01.mkv", 101L),
                 TestTorrent.file("Show S01/Show - 02.mkv", 102L),
                 TestTorrent.file("Show S01/Show - 03.mkv", 103L)));
-        List<Item> full = TorrentPlanUtil.build(new TorrentFile(torrent), ani());
+        List<Item> full = TorrentPlanUtil.build(TorrentMetadata.from(torrent), ani());
 
         List<Item> only3 = TorrentPlanUtil.filterEpisodes(full, List.of(3.0));
 
@@ -97,7 +96,7 @@ class TorrentPlanUtilTest {
         File torrent = TestTorrent.temp("plan-single", "Show S01E05", List.of(
                 TestTorrent.file("Show S01E05.mkv", 500L),
                 TestTorrent.file("Show S01E05.ass", 50L)));
-        List<Item> full = TorrentPlanUtil.build(new TorrentFile(torrent), ani());
+        List<Item> full = TorrentPlanUtil.build(TorrentMetadata.from(torrent), ani());
 
         // 期望集数对不上（比如改名后解析成别的集数）也要整份保留：单文件种子整份就是这一集
         List<Item> plan = TorrentPlanUtil.filterEpisodes(full, List.of(99.0));
@@ -110,7 +109,7 @@ class TorrentPlanUtilTest {
         File torrent = TestTorrent.temp("plan-movie", "Movie", List.of(
                 TestTorrent.file("Movie/Movie.mkv", 900L),
                 TestTorrent.file("Movie/Movie.ass", 90L)));
-        List<Item> full = TorrentPlanUtil.build(new TorrentFile(torrent), ani());
+        List<Item> full = TorrentPlanUtil.build(TorrentMetadata.from(torrent), ani());
 
         assertEquals(full, TorrentPlanUtil.filterEpisodes(full, List.of()));
     }
@@ -133,7 +132,7 @@ class TorrentPlanUtilTest {
                 TestTorrent.file("Show S01/Show - 01.mkv", 101L),
                 TestTorrent.file("Show S01/Show - 01.ass", 11L),
                 TestTorrent.file("Show S01/Show - 02.mkv", 102L)));
-        List<Item> plan = TorrentPlanUtil.build(new TorrentFile(torrent), ani());
+        List<Item> plan = TorrentPlanUtil.build(TorrentMetadata.from(torrent), ani());
 
         List<Item> only1 = plan.stream().filter(i -> i.getTitle().endsWith("01.mkv")).toList();
         var keys = TorrentPlanUtil.episodeIndexKeys(ani(), only1);

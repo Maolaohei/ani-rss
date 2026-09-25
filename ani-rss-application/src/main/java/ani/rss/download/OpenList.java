@@ -36,7 +36,7 @@ import cn.hutool.http.Method;
 import com.google.gson.JsonObject;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.eclipse.bittorrent.TorrentFile;
+import ani.rss.util.other.TorrentMetadata;
 import org.springframework.stereotype.Service;
 
 import java.io.File;
@@ -402,7 +402,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
      * @param plan        预览结果(title=种子内路径, reName=最终命名, length=文件大小, episode=解析集数)
      * @param savePath    下载位置
      * @param torrentFile 种子文件
-     * @param torrentName 种子根目录名(TorrentFile.getName(), 作为网盘临时目录名)
+     * @param torrentName 种子根目录名(TorrentMetadata.getName(), 作为网盘临时目录名)
      * @return 提交即受理, true=已提交(等待在后台进行)
      */
     public Boolean downloadCollection(Ani ani, List<Item> plan, String savePath, File torrentFile, String torrentName) {
@@ -505,7 +505,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             if ("txt".equalsIgnoreCase(FileUtil.extName(torrentFile))) {
                 return List.of();
             }
-            TorrentFile parsed = new TorrentFile(torrentFile);
+            TorrentMetadata parsed = TorrentMetadata.from(torrentFile);
             List<Item> full = TorrentPlanUtil.build(parsed, planAni(ani, item));
             return TorrentPlanUtil.filterEpisodes(full, TorrentPlanUtil.expectedEpisodesOf(item));
         } catch (Exception e) {
@@ -537,7 +537,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                     if (resolved == null) {
                         resolved = MagnetTorrentUtil.resolve(magnet);
                     }
-                    TorrentFile parsed = new TorrentFile(resolved);
+                    TorrentMetadata parsed = TorrentMetadata.from(resolved);
                     List<Item> full = TorrentPlanUtil.build(parsed, sourceAni);
                     List<Item> plan = TorrentPlanUtil.filterEpisodes(full, TorrentPlanUtil.expectedEpisodesOf(item));
                     if (!plan.isEmpty()) {
