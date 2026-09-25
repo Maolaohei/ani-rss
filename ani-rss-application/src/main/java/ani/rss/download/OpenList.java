@@ -449,6 +449,43 @@ public class OpenList implements BaseDownload, OfflineDownloader {
     }
 
     /**
+     * 计划构建用的订阅视图：把集数偏移换成「产生本条目的那条 RSS」的偏移。
+     * <p>
+     * 备用 RSS 各自带偏移时，订阅对象上的 {@code ani.offset} 与条目实际用的偏移不同。
+     * 计划里的目标名是按 {@code ani.offset} 算的，而 {@code item.getReName()} 是按来源源的
+     * 偏移算的，两者会差出偏移量——归位时就会把 {@code S04E24} 重命名成 {@code S04E96}，
+     * 并且 {@code filterEpisodes} 的期望集数也对不上，整份计划被清空后回退到启发式。
+     * <p>
+     * 偏移一致、条目没带来源偏移（老数据 / 非 RSS 入口）或克隆失败时原样返回订阅。
+     */
+    static Ani planAni(Ani ani, Item item) {
+        if (ani == null) {
+            return null;
+        }
+        Integer sourceOffset = item == null ? null : item.getRssOffset();
+        if (sourceOffset == null || Objects.equals(sourceOffset, ani.getOffset())) {
+            return ani;
+        }
+        Ani copy = ObjectUtil.clone(ani);
+        if (copy == null) {
+            return ani;
+        }
+        copy.setOffset(sourceOffset);
+        log.debug("期望计划按来源 RSS 偏移构建: 订阅偏移 {} -> 来源偏移 {} {}",
+                ani.getOffset(), sourceOffset, item == null ? null : item.getReName());
+        return copy;
+    }
+
+    /**
+     * 条目「来源 RSS 的集数偏移」：条目自带则用它；没带（老数据 / 非 RSS 入口）按 0 处理，
+     * 即保持改造前的行为——文件名里的集数直接当最终集数，不做平移。
+     */
+    static int sourceOffsetOf(Item item) {
+        Integer sourceOffset = item == null ? null : item.getRssOffset();
+        return sourceOffset == null ? 0 : sourceOffset;
+    }
+
+    /**
      * 本地能解析时直接构建期望文件计划（纯本地、无网络）。
      * <p>
      * 合集入口已经有预览计划，直接沿用，不重复解析。
@@ -469,7 +506,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 return List.of();
             }
             TorrentFile parsed = new TorrentFile(torrentFile);
-            List<Item> full = TorrentPlanUtil.build(parsed, ani);
+            List<Item> full = TorrentPlanUtil.build(parsed, planAni(ani, item));
             return TorrentPlanUtil.filterEpisodes(full, TorrentPlanUtil.expectedEpisodesOf(item));
         } catch (Exception e) {
             log.debug("构建期望文件计划失败(回退扫目录推断) {}: {}",
@@ -490,6 +527,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         if (!MagnetTorrentUtil.isMagnet(magnet)) {
             return;
         }
+        // 后台线程里也要按「来源 RSS」的偏移构建计划，与本地解析路径同一口径
+        Ani sourceAni = planAni(ani, item);
         try {
             PLAN_RESOLVE_POOL.submit(() -> {
                 try {
@@ -499,7 +538,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                         resolved = MagnetTorrentUtil.resolve(magnet);
                     }
                     TorrentFile parsed = new TorrentFile(resolved);
-                    List<Item> full = TorrentPlanUtil.build(parsed, ani);
+                    List<Item> full = TorrentPlanUtil.build(parsed, sourceAni);
                     List<Item> plan = TorrentPlanUtil.filterEpisodes(full, TorrentPlanUtil.expectedEpisodesOf(item));
                     if (!plan.isEmpty()) {
                         ctx.plan = plan;
@@ -792,6 +831,13 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         volatile List<Item> planMissingVideos;
         /** 本次真正归位的计划条目（供精确标记完成；null/空=走旧口径标记 item 的 episodeRange） */
         volatile List<Item> finalizedItems;
+        /**
+         * 本次任务「来源 RSS 的集数偏移」（见 {@link Item#getRssOffset()}）。
+         * <p>
+         * 归位时从文件名提集数必须加这个偏移，而不是订阅的 {@code ani.offset}——
+         * 备用 RSS 各自带偏移时两者不同，用错会让目标名与 {@code reName} 差出偏移量。
+         */
+        int sourceOffset;
 
         String tid;            // 可变：10008 时切换/清空
         long retry;
@@ -997,6 +1043,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             ctx.claimedInFlight = claimedInFlight;
             ctx.newlySubmittedTid = newlySubmittedTid;
             ctx.retry = 0;
+            ctx.sourceOffset = sourceOffsetOf(item);
             return ctx;
         } catch (OfflineTimeoutException e) {
             // 超时必须向上抛给 finalizeOfflineDownload（后台任务），避免被当成普通 false/坏种
@@ -1706,7 +1753,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         }
 
         Map<String, String> renameMap = buildEpisodeRenameMap(scan.videoList(), scan.subtitleList(),
-                ctx.finalRenameBase, ctx.isCollection, ani == null ? null : ani.getSeason());
+                ctx.finalRenameBase, ctx.isCollection, ani == null ? null : ani.getSeason(),
+                ctx.sourceOffset);
         if (renameMap.isEmpty()) {
             return List.of();
         }
@@ -2402,7 +2450,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                                                       List<OpenListFileInfo> subtitleList,
                                                       String finalRenameBase,
                                                       boolean isCollection,
-                                                      Integer season) {
+                                                      Integer season,
+                                                      int episodeOffset) {
         Map<String, String> renameMap = new HashMap<>();
         if (videoList.isEmpty()) {
             return renameMap;
@@ -2410,7 +2459,7 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         if (videoList.size() == 1) {
             OpenListFileInfo videoFile = videoList.get(0);
             String videoReName = isCollection
-                    ? collectionEpisodeReName(videoFile.getName(), finalRenameBase, season)
+                    ? collectionEpisodeReName(videoFile.getName(), finalRenameBase, season, episodeOffset)
                     : finalRenameBase;
             renameMap.put(videoFile.getName(), videoReName + "." + FileUtil.extName(videoFile.getName()));
             for (OpenListFileInfo sub : subtitleList) {
@@ -2431,9 +2480,10 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             String videoExt = FileUtil.extName(videoName);
             String videoReName;
             if (isCollection) {
-                videoReName = collectionEpisodeReName(videoName, finalRenameBase, season);
+                videoReName = collectionEpisodeReName(videoName, finalRenameBase, season, episodeOffset);
             } else {
-                String episode = extractEpisodeFromFileName(videoName);
+                // 文件名集数 → 最终集数必须加「来源 RSS 的偏移」，否则目标名会与 reName 差出偏移量
+                String episode = shiftEpisode(extractEpisodeFromFileName(videoName), episodeOffset);
                 if (episode == null) {
                     // 特典/无集数文件([Character PV 01]、[CM]、[Menu]、SPs 等): 保留原名, 避免与正片重命名冲突
                     videoReName = videoBase;
@@ -2524,11 +2574,20 @@ public class OpenList implements BaseDownload, OfflineDownloader {
      * 临时目录名使用源标题，不应传入本方法。
      */
     String collectionEpisodeReName(String originalName, String reName, Integer season) {
+        return collectionEpisodeReName(originalName, reName, season, 0);
+    }
+
+    /**
+     * @param episodeOffset 文件名集数 → 最终集数的平移量（来源 RSS 的集数偏移，见 {@link #sourceOffsetOf}）。
+     *                      文件名用的是源的编号方式（Baha 累计集数 96），模板基名用的是季内集数（24），
+     *                      差的就是这个偏移；传 0 即「文件名集数就是最终集数」。
+     */
+    String collectionEpisodeReName(String originalName, String reName, Integer season, int episodeOffset) {
         if (StrUtil.isBlank(originalName) || StrUtil.isBlank(reName)) {
             return reName;
         }
 
-        String episode = extractEpisodeFromFileName(originalName);
+        String episode = shiftEpisode(extractEpisodeFromFileName(originalName), episodeOffset);
         if (StrUtil.isBlank(episode)) {
             // 特典/无集数文件([Character PV 01]、[CM]、[Menu]、SPs 等): 保留原名, 避免与正片重命名冲突
             return FileUtil.mainName(originalName);
@@ -2542,6 +2601,27 @@ public class OpenList implements BaseDownload, OfflineDownloader {
 
         int seasonNumber = season == null || season < 0 ? 1 : season;
         return reName + " S" + String.format("%02d", seasonNumber) + "E" + formatEpisode(episode);
+    }
+
+    /**
+     * 文件名里的集数 → 最终集数：加上「来源 RSS 的集数偏移」。
+     * <p>
+     * 平移量必须来自<b>产生该条目的那条 RSS</b>，而不是订阅的 {@code ani.offset}：
+     * 备用 RSS 各自带偏移时两者不同（实测 96 应归到 24，用订阅偏移则仍是 96）。
+     * 偏移为 0 或集数不是数字时原样返回，行为与改造前一致。
+     */
+    private static String shiftEpisode(String episode, int episodeOffset) {
+        if (episodeOffset == 0 || StrUtil.isBlank(episode)) {
+            return episode;
+        }
+        try {
+            double shifted = Double.parseDouble(episode) + episodeOffset;
+            return shifted == Math.floor(shifted)
+                    ? String.valueOf((long) shifted)
+                    : String.valueOf(shifted);
+        } catch (NumberFormatException e) {
+            return episode;
+        }
     }
 
     private static String formatEpisode(String episode) {
@@ -2826,7 +2906,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
 
             boolean isCollection = item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty();
             Map<String, String> renameMap = buildEpisodeRenameMap(
-                    videoList, subtitleList, finalRenameBase, isCollection, ani.getSeason());
+                    videoList, subtitleList, finalRenameBase, isCollection, ani.getSeason(),
+                    sourceOffsetOf(item));
             // 归位对账同样要避让：这里的 fsBatchRename 没有冲突检测，
             // 撞名会直接覆盖网盘上已就位的同名文件（数据丢失，比抛异常更严重）
             dedupeRenameTargets(renameMap);

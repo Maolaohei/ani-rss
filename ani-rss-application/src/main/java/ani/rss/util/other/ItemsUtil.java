@@ -85,7 +85,7 @@ public class ItemsUtil {
         QualityProfile qualityProfile = QualityRule.effective(ani, config);
         List<Item> items = new ArrayList<>(ItemsUtil.getItems(ani, url, subgroup)
                 .stream()
-                .peek(item -> item.setMaster(true))
+                .peek(item -> item.setMaster(true).setRssOffset(ani.getOffset()))
                 .toList());
 
         if (!config.getStandbyRss()) {
@@ -108,7 +108,10 @@ public class ItemsUtil {
                     clone.setOffset(rss.getOffset());
                     return ItemsUtil.getItems(clone, rss.getUrl(), standbySubgroup)
                             .stream()
-                            .peek(item -> item.setMaster(false))
+                            // 必须把「这条备用 RSS 自己的偏移」随条目带下去：它通常与订阅的
+                            // ani.offset 不同，下游按文件名提集数时用错偏移会让归位目标名
+                            // 与 reName 差出偏移量（S04E24 → S04E96）
+                            .peek(item -> item.setMaster(false).setRssOffset(rss.getOffset()))
                             .toList();
                 }));
             }

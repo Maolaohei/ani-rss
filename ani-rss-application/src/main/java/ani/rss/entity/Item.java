@@ -146,6 +146,22 @@ public class Item implements Serializable {
     private Integer version;
 
     /**
+     * 本条目的「来源 RSS 集数偏移」。
+     * <p>
+     * 一个订阅可以挂多条备用 RSS，<b>每条有自己独立的集数偏移</b>：同一部番，Baha 源按累计
+     * 集数编号（96），主源按季内集数编号（24）。{@code episode}/{@code reName} 是用
+     * <b>产生本条目的那条 RSS</b> 的偏移算出来的，而订阅对象上只有一个 {@code ani.offset}，
+     * 两者可以不同（用户给备用源单独配偏移时必然不同）。
+     * <p>
+     * 下游凡是要「从文件名提集数 → 换算成最终集数」的地方（期望文件计划、归位重命名）
+     * 都必须用本字段的偏移，否则目标名会与 {@code reName} 差出偏移量——实测：
+     * 添加下载是 {@code S04E24}，离线完成后被重命名成 {@code S04E96}。
+     * 为空（老数据 / 非 RSS 入口）时回退订阅的 {@code ani.offset}。
+     */
+    @Schema(description = "来源 RSS 集数偏移")
+    private Integer rssOffset;
+
+    /**
      * 子集列表 (预览时合集折叠用)
      */
     @Schema(description = "子集列表")
