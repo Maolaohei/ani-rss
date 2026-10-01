@@ -22,6 +22,33 @@
 
 ---
 
+## 3.4.30 增量（2026-10）
+
+### 种子信息哈希：纯 v2 按 qBittorrent 口径截断 40 hex
+
+移植上游 `0963d05b3`（close #731）的意图：fork 在 v3.4.28 移植 `6fbf55af` 时只带进了**修复前**的 `TorrentMetadata`，纯 v2 种子 `getHash()` 返回完整 64 位 SHA-256，而 qBittorrent API（`hash`/`hashes`）只认 40 位——合集下载提交后按 hash 轮询/重命名、qB 偏移缓存键全部对不上。
+
+拆出 `getHashV1()/getHashV2()`，纯 v2 用 SHA-256 截断 40 hex。**hybrid 保持 v1 SHA-1**：hybrid 同时带 `pieces`，libtorrent `info_hash().get_best()` 是 v1 优先；上游按 `isV2()` 分支会把 hybrid 误算成 v2，这里没有跟。
+
+新增 `TorrentMetadataTest`（手写 bencode 造 v1 / 纯 v2 / hybrid，测试自算 info 字节摘要），补上此前真实缺失的覆盖。
+
+### 去全局锁与常驻句柄
+
+- `ExceptionUtils.getMessage` 去 `synchronized`（上游 `6c91ad80b`）：只读不可变 `Map.of`，原先却给全应用挂一把类锁。
+- `MavenUtils` 去掉常驻静态 `JarFile` 与静态初始化块，`getVersion()` 改为 try-with-resources 即时开合、去 `synchronized`（上游 `448d6de62`/`3119be798` 的最小改法，不引入 `build-info`）。旧的常驻句柄不关闭，初始化失败还会让 `Runner` 直接 `System.exit(1)`，把「读不到版本」升级成「起不来」。
+
+### 稳定性收口
+
+- `OpenList.DOWNLOAD_LOCKS` 由 `Object` 改 `ReentrantLock` 并新增 `releaseDownloadLock()`（对齐 `AniLocks.release`：tryLock 成功且无排队者才移除），消除「每个 infoHash 常驻一个锁对象」的缓慢泄漏。
+- `RenameCacheUtil.withConnection` 把「取连接 + execute + 失败重试」整段放进 `LOCK`（原实现只在取连接时加锁、SQL 在锁外跑，与类注释自相矛盾）。
+- `SubtitleMatchLog.persist` 改 temp + rename 原子写，与失败队列 / 下载历史一致。
+
+#### 验证
+
+后端 `mvn -o test` 全量 **984 / 0 失败 / 0 错误 / 1 跳过**（跳过为既有 `bgmTest` 的网络依赖，离线环境）；e2e 4 例通过。
+
+---
+
 ## 3.4.29 增量（2026-09）
 
 ### 首页切回时重新拉取数据，不再展示陈旧内容
