@@ -33,7 +33,8 @@ import java.sql.Statement;
  *
  * <h2>为什么还留着锁</h2>
  * 这里共用一条 {@link Connection}，而 JDBC 的 {@code Connection} 并不保证可被多线程并发使用。
- * 因此仍需要互斥，但改成<b>本类私有的锁对象</b>（不再用类锁），且临界区里只有本地 SQLite 操作——
+ * 因此<b>取连接与执行 SQL 整段</b>都在本类私有的 {@link #LOCK} 内（原实现只在 {@code connection()}
+ * 里加锁，真正 {@code execute} 却在锁外——等于没锁）。临界区里只有本地 SQLite 操作，
  * 没有网络、没有等待，不构成新的瓶颈。
  */
 @Slf4j
@@ -108,16 +109,21 @@ public class RenameCacheUtil {
      * 正常路径零额外开销，异常路径能自愈。
      */
     private static <T> T withConnection(String action, SqlAction<T> sqlAction) {
-        try {
-            return sqlAction.apply(connection());
-        } catch (SQLException e) {
-            log.warn("重命名缓存 {} 失败，丢弃连接重建后重试一次: {}", action, ExceptionUtils.getMessage(e));
-            discardConnection();
+        // 整段（取连接 + 执行 SQL）都必须在 LOCK 内：共用一条 JDBC Connection，
+        // 而 Connection 不保证可并发使用；只在“取连接”时加锁等于没锁。
+        // LOCK 可重入，connection()/discardConnection() 内部再次加锁不会死锁。
+        synchronized (LOCK) {
             try {
                 return sqlAction.apply(connection());
-            } catch (SQLException retry) {
-                log.error("重命名缓存 {} 重试仍失败: {}", action, ExceptionUtils.getMessage(retry));
-                throw new RuntimeException(retry);
+            } catch (SQLException e) {
+                log.warn("重命名缓存 {} 失败，丢弃连接重建后重试一次: {}", action, ExceptionUtils.getMessage(e));
+                discardConnection();
+                try {
+                    return sqlAction.apply(connection());
+                } catch (SQLException retry) {
+                    log.error("重命名缓存 {} 重试仍失败: {}", action, ExceptionUtils.getMessage(retry));
+                    throw new RuntimeException(retry);
+                }
             }
         }
     }

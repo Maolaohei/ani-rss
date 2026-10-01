@@ -50,6 +50,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -103,8 +104,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
      * 提交中去重：防止同一 infoHash 被重复提交到 OpenList
      */
     private static final Set<String> inFlightTasks = ConcurrentHashMap.newKeySet();
-    // 按 infoHash 串行，不同 hash 可并行
-    private static final ConcurrentHashMap<String, Object> DOWNLOAD_LOCKS = new ConcurrentHashMap<>();
+    // 按 infoHash 串行，不同 hash 可并行（ReentrantLock 以便安全回收，见 releaseDownloadLock）
+    private static final ConcurrentHashMap<String, ReentrantLock> DOWNLOAD_LOCKS = new ConcurrentHashMap<>();
     /** 当前正在等待的离线 hash 集合（任务管理器展示 / 取消清理 / 残留保护）；多 hash 并行时需记录全部 */
     private static final Set<String> currentInfoHashes = ConcurrentHashMap.newKeySet();
     /** 当前离线等待进度（任务管理器，仅展示用——多任务并行时只显示最后更新的一个） */
@@ -572,9 +573,9 @@ public class OpenList implements BaseDownload, OfflineDownloader {
         infoHash = infoHash.toLowerCase();
         final String hashKey = infoHash;
 
-        Object lock = DOWNLOAD_LOCKS.computeIfAbsent(hashKey, k -> new Object());
-        // 不回收锁对象：避免等待线程与新线程拿到不同 lock 导致同 hash 并行
-        synchronized (lock) {
+        ReentrantLock lock = DOWNLOAD_LOCKS.computeIfAbsent(hashKey, k -> new ReentrantLock());
+        lock.lock();
+        try {
             OfflineDownloadContext ctx = submitOffline(ani, item, savePath, magnet, hashKey);
             ctx.collectionPlan = collectionPlan;
             // 期望文件计划：本地能解析就直接算（纯本地、无网络）；磁力链记录交给后台线程抓元数据
@@ -609,6 +610,8 @@ public class OpenList implements BaseDownload, OfflineDownloader {
                 return false;
             }
             return true;
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -1085,6 +1088,39 @@ public class OpenList implements BaseDownload, OfflineDownloader {
             } catch (Exception e) {
                 log.warn("删除离线任务失败 {}: {}", tid, e.getMessage());
             }
+        }
+        // 提交锁一并尽力回收：DOWNLOAD_LOCKS 原先只增不删，会随订阅数长期累积
+        releaseDownloadLock(infoHash);
+    }
+
+    /**
+     * 尽力回收某个 infoHash 的提交锁（{@code DOWNLOAD_LOCKS} 曾只增不删，长期运行会缓慢泄漏）。
+     * <p>
+     * 与 {@link ani.rss.service.AniLocks#release(String)} 同一套安全前提：
+     * <ol>
+     *   <li>能立刻拿到锁（{@code tryLock}）——拿不到说明还有线程在提交/等待该 hash，放弃回收；</li>
+     *   <li>没有线程在排队等这把锁——否则移除后等待方持旧锁、新请求拿新锁，互斥被绕开。</li>
+     * </ol>
+     * 是尽力而为：漏掉几个锁对象不影响正确性，最坏情况是下次提交同一 hash 时再回收。
+     */
+    private static void releaseDownloadLock(String infoHash) {
+        if (StrUtil.isBlank(infoHash)) {
+            return;
+        }
+        ReentrantLock lock = DOWNLOAD_LOCKS.get(infoHash);
+        if (lock == null) {
+            return;
+        }
+        if (!lock.tryLock()) {
+            return;
+        }
+        try {
+            if (lock.hasQueuedThreads()) {
+                return;
+            }
+            DOWNLOAD_LOCKS.remove(infoHash, lock);
+        } finally {
+            lock.unlock();
         }
     }
 

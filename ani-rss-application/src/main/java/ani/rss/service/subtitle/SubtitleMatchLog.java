@@ -1,5 +1,6 @@
 package ani.rss.service.subtitle;
 
+import ani.rss.commons.FileUtils;
 import ani.rss.util.other.ConfigUtil;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.util.StrUtil;
@@ -123,7 +124,12 @@ public class SubtitleMatchLog {
             synchronized (RING) {
                 snapshot = new ArrayList<>(RING);
             }
-            FileUtil.writeUtf8String(GSON.toJson(snapshot), cacheFile());
+            File file = cacheFile();
+            // temp + rename 原子写：直接覆盖目标文件时，进程在写一半崩溃会留下截断 JSON，
+            // 下次 ensureLoaded 解析失败就静默清空。与失败队列 / 下载历史保持同一写法。
+            File temp = new File(file.getPath() + ".temp");
+            FileUtil.writeUtf8String(GSON.toJson(snapshot), temp);
+            FileUtils.move(temp.toPath(), file.toPath());
         } catch (Exception e) {
             log.warn("写入字幕匹配日志失败: {}", e.getMessage());
         } finally {

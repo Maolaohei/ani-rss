@@ -7,7 +7,6 @@ import cn.hutool.core.util.StrUtil;
 import cn.hutool.core.util.XmlUtil;
 import cn.hutool.system.OsInfo;
 import cn.hutool.system.SystemUtil;
-import lombok.Cleanup;
 import lombok.Data;
 import lombok.experimental.Accessors;
 import lombok.extern.slf4j.Slf4j;
@@ -15,7 +14,6 @@ import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 
 import java.io.File;
-import java.io.IOException;
 import java.io.InputStream;
 import java.io.Serializable;
 import java.util.Objects;
@@ -24,19 +22,11 @@ import java.util.jar.JarFile;
 
 @Slf4j
 public class MavenUtils {
-    private static String version = "None";
-    public static JarFile JAR_FILE = null;
-
-    static {
-        CurrentFile currentFile = getCurrentFile();
-        try {
-            if (currentFile.isFile()) {
-                JAR_FILE = new JarFile(currentFile.getFile());
-            }
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
-    }
+    /**
+     * 版本缓存；"None" 表示尚未解析到。volatile 保证多线程可见性
+     * （{@link #getVersion()} 已去掉 synchronized）。
+     */
+    private static volatile String version = "None";
 
     public static CurrentFile getCurrentFile() {
         OsInfo osInfo = SystemUtil.getOsInfo();
@@ -47,22 +37,33 @@ public class MavenUtils {
                 .setFile(new File(s));
     }
 
-    public static synchronized String getVersion() {
+    /**
+     * 获取当前版本号。
+     * <p>
+     * 不再把 {@code JarFile} 常驻在静态字段上（fork 旧实现 {@code public static JarFile JAR_FILE}
+     * 从不关闭，句柄/mmap 泄漏；且初始化失败会抛 {@code ExceptionInInitializerError}，
+     * 被 {@code Runner} 捕获后直接 {@code System.exit(1)}，让"读不到版本"升级成"起不来"）。
+     * 这里改成每次读取都 try-with-resources 打开并立即关闭。
+     */
+    public static String getVersion() {
         if (!"None".equalsIgnoreCase(version)) {
             return version;
         }
         try {
-            if (Objects.nonNull(JAR_FILE)) {
+            CurrentFile currentFile = getCurrentFile();
+            if (currentFile.isFile()) {
                 String pomPath = "META-INF/maven/ani.rss/ani-rss-application/pom.xml";
-                JarEntry jarEntry = JAR_FILE.getJarEntry(pomPath);
-                if (Objects.isNull(jarEntry)) {
-                    return "None";
+                try (JarFile jarFile = new JarFile(currentFile.getFile())) {
+                    JarEntry jarEntry = jarFile.getJarEntry(pomPath);
+                    if (Objects.isNull(jarEntry)) {
+                        return "None";
+                    }
+                    try (InputStream inputStream = jarFile.getInputStream(jarEntry)) {
+                        String s = IoUtil.readUtf8(inputStream);
+                        version = ReUtil.get("<version>(.*?)</version>", s, 1);
+                        return version;
+                    }
                 }
-                @Cleanup
-                InputStream inputStream = JAR_FILE.getInputStream(jarEntry);
-                String s = IoUtil.readUtf8(inputStream);
-                version = ReUtil.get("<version>(.*?)</version>", s, 1);
-                return version;
             }
         } catch (Exception e) {
             log.error(e.getMessage(), e);

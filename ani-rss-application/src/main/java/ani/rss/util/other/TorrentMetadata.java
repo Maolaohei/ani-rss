@@ -48,13 +48,40 @@ public final class TorrentMetadata {
     }
 
     /**
-     * 获取供 qBittorrent API 使用的信息哈希。
+     * 获取供 qBittorrent API 使用的信息哈希（固定 40 位十六进制）。
+     * <p>
+     * qBittorrent/libtorrent 的 {@code info_hash().get_best()} 规则：<b>优先 v1（SHA-1）</b>，
+     * 纯 v2 才回退到截断 20 字节的 v2（SHA-256 前 40 位十六进制）。
+     * <p>
+     * 上游 {@code 0963d05b3}（close #731）按 {@code isV2()} 分支，会把 <b>hybrid</b> 也算成 v2；
+     * 但 hybrid 同时带 v1 的 {@code pieces}，qBittorrent 取的是 v1 SHA-1。这里保留 fork 原有的
+     * hybrid 语义，只修「纯 v2 返回 64 位、与 qB 的 40 位对不上」这个真正的缺陷。
      *
-     * @return v1 或 hybrid 种子的 SHA-1 哈希；纯 v2 种子的 SHA-256 哈希
+     * @return v1 / hybrid 的 SHA-1，或纯 v2 截断到 40 位的 SHA-256
      */
     public String getHash() {
-        // qBittorrent uses the v1 SHA-1 hash for hybrid torrents.
-        return hasV1InfoHash() ? shaHex("SHA-1") : shaHex("SHA-256");
+        if (hasV1InfoHash()) {
+            return getHashV1();
+        }
+        return getHashV2();
+    }
+
+    /**
+     * v1 信息哈希（SHA-1，40 位十六进制）。
+     *
+     * @return SHA-1 十六进制摘要
+     */
+    public String getHashV1() {
+        return shaHex("SHA-1");
+    }
+
+    /**
+     * v2 信息哈希（qBittorrent API 口径：SHA-256 截断到 40 位十六进制）。
+     *
+     * @return 截断后的 SHA-256 十六进制摘要
+     */
+    public String getHashV2() {
+        return shaHex("SHA-256").substring(0, 40);
     }
 
     /**
