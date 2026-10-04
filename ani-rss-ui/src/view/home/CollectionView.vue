@@ -292,6 +292,19 @@ let data = ref({
   show: false,
 })
 
+// 合集来源：种子文件（base64）或磁力链接，后端按 torrent 内容自动识别
+let torrentSource = ref('file')
+
+let clearTorrent = () => {
+  data.value.filename = ''
+  data.value.torrent = ''
+}
+
+// 切换来源时清空已选内容，避免把上一种来源的数据带过去提交
+let clearTorrentSource = () => {
+  clearTorrent()
+}
+
 let dialogVisible = ref(false)
 
 let show = () => {
