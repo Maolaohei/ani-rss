@@ -22,6 +22,22 @@
 
 ---
 
+## 3.4.31 增量（2026-10）
+
+### 修复「添加合集」弹窗打不开（torrentSource is not defined）
+
+v3.4.14 引入「合集磁力支持」时是个半成品：模板（`el-radio-group` 的 `v-model`、`el-tag` 的 `@close`）和 `show()` 都改了，但 `<script setup>` 里漏了 `torrentSource` / `clearTorrent` / `clearTorrentSource` 三个绑定。点击「添加合集」时 `show()` 先抛 `ReferenceError`，后面的 `dialogVisible.value = true` 根本没执行 ⇒ 弹窗直接打不开（即便能开，模板渲染也会同样抛错）。
+
+补上三个绑定：`torrentSource` 默认 `file`；`clearTorrent` 清空 `data.filename` / `data.torrent`；`clearTorrentSource` 在切换来源时调用它，避免把上一种来源的数据带过去提交。
+
+**为什么构建期没拦住**：`vite build` 不会因模板/脚本里的未定义标识符而失败——`<script setup>` 下未解析的名字会被编译成外部绑定（产物里表现为 `.torrentSource`），构建照样通过。这条对后续前端改动同样成立：**构建通过 ≠ 运行时不炸**。
+
+#### 验证
+
+前端 `vite build` 通过。产物对比：修复前 `dist` 中为 `.torrentSource`（外部绑定，即运行时 `ReferenceError` 的来源），修复后为 0 处，标识符已解析为 setup 绑定。后端无改动。
+
+---
+
 ## 3.4.30 增量（2026-10）
 
 ### 种子信息哈希：纯 v2 按 qBittorrent 口径截断 40 hex
