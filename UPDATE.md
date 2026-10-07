@@ -66,7 +66,22 @@
 | UI 大改（`81d60380` 全新页面、`62a27b70e`、`90e67a02` 等） | fork UI 已自研 |
 | `249f7fe0d`、`53dfa2379` | 纯拆分重构（DefaultAniFactory / BackupController），无行为变更 |
 | `db375d770` | 种子目录改 `torrents/{首字符}/{aniId}`，与 fork 现有 title 路径布局冲突，需专门决策+旧路径兼容，本次不动 |
-| `a417ec745` | 依赖矩阵升级（tmdb-api 1.0.10 / Spring Boot 4.1.1 / spring-ai 2.0.1 …），需逐个验兼容，单独排期 |
+| `a417ec745` | 依赖矩阵升级（Spring Boot 4.1.1 / spring-ai 2.0.1 / springdoc 3.1.1 / ical4j 4.3.0 / commonmark 0.30.0 / logback 1.6.5），需逐个验兼容，单独排期（其中 tmdb-api 与 ebml-reader 见下节，已被迫先跟） |
+
+### 被迫跟进：tmdb-api 1.0.10 / ebml-reader 1.0.1
+
+发版时 CI 直接挂在依赖解析：
+
+```
+Failed to read artifact descriptor for ebml.reader:ebml-reader:jar:1.0.0
+  Checksum validation failed, expected '<!DOCTYPE' (REMOTE_EXTERNAL) but is actually 'cd2485a5…'
+```
+
+两个上游 mvn-repo 分支（`wushuo894/EBMLReader`、`wushuo894/tmdb-api` 的 `mvn-repo`）是 **force-push 覆盖式**的，现在只剩最新版（mvn-repo 里就是 1.0.1 / 1.0.10），fork 钉住的 1.0.0 / 1.0.9 在 raw 上已经 404。失败点很隐：Central 没有这两个包，404 后会继续落到 `frostwire-maven`，而该站对不存在的 artifact 返回的是 **302 → HTML 200**（不是 404）—— 配合我们为防「假 200 当 POM 收下」而设的 `checksumPolicy=fail`，Maven 直接判死整条依赖解析，而不是“找不到就下一个仓库”。
+
+所以这两个包从“可选升级”变成“不升就发不出来”，已跟到上游同版本（只动版本号，无代码改动，上游 `a417ec745` 也同样只改了 pom）。其余依赖仍缓。
+
+教训：第三方 `mvn-repo` 分支是可覆写的，钉住旧版本等于把构建绑在别人的 force-push 上；`checksumPolicy=fail` 能拦住假 200，但代价是「缺失 artifact」会以校验错误而不是 404 的形式爆出来——看到 `expected '<!DOCTYPE'` 时先查版本是否还存在。
 
 ### 设置页移除「捐赠」页签
 
