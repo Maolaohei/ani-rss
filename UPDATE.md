@@ -22,6 +22,51 @@
 
 ---
 
+## 3.4.33 增量（2026-10）
+
+### 「关于」页：来路说明并入页头（撤掉上一版的「项目信息」块）
+
+上一版单独加了一块「项目信息」，实测不好看，四个原因都是具体的：
+
+- 外框套在同色底上（`--el-bg-color-page` 贴在同为页面底色的容器里），读起来是一块说不清边界的灰板；
+- 三层标签把一个意思说了三遍：页面标题「关于」→ 面板标题「项目信息」→ 行标签「上游项目」；
+- 借错了组件：`SettingsItem` 的 110px 标签列是给设置项用的，摆在居中的关于页里就是左边挤、右边散；
+- 仓库名用 monospace 当主信息，看着像配置导出；每个链接还都重复挂一个「GitHub」文字按钮。
+
+改为**并入页头**（零新增块）：版本号下挂一行「本仓库是 `wushuo894/ani-rss` 的社区 fork · 更新来自 `Maolaohei/ani-rss`」，两个仓库作行内链接（正文用次级色，hover 才变主色，不与版本号抢注意力）。顶部 `GitHub` 按钮一并改指本仓库。
+
+### BGM：401 不再甩一串 URL，授权失效时整轮只报一次
+
+起因是线上日志（一个失效的 BGM token）：
+
+```
+ERROR BgmTask  url: https://bgm.tv/oauth/token_status, status: 401
+ERROR BgmTask  url: https://api.bgm.tv/v0/subjects/469104, status: 401
+ERROR BgmTask  url: https://api.bgm.tv/v0/subjects/568244, status: 401
+```
+
+三个独立的坑：
+
+1. **报错看不懂**。`HttpReq.assertStatus` 抛的是 `url: ..., status: 401`，页面上就是一串 URL。401 在 BGM 语义唯一（只有请求带了 token 才会 401），已在 `BgmUtil` 里收敛成 `assertStatus()` 单点，统一转成人话「BGM 授权已失效，请在 设置 → Bangumi 重新授权」。
+2. **手动模式永远发现不了 token 到期**。`refreshToken()` 原先把 `bgmTokenType != AUTO` 放在最前面直接 return，而默认值就是手动输入 —— 既不刷新也不提示，用户只能从后续一堆 401 里猜。改成先查剩余天数、再分模式：剩 <3 天就说明还剩几天（或 24 小时内过期）。四个“配置缺失就裸 return”也补上了点名缺哪一项的 warn。
+3. **一个失效 token 刷 N 条相同堆栈**。授权是全局性前置条件，`BgmTask` 撞到授权失效应整轮跳过（`catch ResultException` + `return`），而不是给每个订阅各报一次 401 —— 那些请求注定全失败。
+
+**没配 token 的路径必须保持不变**：`api.bgm.tv` 的 `/v0/subjects/{id}` 是公开接口，不带 token 照样能用。所以短路条件只能是“配了 token 且被拒”，`bgmToken` 为空时照旧走完完整轮次。
+
+失败模式清单（这三处改动要守的）：
+
+| 情况 | 期望 |
+| --- | --- |
+| 配了 token 且被拒（401） | 一次人话异常；`BgmTask` 整轮跳过，不再 N 条相同堆栈 |
+| `bgmToken` 为空 | 不发 token_status、不短路，公开接口照常刷新评分 |
+| 剩 1~2 天 + 手动模式 | 一条 warn 说明还剩几天、不会自动刷新 |
+| AUTO 模式缺 App ID / App Secret / Refresh Token / 回调地址 | 一条 warn 点名缺哪一项 |
+| 剩 ≥ 3 天 | 查一次即返回，不发刷新请求 |
+
+**为什么没配自动化测试**：`token_status` 的地址是硬编码的 `https://bgm.tv`（不在 `bgmApi` 配置里），而 e2e 的假公网只实现了 absolute-form 的 http 代理、https 需要 CONNECT 隐道；能断言的又只有那句中文提示，恰好是 `docs/TESTING.md` 明令禁止的“变更检测”。`BgmTask` 也没有手动触发入口，所以“整轮只报一次”同样观察不到。上述五条失败模式靠代码结构保证；若要 CI 覆盖，最小改法是把 token_status 的 host 一并纳入配置、在 e2e 里指到假公网。
+
+---
+
 ## 3.4.32 增量（2026-10）
 
 三类改动：选择性跟进上游 3.2.31 → 3.2.43、设置页去捐赠页签、以及把「更新」改成拉 fork 自己的成品。

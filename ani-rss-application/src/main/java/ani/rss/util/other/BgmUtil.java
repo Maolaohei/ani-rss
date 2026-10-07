@@ -9,6 +9,7 @@ import ani.rss.entity.Config;
 import ani.rss.entity.web.ContentType;
 import ani.rss.entity.web.Header;
 import ani.rss.enums.BgmTokenTypeEnum;
+import ani.rss.exception.ResultException;
 import ani.rss.service.DownloadService;
 import ani.rss.service.MikanService;
 import ani.rss.util.basic.HttpReq;
@@ -40,6 +41,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * BGM
@@ -452,7 +455,7 @@ public class BgmUtil {
 
         String bgmApi = config.getBgmApi();
         BgmMe bgmMe = send(HttpReq.get(bgmApi + "/v0/me"), res -> {
-            HttpReq.assertStatus(res);
+            assertStatus(res);
             return GsonStatic.fromJson(res.body(), BgmMe.class);
         });
 
@@ -486,7 +489,7 @@ public class BgmUtil {
                 if (res.getStatus() == 404) {
                     return 0;
                 }
-                HttpReq.assertStatus(res);
+                assertStatus(res);
                 JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
                 if (jsonObject == null) {
                     return 0;
@@ -505,7 +508,7 @@ public class BgmUtil {
                 .body(GsonStatic.toJson(Map.of(
                         "type", 3,
                         "rate", rate
-                ))), HttpReq::assertStatus);
+                ))), BgmUtil::assertStatus);
         return rate;
     }
 
@@ -606,7 +609,7 @@ public class BgmUtil {
                         // 未收藏, 视为 type=0 继续后续标记
                         return null;
                     }
-                    HttpReq.assertStatus(res);
+                    assertStatus(res);
                     return GsonStatic.fromJson(res.body(), JsonObject.class);
                 });
 
@@ -675,7 +678,7 @@ public class BgmUtil {
         String bgmApi = config.getBgmApi();
 
         Function<HttpResponse, BgmInfo> fun = res -> {
-            HttpReq.assertStatus(res);
+            assertStatus(res);
             String body = res.body();
             Assert.isTrue(JSONUtil.isTypeJSON(body), "no json");
             BgmInfo bgmInfo = GsonStatic.fromJson(body, BgmInfo.class);
@@ -885,9 +888,25 @@ public class BgmUtil {
     }
 
     /**
+     * BGM 接口的状态断言。
+     * <p>
+     * 401 一律折算成「授权已失效」的人话异常：BGM 只有在请求带了 token 时才会回 401，
+     * 所以这个提示在任何调用点上都是准确的。原实现直接把
+     * {@code url: ..., status: 401} 抛给用户，界面上就是一串 URL，看不出下一步该做什么。
+     *
+     * @param res 响应
+     */
+    private static void assertStatus(HttpResponse res) {
+        if (res.getStatus() == 401) {
+            throw ResultException.exception("BGM 授权已失效，请在 设置 → Bangumi 重新授权");
+        }
+        HttpReq.assertStatus(res);
+    }
+
+    /**
      * 获取剩余过期时间 单位: 天
      *
-     * @return
+     * @return 剩余天数；未配置 token 时为 0
      */
     public static Integer getExpiresDays() {
         String bgmToken = config.getBgmToken();
@@ -897,7 +916,7 @@ public class BgmUtil {
         long expires = HttpReq.post("https://bgm.tv/oauth/token_status")
                 .form("access_token", bgmToken)
                 .thenFunction(res -> {
-                    HttpReq.assertStatus(res);
+                    assertStatus(res);
                     JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
                     JsonElement expiresElement = jsonObject == null ? null : jsonObject.get("expires");
                     if (expiresElement == null || expiresElement.isJsonNull()) {
@@ -918,14 +937,18 @@ public class BgmUtil {
     }
 
     /**
-     * 刷新token
+     * 刷新 token
+     * <p>
+     * 顺序上<b>先查失效与否、再分模式</b>：原实现把 {@code bgmTokenType != AUTO} 放在最前面直接 return，
+     * 于是手动输入模式（默认值）下 token 到期后没有任何人会知道 —— 既不刷新也不提示，
+     * 只能在后续每个订阅上各报一次 401。
+     * <p>
+     * 没配 token 不算错误：{@code api.bgm.tv} 的公开接口不带 token 一样能用，
+     * 所以这里不抛异常、也不阻断调用方（见 {@code BgmTask} 对 ResultException 的处理）。
+     *
+     * @throws ResultException token 被 Bangumi 拒结（401）时抛出，供调用方短路整轮
      */
     public static synchronized void refreshToken() {
-        BgmTokenTypeEnum bgmTokenType = config.getBgmTokenType();
-        if (bgmTokenType != BgmTokenTypeEnum.AUTO) {
-            return;
-        }
-
         String bgmToken = config.getBgmToken();
         if (StrUtil.isBlank(bgmToken)) {
             return;
@@ -937,21 +960,34 @@ public class BgmUtil {
             return;
         }
 
+        BgmTokenTypeEnum bgmTokenType = config.getBgmTokenType();
+        if (bgmTokenType != BgmTokenTypeEnum.AUTO) {
+            // 手动模式不能自动刷新，但必须把"还剩几天"说出来，
+            // 否则用户只能从一堆 401 里猜发生了什么
+            if (days > 0) {
+                log.warn("BGM token 剩余 {} 天，手动输入模式不会自动刷新，到期后请重新填写 Access Token", days);
+            } else {
+                log.warn("BGM token 将在 24 小时内过期，手动输入模式不会自动刷新，请提前重新填写 Access Token");
+            }
+            return;
+        }
+
         String bgmAppID = config.getBgmAppID();
         String bgmAppSecret = config.getBgmAppSecret();
         String bgmRefreshToken = config.getBgmRefreshToken();
         String bgmRedirectUri = config.getBgmRedirectUri();
 
-        if (StrUtil.isBlank(bgmAppID)) {
-            return;
-        }
-        if (StrUtil.isBlank(bgmAppSecret)) {
-            return;
-        }
-        if (StrUtil.isBlank(bgmRefreshToken)) {
-            return;
-        }
-        if (StrUtil.isBlank(bgmRedirectUri)) {
+        // 四个字段缺一不可，而原来它们是四个裸 return —— 用户永远不知道"为什么没自动刷新"，
+        // 只能看到一个已经过期的 token 持续报 401。这里把缺哪一项直接说出来。
+        String missing = Stream.of(
+                        StrUtil.isBlank(bgmAppID) ? "App ID" : null,
+                        StrUtil.isBlank(bgmAppSecret) ? "App Secret" : null,
+                        StrUtil.isBlank(bgmRefreshToken) ? "Refresh Token" : null,
+                        StrUtil.isBlank(bgmRedirectUri) ? "回调地址" : null)
+                .filter(Objects::nonNull)
+                .collect(Collectors.joining("、"));
+        if (StrUtil.isNotBlank(missing)) {
+            log.warn("BGM token 需要刷新，但 {} 未配置，自动刷新已跳过（设置 → Bangumi → 自动获取）", missing);
             return;
         }
 
@@ -964,7 +1000,7 @@ public class BgmUtil {
                         "redirect_uri", bgmRedirectUri
                 )))
                 .then(res -> {
-                    HttpReq.assertStatus(res);
+                    assertStatus(res);
                     JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
                     JsonElement accessTokenElement = jsonObject == null ? null : jsonObject.get("access_token");
                     JsonElement refreshTokenElement = jsonObject == null ? null : jsonObject.get("refresh_token");

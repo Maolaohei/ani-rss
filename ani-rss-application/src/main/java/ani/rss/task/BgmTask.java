@@ -3,6 +3,7 @@ package ani.rss.task;
 import ani.rss.entity.Ani;
 import ani.rss.entity.BgmInfo;
 import ani.rss.entity.Config;
+import ani.rss.exception.ResultException;
 import ani.rss.service.AniService;
 import ani.rss.util.other.AniUtil;
 import ani.rss.util.other.BgmUtil;
@@ -37,6 +38,13 @@ public class BgmTask implements BaseTask {
     public void accept(AtomicBoolean loop) {
         try {
             BgmUtil.refreshToken();
+        } catch (ResultException e) {
+            // 授权失效是全局性失败：继续循环只会让每个订阅都再撞一次 401、
+            // 刷 N 条一模一样的堆栈，而这些请求注定全失败（token 都同一个）。
+            // 直接跳过本轮，下一轮仍会重试，授权恢复后自动继续。
+            log.warn("BGM 授权失效，本轮跳过评分刷新：{}",
+                    e.getResult() == null ? e.getMessage() : e.getResult().getMessage());
+            return;
         } catch (Exception e) {
             log.error(e.getMessage(), e);
         }
