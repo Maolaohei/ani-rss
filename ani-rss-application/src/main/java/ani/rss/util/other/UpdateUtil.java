@@ -28,7 +28,7 @@ public class UpdateUtil {
      * 只保护「拉取远端信息 + 写缓存」这段短逻辑的锁。
      * <p>
      * 原实现四个方法共用类锁，而 {@code update()} 会在锁内下载完整的更新包，
-     * 于是下载期间 {@code /about}、{@code /forkUpdate} 全部被堵住（每个被堵的请求占一个 Tomcat worker）。
+     * 于是下载期间 {@code /about}、{@code /stop} 全部被堵住（每个被堵的请求占一个 Tomcat worker）。
      * 这里把「读远端信息」与「下载更新包」拆成两把独立的同步手段。
      */
     private static final Object FETCH_LOCK = new Object();
@@ -64,15 +64,15 @@ public class UpdateUtil {
                 .setLatest("")
                 .setMarkdownBody("");
 
-        // Fork版本禁止检查更新
-        if (Boolean.TRUE.equals(config.getDisableUpdate())) {
-            log.info("已禁用更新检查（Fork版本）");
-            CacheUtils.put(key, about, 1000 * 60);
-            return about;
-        }
-
+        /*
+        更新通道指向 fork 自身（Maolaohei/ani-rss），不再看上游。
+        原先「禁用更新检查」闸门（config.disableUpdate，默认 true 且未在 UI 暴露）
+        存在的理由是「避免误升上游包」；既然现在查的就是本仓库的成品，那个理由不成立，
+        留着它只会把更新通道整体关死（老配置里已被持久化为 true，改默认值也救不回来），因此移除。
+        disableUpdate 字段暂保留以兼容老配置文件，但不再参与判断。
+        */
         try {
-            HttpRequest request = HttpReq.get("https://api.github.com/repos/wushuo894/ani-rss/releases/latest")
+            HttpRequest request = HttpReq.get("https://api.github.com/repos/Maolaohei/ani-rss/releases/latest")
                     .timeout(3000);
 
             String githubToken = config.getGithubToken();
@@ -132,8 +132,16 @@ public class UpdateUtil {
                     Long size = asset.getSize();
                     String formatSize = FileUtils.formatSize(size, true);
 
-                    String sha256 = asset.getDigest()
-                            .replace("sha256:", "");
+                    String digest = asset.getDigest();
+                    if (StrUtil.isBlank(digest)) {
+                        // digest 缺失时若继续，sha256 会是空串，下载后必然以
+                        // 「更新文件的 sha256 不匹配」收场（见 BaseUpdate#downloadUpdateFile）；
+                        // 这里显式记一条日志并跳过，失败原因才看得出来。
+                        log.warn("release asset {} 缺少 digest, 跳过（无法做 sha256 校验）", name);
+                        continue;
+                    }
+
+                    String sha256 = digest.replace("sha256:", "");
 
                     about.setDownloadUrl(asset.getBrowserDownloadUrl())
                             .setSha256(sha256)
@@ -149,93 +157,6 @@ public class UpdateUtil {
         // 缓存一分钟
         CacheUtils.put(key, about, 1000 * 60);
         return about;
-    }
-
-    /**
-     * 获取 Fork 最新版本信息（强制更新，不检查当前版本）
-     * <p>
-     * 与 {@link #about()} 一样带 1 分钟缓存：原实现完全没有缓存，
-     * 首页每次刷新都会打一次 GitHub（超时 10s），属纯浪费（P1-7）。
-     */
-    public static About forkAbout() {
-        synchronized (FETCH_LOCK) {
-            return forkAboutLocked();
-        }
-    }
-
-    private static About forkAboutLocked() {
-        String key = "github#fork-releases-latest";
-
-        About cacheAbout = CacheUtils.get(key);
-
-        if (Objects.nonNull(cacheAbout)) {
-            return cacheAbout;
-        }
-
-        String version = MavenUtils.getVersion();
-        About about = new About()
-                .setVersion(version)
-                .setUpdate(true)
-                .setAutoUpdate(false)
-                .setLatest("")
-                .setMarkdownBody("");
-
-        try {
-            HttpRequest request = HttpReq.get("https://api.github.com/repos/Maolaohei/ani-rss/releases/latest")
-                    .timeout(10000);
-
-            String githubToken = ConfigUtil.CONFIG.getGithubToken();
-            if (StrUtil.isNotBlank(githubToken)) {
-                request.header(Header.AUTHORIZATION, "Bearer " + githubToken);
-            }
-
-            request.then(response -> {
-                HttpReq.assertStatus(response);
-
-                Github.Release release = GsonStatic.fromJson(response.body(), Github.Release.class);
-
-                String latest = release.getTagName().replace("v", "");
-
-                about
-                        .setDate(release.getPublishedAt())
-                        .setUpdate(true)
-                        .setLatest(latest)
-                        .setMarkdownBody(release.getBody());
-
-                MavenUtils.CurrentFile currentFile = MavenUtils.getCurrentFile();
-                String filename = currentFile.isJar() ? "ani-rss.jar" : "ani-rss.exe";
-
-                List<Github.Assets> assets = release.getAssets();
-                for (Github.Assets asset : assets) {
-                    if (!filename.equals(asset.getName())) {
-                        continue;
-                    }
-                    about.setDownloadUrl(asset.getBrowserDownloadUrl())
-                            .setSha256(asset.getDigest().replace("sha256:", ""))
-                            .setSize(asset.getSize())
-                            .setFormatSize(FileUtils.formatSize(asset.getSize(), true));
-                }
-            });
-        } catch (Exception e) {
-            log.error("获取 Fork 版本信息失败: {}", e.getMessage());
-        }
-        // 缓存一分钟, 与 about() 口径一致
-        CacheUtils.put(key, about, 1000 * 60);
-        return about;
-    }
-
-    /**
-     * 执行 Fork 更新（强制覆盖，不检查版本差异）
-     */
-    public static void forkUpdate(About about) {
-        Assert.isTrue(StrUtil.isNotBlank(about.getDownloadUrl()), "未获取到下载地址");
-
-        MavenUtils.CurrentFile currentFile = MavenUtils.getCurrentFile();
-        Assert.isTrue(currentFile.isFile(), "不支持更新");
-
-        BaseUpdate baseUpdate = BaseUpdate.getInstance();
-
-        downloadAndApply(baseUpdate, about, "Fork 更新失败: {}");
     }
 
     /**

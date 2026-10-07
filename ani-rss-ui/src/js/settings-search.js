@@ -66,11 +66,9 @@ export const SETTING_SEARCH_INDEX = [
       '文件移动', 'openlist 上传', '上传', '推送', '发送', 'retry', '状态'
     ]
   },
-  {
-    name: 'afdian',
-    label: '捐赠',
-    keywords: ['捐赠', '爱发电', 'afdian', '订单号', '激活', '赞助']
-  },
+  // 「捐赠」页签已下线（ConfigView.vue 的 tabs 里同步注掉）。
+  // 不摘这一条的话，搜“捐赠/爱发电”会命中一个不存在的页签，点过去是空白面板。
+  // {name: 'afdian', label: '捐赠', keywords: ['捐赠', '爱发电', 'afdian', '订单号', '激活', '赞助']},
   {
     name: 'about',
     label: '关于',

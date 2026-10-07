@@ -57,18 +57,6 @@ export let about = () => api.post('api/about')
 export let update = () => api.post('api/update')
 
 /**
- * Fork 关于信息（fork 自维护的更新通道）
- * @returns {Promise<unknown>}
- */
-export let forkAbout = () => api.post('api/forkUpdate')
-
-/**
- * 执行 fork 更新
- * @returns {Promise<unknown>}
- */
-export let doForkUpdate = () => api.post('api/doForkUpdate')
-
-/**
  * 获取Mikan番剧列表
  * @param text 关键词
  * @param season 季度

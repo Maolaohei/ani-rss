@@ -29,6 +29,23 @@
         <el-button :icon="Telegram" bg text type="info" @click="openUrl('https://t.me/ani_rss')">TG群</el-button>
       </div>
     </div>
+    <div class="about-project">
+      <div class="about-project-title">项目信息</div>
+      <SettingsItem label="上游项目">
+        <el-text class="about-project-repo">wushuo894/ani-rss</el-text>
+        <el-button bg text type="primary" icon="Link"
+                   @click="openUrl('https://github.com/wushuo894/ani-rss')">
+          GitHub
+        </el-button>
+      </SettingsItem>
+      <SettingsItem label="现项目">
+        <el-text class="about-project-repo">Maolaohei/ani-rss</el-text>
+        <el-button bg text type="primary" icon="Link"
+                   @click="openUrl('https://github.com/Maolaohei/ani-rss')">
+          GitHub
+        </el-button>
+      </SettingsItem>
+    </div>
     <div v-loading.fullscreen.lock="actionLoading" class="flex about-actions">
       <PopconfirmView title="你确定要退出吗?" @confirm="logout">
         <template #reference>
@@ -56,14 +73,6 @@
           更新
         </el-button>
       </el-badge>
-      <div class="about-action-spacer"></div>
-      <PopconfirmView title="将从 Fork 仓库强制拉取最新版本并重启，确认更新？" @confirm="forkUpdateAction">
-        <template #reference>
-          <el-button bg icon="Upload" text type="primary">
-            Fork更新
-          </el-button>
-        </template>
-      </PopconfirmView>
     </div>
   </div>
   <el-dialog v-if="dialogVisible" v-model="dialogVisible" align-center center title="版本更新"
@@ -71,7 +80,7 @@
     <div v-if="about.update">
       <div>
         <SettingsItem label="版本号">
-          <el-link type="default" :href="`https://github.com/wushuo894/ani-rss/releases/tag/v${about.latest}`"
+          <el-link type="default" :href="`https://github.com/Maolaohei/ani-rss/releases/tag/v${about.latest}`"
                    target="_blank">
             {{ about.latest }}
           </el-link>
@@ -101,7 +110,7 @@
     </div>
     <div class="flex about-dialog-footer">
       <el-button bg text icon="Tickets"
-                 @click="openUrl('https://docs.wushuo.top/history')"
+                 @click="openUrl('https://github.com/Maolaohei/ani-rss/releases')"
                  type="primary">
         更新历史
       </el-button>
@@ -235,37 +244,6 @@ onMounted(() => {
       })
 })
 
-const forkUpdateAction = async () => {
-  let sleep = ms => {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
-  actionLoading.value = true
-  http.doForkUpdate()
-      .then(async res => {
-        ElMessage.success(res.message)
-        for (let i = 0; i < 24; i++) {
-          await sleep(5000)
-          try {
-            let pingRes = await http.ping()
-            if (pingRes.code === 200) {
-              authorization.value = ''
-              location.reload()
-              return
-            }
-          } catch (e) {
-          }
-        }
-        ElMessage.error("重启时遇到错误")
-      })
-      .catch(e => {
-        ElMessage.error(e?.message || '操作失败')
-      })
-      .finally(() => {
-        actionLoading.value = false
-      })
-}
-
 /**
  * 版本号此前是 cursor-pointer 但没有点击行为，用户会下意识去点
  */
@@ -311,6 +289,29 @@ let props = defineProps(['config'])
 
 .about-actions {
   margin-bottom: 8px;
+}
+
+.about-project {
+  width: min(100%, 520px);
+  margin: 4px 0 12px;
+  padding: 14px 16px 2px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 11px;
+  background: var(--el-bg-color-page);
+  text-align: left;
+}
+
+.about-project-title {
+  margin-bottom: 12px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  color: var(--el-text-color-secondary);
+}
+
+.about-project-repo {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
 }
 
 .about-action-spacer {

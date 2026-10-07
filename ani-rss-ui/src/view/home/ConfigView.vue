@@ -95,7 +95,11 @@ const tabs = [
   {name: 'proxy', label: '代理设置', description: '网络代理与连接配置'},
   {name: 'login', label: '登录设置', description: '账号与访问安全'},
   {name: 'notification', label: '通知', description: '消息渠道与事件通知'},
-  {name: 'afdian', label: '捐赠', description: '支持项目持续维护'},
+  // 「捐赠」页签已下线（见 UPDATE.md）。
+  // AfdianView / 后端 /verifyNo / outTradeNo·tryOut 全部保留 —— 评分显示仍依赖
+  // AfdianUtil.verifyExpirationTime()，不是死代码。恢复时把下面一行取消注释，
+  // 同时放开 js/settings-search.js 里的同名片签索引（否则搜“捐赠”会指向一个不存在的页签）。
+  // {name: 'afdian', label: '捐赠', description: '支持项目持续维护'},
   {name: 'about', label: '关于', description: '版本信息与项目链接'}
 ]
 const activeDescription = computed(() => tabs.find(tab => tab.name === activeName.value)?.description || '')
