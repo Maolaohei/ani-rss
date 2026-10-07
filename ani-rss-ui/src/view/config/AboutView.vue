@@ -16,6 +16,35 @@
           </el-text>
         </el-tooltip>
         <br>
+        <!--
+          来路说明（方案 C：并入页头，不单独占块）。
+          此前这一页完全答不出“我现在跑的是哪一个仓库”：三个按钮全指上游，而真正在拉更新的却是本仓库。
+          两个仓库都做成行内链接，正文用次级色，hover 才变主色 —— 不让它和上文版本号抢注意力。
+        -->
+        <div class="about-origin">
+          <span>本仓库是</span>
+          <el-link underline="hover" class="about-origin-link"
+                   href="https://github.com/wushuo894/ani-rss" target="_blank">
+            wushuo894/ani-rss
+            <svg class="about-origin-arrow" aria-hidden="true" viewBox="0 0 24 24"
+                 fill="none" stroke="currentColor" stroke-width="2.2"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <path d="M7 17 17 7"/>
+              <path d="M8 7h9v9"/>
+            </svg>
+          </el-link>
+          <span>的社区 fork · 更新来自</span>
+          <el-link underline="hover" class="about-origin-link"
+                   href="https://github.com/Maolaohei/ani-rss" target="_blank">
+            Maolaohei/ani-rss
+            <svg class="about-origin-arrow" aria-hidden="true" viewBox="0 0 24 24"
+                 fill="none" stroke="currentColor" stroke-width="2.2"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <path d="M7 17 17 7"/>
+              <path d="M8 7h9v9"/>
+            </svg>
+          </el-link>
+        </div>
         <el-text v-if="props.config.buildInfo" size="small" type="info" class="build-info">
           构建信息：{{ props.config.buildInfo }}
         </el-text>
@@ -23,28 +52,11 @@
     </div>
     <div class="flex about-buttons">
       <div id="button-list">
-        <el-button :icon="Github" bg text type="info" @click="openUrl('https://github.com/wushuo894/ani-rss')">GitHub
+        <el-button :icon="Github" bg text type="info" @click="openUrl('https://github.com/Maolaohei/ani-rss')">GitHub
         </el-button>
         <el-button :icon="Book" bg text type="info" @click="openUrl('https://docs.wushuo.top')">使用文档</el-button>
         <el-button :icon="Telegram" bg text type="info" @click="openUrl('https://t.me/ani_rss')">TG群</el-button>
       </div>
-    </div>
-    <div class="about-project">
-      <div class="about-project-title">项目信息</div>
-      <SettingsItem label="上游项目">
-        <el-text class="about-project-repo">wushuo894/ani-rss</el-text>
-        <el-button bg text type="primary" icon="Link"
-                   @click="openUrl('https://github.com/wushuo894/ani-rss')">
-          GitHub
-        </el-button>
-      </SettingsItem>
-      <SettingsItem label="现项目">
-        <el-text class="about-project-repo">Maolaohei/ani-rss</el-text>
-        <el-button bg text type="primary" icon="Link"
-                   @click="openUrl('https://github.com/Maolaohei/ani-rss')">
-          GitHub
-        </el-button>
-      </SettingsItem>
     </div>
     <div v-loading.fullscreen.lock="actionLoading" class="flex about-actions">
       <PopconfirmView title="你确定要退出吗?" @confirm="logout">
@@ -291,27 +303,27 @@ let props = defineProps(['config'])
   margin-bottom: 8px;
 }
 
-.about-project {
-  width: min(100%, 520px);
-  margin: 4px 0 12px;
-  padding: 14px 16px 2px;
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 11px;
-  background: var(--el-bg-color-page);
-  text-align: left;
-}
-
-.about-project-title {
-  margin-bottom: 12px;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: .05em;
+.about-origin {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 6px;
+  margin-top: 4px;
+  font-size: 12.5px;
+  line-height: 1.6;
   color: var(--el-text-color-secondary);
 }
 
-.about-project-repo {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+.about-origin-link {
   font-size: 12.5px;
+  font-weight: 500;
+}
+
+.about-origin-arrow {
+  width: 11px;
+  height: 11px;
+  margin-left: 3px;
+  vertical-align: -1px;
 }
 
 .about-action-spacer {
