@@ -24,7 +24,7 @@
 
 ## 本 Fork 说明
 
-基于上游 [wushuo894/ani-rss](https://github.com/wushuo894/ani-rss) 维护，版本号会阶段性同步（当前基线 **3.1.73**）。  
+基于上游 [wushuo894/ani-rss](https://github.com/wushuo894/ani-rss) 维护，版本号会阶段性同步（当前基线 **3.2.43**）。  
 不是简单跟版：在 **OpenList/AList 离线下载可靠性** 和 **可观测/可干预的任务调度** 上做了较多落地增强。
 
 | 能力 | 上游 | 本 Fork |

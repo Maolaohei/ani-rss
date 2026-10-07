@@ -1,6 +1,6 @@
 # 更新日志（本 Fork）
 
-基线版本号：对齐上游 **3.2.30**（仅版本号；代码为本 fork 增量，已选择性移植上游有价值提交，未完整合入全部行为变更）。
+基线版本号：对齐上游 **3.2.43**（仅版本号；代码为本 fork 增量，已选择性移植上游有价值提交，未完整合入全部行为变更）。
 
 下列为相对该基线后的主要增量；更细提交见 git log。
 
@@ -19,6 +19,107 @@
 | 本地状态与缓存 | 「本地存在」三态判定（是 / 存疑 / 否，存疑不降级成"没有"）+ 订阅级快照缓存（分级 TTL / 单飞 / 版本化失效 / **成功即增量追加，不整份重列**）+ 订阅级读写锁（读不阻塞在下载上） |
 | 网盘限流规避 | 令牌桶 + 请求合并 + 熔断指数冷却 + 分级 TTL + 每轮 API 预算（只计目录列举次数，大库不再被硬顶 200 卡成「存疑」）+ 列举缓存按目录树定向失效，预算耗尽显示「未确认」而非 0 集 |
 | 稳定性与性能 | 任务代际化（停止超时后旧线程不再复活重复跑轮次）+ 可中断周期等待（停止响应 ≤500ms）+ JVM 参数修正（恢复 C2 JIT、堆转储、栈与 Metaspace）+ 网盘 API 去实例锁（一次慢列举不再阻塞整条链路）+ 外部接口成本治理（BGM 限流移到出网点、TMDB/Mikan 进程内缓存、字幕合集包不再重复整包下载）+ 落盘写放大治理（内容未变跳过 / 状态回写 500ms 合并 / 预览按实质变化落盘）+ 长阻塞出锁（更新下载、合集后处理、订阅项解析）+ 列表接口不再改写共享订阅对象 + 单订阅超时隔离（卡死只记失败不拖整轮）+ 下载器/网盘查询失败语义收紧（失败抛而非空，避免误判重推）+ 下载历史与失败队列落盘节流 |
+
+---
+
+## 3.4.32 增量（2026-10）
+
+三类改动：选择性跟进上游 3.2.31 → 3.2.43、设置页去捐赠页签、以及把「更新」改成拉 fork 自己的成品。
+
+上游这 13 个版本逐条评估后的结论：**只有两个 bug 修复值得跟**，其余要么 fork 已有等价实现，要么与 fork 方向相反（见下方「不跟」表）。
+
+### 跟：`7c029b71f` 修复 x.5 集刮削错误
+
+`ScrapeService.scrapeTv` 解析文件名集数用的是 `Integer.parseInt`，而 fork 的 `StringEnum.SEASON_REG` 早已是 `(\d+(\.5)?)` —— `S01E01.5.mkv` 取出 `"1.5"` 直接抛 `NumberFormatException`。异常冒出选集循环后被 `scrape()` 的外层 catch 拦下，表现为**整季的 nfo/thumb 一个都不生成**（不是只丢半集那一条）。
+
+修法与上游一致，但把解析口径收敛到 `RenameUtil.getSeasonEpisode(mainName)` 单点：
+
+- 集数统一是 `double`（x.5 保留小数），与 `addMainNameToEpisodeIndex` 同一口径（后者现在也 delegate 到它，少一份重复解析）；
+- 解析不出统一返回 `null`，不让解析异常漏进业务循环；
+- x.5 半集在 TMDB 里没有对应剧集，按 `ItemsUtil.is5` 跳过——与 `EmbyController` 既有口径一致。
+
+`EmbyController` / `LibraryController` / `BaseNotification` 早就在用 `Double.parseDouble`，只有刮削这一条链路是 `Integer.parseInt` ——这是它独有的 bug。
+
+### 跟：`e8b61f2bd` 修复自动偏移遇到 x.5 的偏移错误
+
+`AniUtil.getAni` 自动推断剧集偏移：`offset = -(min - 1)`，当首集是 `1.5` 时得到 `-0.5`，`intValue()` 截成 `0`（应为 `-1`），后续所有集数匹配整体偏一位。
+
+改为 `ItemsUtil.is5(min) ? -min.intValue() : -(min.intValue() - 1)`，并让订阅与备用 RSS 共用同一个 `int offset`，不再各自 `intValue()` 两次。
+
+### 跟（低风险顺带）
+
+| 上游提交 | 内容 | 本 fork 落地 |
+| --- | --- | --- |
+| `a210ebc1e` | 错误日志带 `method/path/remote` 上下文、字段 sanitize、4xx 降 warn | 移植精华到 `config/CustomExceptionHandler`；保留 fork 原有的客户端断连处理 |
+| `3e33b7fd6` | multipart 上限 50MB → 200MB | 备份 zip / WebUI 上传不再被顶到 |
+| `4e56836c4` | 默认下载位置 Mac/Win → `~/Downloads` | 只影响新装默认值，已有配置不受影响 |
+| `656ef14e` | 默认点击封面操作 → 编辑订阅 | 一行默认值 |
+| `1159b4274` | 地址/口令框补 `autocomplete="new-password"` | 防 Chrome 自动填充 |
+
+### 不跟（记录理由，避免下次重评）
+
+| 上游提交 | 不跟的原因 |
+| --- | --- |
+| `f1602748f`、`297fdeaa1` | 上游在下线 OpenList，fork 反向投入（OpenList 是 fork 主线） |
+| `b4fc29a9`（移除合集磁力）+ 上游删 `OpenListApi` 等 ~5600 行 | 方向相反；只读提交信息了解上游为何砍（jlibtorrent 原生库/维护成本） |
+| `36993023`、`07ef9155d` | JDK 25 / docker jdk27；fork 钉在 java 17（`--release 17`） |
+| UI 大改（`81d60380` 全新页面、`62a27b70e`、`90e67a02` 等） | fork UI 已自研 |
+| `249f7fe0d`、`53dfa2379` | 纯拆分重构（DefaultAniFactory / BackupController），无行为变更 |
+| `db375d770` | 种子目录改 `torrents/{首字符}/{aniId}`，与 fork 现有 title 路径布局冲突，需专门决策+旧路径兼容，本次不动 |
+| `a417ec745` | 依赖矩阵升级（tmdb-api 1.0.10 / Spring Boot 4.1.1 / spring-ai 2.0.1 …），需逐个验兼容，单独排期 |
+
+### 设置页移除「捐赠」页签
+
+页签从 8 个变 7 个，「关于」补位到最后一个。
+
+**只摘入口，不动后端。** `AfdianView` / `/verifyNo` / `outTradeNo`·`tryOut` 全部保留：评分显示仍然走 `AfdianUtil.verifyExpirationTime()`（`CacheService` 在用它），这些不是死代码；一旦后端也拆掉，评分功能会静默退化成“永远不显示”。
+
+同时摘掉 `js/settings-search.js` 里的「捐赠」索引 —— 只删页签不删索引的话，搜“捐赠/爱发电”会命中一个不存在的页签，点过去是空白面板。
+
+恢复方式：放开 `ConfigView.vue` 的 `tabs` 与 `settings-search.js` 里各一行注释即可（两处都已写好互引说明）。
+
+### 「关于」页新增项目信息
+
+那个页面此前无法回答“我现在跑的是哪一个仓库”：页上三个按钮（GitHub / 使用文档 / TG群）全指向上游 `wushuo894`，而真正在拉更新的却是本仓库。补上两行：
+
+| 行 | 值 |
+| --- | --- |
+| 上游项目 | `wushuo894/ani-rss` + GitHub 链接 |
+| 现项目 | `Maolaohei/ani-rss` + GitHub 链接 |
+
+不列「作者」：一个作者名摆在两个仓库下面到底指谁并不清楚（上游作者是另一个人），写哪边都要额外解释，不如不写——两个仓库链接本身已经能回答"这是谁的"。
+
+沿用设置页已有的 `SettingsItem` 行（标签 110px + 值），与「下载/基本设置」页同一套语言；位置在链接按钮与危险操作（退出/重启/关闭）之间。
+设计稿（浅/深色两版）放在本地 `ani-rss-ui/design/about-preview.html`，该目录被 `.gitignore` 排除、不进仓库，所以这里只留结论。
+
+### 更新通道改指 fork 仓库，并移除「Fork更新」按钮
+
+改前是两个入口、两条路：
+
+| | 查哪个仓库 | 应用方式 | 是否受 `disableUpdate` 拦截 |
+| --- | --- | --- | --- |
+| 更新 | 上游 `wushuo894/ani-rss` | 版本比较后更新 | **是**，而它默认 `true` 且未在 UI 暴露 |
+| Fork更新 | `Maolaohei/ani-rss` | 不做比较，强拉覆盖 | 否 |
+
+所以实情是：默认配置下「更新」是个空按钮（`about.latest` 恒为空 → 弹窗恒显“无更新”），每天 06:00 的定时自动更新也一起被同步关死（`CronConfig.autoUpdate` 走的就是 `about()`）。唯一真能升级的是「Fork更新」。
+
+现在合并为一个入口：
+
+- `UpdateUtil.about()` 改查 `Maolaohei/ani-rss/releases/latest`（assets 名 `ani-rss.jar` / `ani-rss.exe` 与上游一致，无需额外映射）；
+- **移除 `disableUpdate` 闸门**。它的注释写的是“Fork版本禁止检查更新”，本意是避免误升上游包；现在已经不查上游了，继续保留只会把通道整体关死——且老配置里该值已被持久化为 `true`，改默认值也救不回来。字段暂留以兼容老配置文件，但不再参与判断；
+- 删除 `forkAbout()` / `forkUpdate()` 与 `/forkUpdate`、`/doForkUpdate` 两个端点，以及前端对应的 `http.forkAbout` / `http.doForkUpdate`；
+- 弹窗里的「版本号」链接指向 `Maolaohei/ani-rss/releases/tag/v…`，「更新历史」指向该仓库的 releases（原指向上游文档站）；
+- 顺手给 asset `digest` 加了空值判：缺失时显式 warn 并跳过。否则 `sha256` 会是空串，下载后必然以“更新文件的 sha256 不匹配”收场（见 `BaseUpdate#downloadUpdateFile`），失败原因根本看不出来。
+
+### 验证
+
+- **`7c029b71f`**：端到端不可行（刮削依赖 TMDB + 本地下载目录，e2e 的下载走 OpenList，`scrapeTv` 会在 `FileUtil.exist(downloadPath)` 处提前 return），因此用孤立测试，失败模式已在 `RenameUtil.getSeasonEpisode` javadoc 里列全：主名为空 / 不含 `SxxEyy` / 季集组为空 / 非数字 → 返回 `null`；成功时 x.5 必须保留小数。用例扩在 `RenameUtilTest`（新增 2 个方法），`EpisodeIndexKeyTest` 作为 delegate 后的回归网。
+- **`e8b61f2bd`**：新增端到端场景 `E2E-0 订阅嗅探：首集为 x.5 半集时，自动偏移必须是 -1`（`DownloadJourneyE2ETest`，`@Order(0)`）：真实 HTTP 调 `/rssToAni` + 假 RSS 源（`[LoliHouse] Show - 01.5 [1080p].mkv`），断言返回订阅的 `offset == -1`。
+  - 反向验证：临时回退 `AniUtil` 到修复前，`E2E-0` 如期 FAIL（`offset=0`）；恢复后 PASS。测试有效性已証。
+  - 两个前置配置：`offset=true`（否则不进自动偏移分支）；**`skip5=false`**（默认 `skip5=true` 会在解析阶段就把 x.5 条目整个丢掉，那样 E2E-0 根本走不到偏移计算，等于没测）。
+  - 工件：`target/e2e-artifact/`（`report.json` / `report.md` / `inputs/feed-half.xml`）。
+- 全量：`mvn -o -pl ani-rss-application test -Dexec.skip=true` → **982 单测 + 5 e2e 全绿**；前端 `pnpm build` 通过。
+- **更新通道**：临时联网用例（跑完即删，依赖外网不进 CI）核实 `UpdateUtil.about()`：在 `disableUpdate` 仍为默认 `true` 的情况下拿到 `latest=3.4.31`、`downloadUrl=https://github.com/Maolaohei/ani-rss/releases/download/v3.4.31/ani-rss.exe`、`sha256` 与 Release 资产 digest 完全一致、`markdownBody` 就是该版本小节。e2e 无法覆盖这条链路：GitHub API 走 https，而假公网只实现了 absolute-form 的 http 代理，https 需要 CONNECT 隐道。
 
 ---
 
