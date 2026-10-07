@@ -14,10 +14,12 @@
         </el-select>
       </SettingsItem>
       <SettingsItem label="地址">
-        <el-input v-model.trim="props.config.downloadToolHost" placeholder="http://192.168.1.x:8080"/>
+        <el-input v-model.trim="props.config.downloadToolHost" placeholder="http://192.168.1.x:8080"
+                  autocomplete="new-password"/>
       </SettingsItem>
       <SettingsItem v-if="props.config.downloadToolType === 'qBittorrent'" label="ApiKey">
-        <el-input v-model.trim="props.config.downloadToolPassword" placeholder="qbt_xxxx" show-password>
+        <el-input v-model.trim="props.config.downloadToolPassword" placeholder="qbt_xxxx" show-password
+                  autocomplete="new-password">
           <template #prefix>
             <el-icon class="el-input__icon">
               <Key/>
@@ -33,7 +35,8 @@
         </div>
       </SettingsItem>
       <SettingsItem v-else-if="props.config.downloadToolType === 'Aria2'" label="RPC 密钥">
-        <el-input v-model.trim="props.config.downloadToolPassword" placeholder="" show-password>
+        <el-input v-model.trim="props.config.downloadToolPassword" placeholder="" show-password
+                  autocomplete="new-password">
           <template #prefix>
             <el-icon class="el-input__icon">
               <Key/>
@@ -43,7 +46,8 @@
       </SettingsItem>
       <template v-else-if="props.config.downloadToolType === 'OpenList'">
         <SettingsItem label="Token">
-          <el-input v-model.trim="props.config.downloadToolPassword" placeholder="OpenList-xxxxxx" show-password>
+          <el-input v-model.trim="props.config.downloadToolPassword" placeholder="OpenList-xxxxxx" show-password
+                    autocomplete="new-password">
             <template #prefix>
               <el-icon class="el-input__icon">
                 <Key/>

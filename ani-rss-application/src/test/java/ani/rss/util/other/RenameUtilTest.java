@@ -1465,4 +1465,34 @@ class RenameUtilTest {
         assertTrue(later >= 8_000L && later <= 8_250L);
         assertEquals(second, ItemsUtil.rssRetryDelayMs(2, url));
     }
+
+    // ========== getSeasonEpisode（季集解析口径） ==========
+
+    /**
+     * 季集解析的失败模式全集（均为返回 null，由调用方跳过，不得把解析异常漏进业务循环）：
+     * 无 {@code SxxEyy} / 季集组缺失 / 主名为空。
+     * <p>
+     * 成功路径必须保留 double：{@code S01E01.5} 这类半集的集数是 1.5，一旦被截成 1
+     * （或像刮削链路那样直接 {@code Integer.parseInt("1.5")} 抛异常），整季的
+     * nfo/thumb 会一个都生成不出来。
+     */
+    @Test
+    void seasonEpisode_parses_season_and_episode_as_double() {
+        RenameUtil.SeasonEpisode normal = RenameUtil.getSeasonEpisode("[LoliHouse] Show S02E13 [1080p]");
+        assertNotNull(normal);
+        assertEquals(2, normal.season());
+        assertEquals(13.0, normal.episode());
+
+        RenameUtil.SeasonEpisode half = RenameUtil.getSeasonEpisode("Show S01E01.5 [1080p]");
+        assertNotNull(half);
+        assertEquals(1, half.season());
+        assertEquals(1.5, half.episode());
+    }
+
+    @Test
+    void seasonEpisode_unparseable_returns_null() {
+        assertNull(RenameUtil.getSeasonEpisode("[LoliHouse] Show - 01 [1080p].mkv"));
+        assertNull(RenameUtil.getSeasonEpisode(""));
+        assertNull(RenameUtil.getSeasonEpisode(null));
+    }
 }

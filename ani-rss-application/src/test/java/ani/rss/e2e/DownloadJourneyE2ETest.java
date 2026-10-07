@@ -75,8 +75,14 @@ class DownloadJourneyE2ETest {
     static final String ANI_TITLE = "Show";
     static final String SUBGROUP = "LoliHouse";
     static final String SEED_FILE = "[LoliHouse] Show - 01 [1080p].mkv";
+    /**
+     * 半集种子名：首集是 x.5。用于验证「添加订阅」时的自动偏移取整口径 ——
+     * 1.5 应偏移 -1（首集归零），而 -(1.5-1) 取整会得到 0。
+     */
+    static final String SEED_HALF_FILE = "[LoliHouse] Show - 01.5 [1080p].mkv";
     static final long SEED_SIZE = 1000L;
     static final String FEED_PATH = "/feed/show.xml";
+    static final String FEED_HALF_PATH = "/feed/show-half.xml";
     static final String TORRENT_PATH = "/torrents/show-01.torrent";
     static final String REMOTE_ROOT = "/115/动漫/追番";
     static final String SAVE_PATH = REMOTE_ROOT + "/" + ANI_TITLE + "/Season 1";
@@ -140,6 +146,8 @@ class DownloadJourneyE2ETest {
         infoHash = TestTorrent.infoHash(torrentFile);
         String feed = feedXml();
         ORIGIN.serveText(FEED_PATH, "application/rss+xml", feed);
+        String feedHalf = feedHalfXml();
+        ORIGIN.serveText(FEED_HALF_PATH, "application/rss+xml", feedHalf);
         ORIGIN.serve(TORRENT_PATH, "application/x-bittorrent", Files.readAllBytes(torrentFile.toPath()));
         // BGM 假端点：/addAni 会强制查一次 BGM（AniUtil 先断言 bgmUrl 非空，再 getBgmInfo），
         // 而 getBgmInfo 内部是"官方 API + cache.wushuo.top 镜像"两路并行。
@@ -156,11 +164,13 @@ class DownloadJourneyE2ETest {
         ARTIFACT.input("aniTitle", ANI_TITLE);
         ARTIFACT.input("subgroup", SUBGROUP);
         ARTIFACT.input("feedUrl", ORIGIN.url(FEED_PATH));
+        ARTIFACT.input("feedHalfUrl", ORIGIN.url(FEED_HALF_PATH));
         ARTIFACT.input("torrentUrl", ORIGIN.url(TORRENT_PATH));
         ARTIFACT.input("infoHash", infoHash);
         ARTIFACT.input("remoteRoot", REMOTE_ROOT);
         ARTIFACT.input("expectedFilePrefix", EXPECTED_FILE_PREFIX);
         ARTIFACT.inputFile("feed.xml", feed);
+        ARTIFACT.inputFile("feed-half.xml", feedHalf);
         ARTIFACT.inputFile("show-01.torrent", Files.readAllBytes(torrentFile.toPath()));
         ARTIFACT.inputFile("config.v2.json", Files.readAllBytes(ConfigUtil.getConfigFile().toPath()));
     }
@@ -203,6 +213,11 @@ class DownloadJourneyE2ETest {
                 // 时间相关的闸门全部归零：否则"新种子等 2 小时""延迟下载"会把首轮直接跳过，
                 // 测试就变成在等定时器而不是在测链路
                 .setDelayedDownload(0)
+                // 自动偏移：E2E-0 依赖它（见 rss_to_ani_half_episode_offset）
+                .setOffset(true)
+                // 默认 skip5=true 会在解析阶段就把 x.5 半集条目整个丢掉，
+                // 那样 E2E-0 根本走不到偏移计算，等于没测。
+                .setSkip5(false)
                 .setNewTorrentWaitHours(0)
                 .setDownloadCount(0)
                 .setAlistDownloadTimeout(1)
@@ -262,7 +277,71 @@ class DownloadJourneyE2ETest {
                 ORIGIN.url(TORRENT_PATH), SEED_SIZE);
     }
 
+    /**
+     * 假 RSS 源：单条 E01.5（半集）。
+     * <p>
+     * 专用于验证「将 RSS 转换为订阅」时的自动偏移取整口径：首集 1.5 应偏移 -1，
+     * 若按 {@code -(1.5-1)} 取整会得到 0，后续所有集数匹配整体偏一位。
+     * <p>
+     * {@code guid} 故意不用真实 infoHash：本场景只看 /rssToAni 返回的订阅字段，
+     * 不会提交下载，因此不需要真正的种子文件。
+     */
+    private static String feedHalfXml() {
+        return """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <rss version="2.0">
+                  <channel>
+                    <title>ani-rss e2e half</title>
+                    <link>%s</link>
+                    <description>ani-rss 端到端测试源（半集）</description>
+                    <item>
+                      <title>%s</title>
+                      <guid>e2e-half-0001</guid>
+                      <enclosure url="%s" length="1000" type="application/x-bittorrent" />
+                      <pubDate>Mon, 01 Jan 2024 12:00:00 +0800</pubDate>
+                    </item>
+                  </channel>
+                </rss>
+                """.formatted(ORIGIN.url(FEED_HALF_PATH), SEED_HALF_FILE,
+                ORIGIN.url("/torrents/show-01.5.torrent"));
+    }
+
     // ==================== 被测行为 ====================
+
+    @Test
+    @Order(0)
+    @DisplayName("E2E-0 订阅嗅探：首集为 x.5 半集时，自动偏移必须是 -1")
+    void rss_to_ani_half_episode_offset() throws Exception {
+        long start = System.currentTimeMillis();
+        String token = login();
+
+        JsonObject body = new JsonObject();
+        body.addProperty("url", ORIGIN.url(FEED_HALF_PATH));
+        body.addProperty("type", "other");
+        body.addProperty("bgmUrl", "https://bgm.tv/subject/" + BGM_SUBJECT_ID);
+        body.addProperty("subgroup", SUBGROUP);
+
+        JsonObject ani = postResult("/rssToAni", token, body.toString()).getAsJsonObject("data");
+        assertNotNull(ani, "/rssToAni 应返回订阅对象");
+        int offset = ani.get("offset").getAsInt();
+
+        Map<String, Object> evidence = new LinkedHashMap<>();
+        evidence.put("feed", ORIGIN.url(FEED_HALF_PATH));
+        evidence.put("firstEpisode", 1.5);
+        evidence.put("offset", offset);
+        evidence.put("ani", ani.toString());
+        evidence.put("originRequests", ORIGIN.requests());
+
+        boolean ok = offset == -1;
+        ARTIFACT.scenario("E2E-0 首集 x.5 → 自动偏移 -1", ok ? "PASS" : "FAIL",
+                System.currentTimeMillis() - start,
+                ok ? "首集 1.5 → offset=-1（首集归零）"
+                        : "offset=" + offset + "（期望 -1；0 表示把 1.5 当成了 1）",
+                evidence);
+
+        assertEquals(-1, offset,
+                "首集 1.5 的自动偏移必须是 -1；ani=" + ani);
+    }
 
     @Test
     @Order(1)

@@ -524,15 +524,19 @@ public class AniUtil {
             if (items.isEmpty()) {
                 return ani;
             }
-            Double offset = -(items.stream()
+            Double minEpisode = items.stream()
                     .map(Item::getEpisode)
                     .min(Comparator.comparingDouble(i -> i))
-                    .get() - 1);
+                    .get();
+
+            // x.5 半集必须单独处理：首集为 1.5 时应偏移 -1（首集归零），
+            // 而 -(1.5 - 1) 取整后是 0，会让后续所有集数匹配整体偏一位
+            int offset = ItemsUtil.is5(minEpisode) ? -minEpisode.intValue() : -(minEpisode.intValue() - 1);
             log.debug("自动获取到剧集偏移为 {}", offset);
-            ani.setOffset(offset.intValue());
+            ani.setOffset(offset);
 
             for (StandbyRss rss : standbyRssList) {
-                rss.setOffset(offset.intValue());
+                rss.setOffset(offset);
             }
         }
         return ani;

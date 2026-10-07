@@ -3,15 +3,15 @@ package ani.rss.service;
 import ani.rss.commons.FileUtils;
 import ani.rss.entity.Ani;
 import ani.rss.entity.Config;
-import ani.rss.enums.StringEnum;
 import ani.rss.util.basic.HttpReq;
 import ani.rss.util.other.BgmUtil;
 import ani.rss.util.other.ConfigUtil;
+import ani.rss.util.other.ItemsUtil;
+import ani.rss.util.other.RenameUtil;
 import ani.rss.util.other.TmdbUtils;
 import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.util.ArrayUtil;
-import cn.hutool.core.util.ReUtil;
 import cn.hutool.core.util.StrUtil;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
@@ -250,19 +250,26 @@ public class ScrapeService {
             }
 
             String mainName = FileUtil.mainName(file);
-            if (!ReUtil.contains(StringEnum.SEASON_REG, mainName)) {
+
+            // 季集解析收敛到 RenameUtil 单点：集数是 double，x.5 半集必须保留小数
+            // （此处原先用 Integer.parseInt 解析 "1.5" 会抛异常，把整季刮削带崩）
+            RenameUtil.SeasonEpisode seasonEpisode = RenameUtil.getSeasonEpisode(mainName);
+            if (seasonEpisode == null) {
                 // 命名不标准
                 continue;
             }
 
-            int seasonNumber = Integer.parseInt(ReUtil.get(StringEnum.SEASON_REG, mainName, 1));
-            if (season != seasonNumber) {
+            if (season != seasonEpisode.season()) {
                 // 季对应不上 跳过
                 continue;
             }
 
-            Integer episodeNumber =
-                    Integer.parseInt(ReUtil.get(StringEnum.SEASON_REG, mainName, 2));
+            if (ItemsUtil.is5(seasonEpisode.episode())) {
+                // x.5 半集在 TMDB 里没有对应剧集，跳过（与 EmbyController 同口径）
+                continue;
+            }
+
+            int episodeNumber = (int) seasonEpisode.episode();
             if (!episodeMap.containsKey(episodeNumber)) {
                 // 找不到对应集
                 continue;

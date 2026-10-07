@@ -200,21 +200,53 @@ public class RenameUtil {
             index.add("M:" + mainName);
             return;
         }
-        if (!ReUtil.contains(StringEnum.SEASON_REG, mainName)) {
+        SeasonEpisode seasonEpisode = getSeasonEpisode(mainName);
+        if (seasonEpisode == null) {
             return;
         }
-        String seasonStr = ReUtil.get(StringEnum.SEASON_REG, mainName, 1);
-        String episodeStr = ReUtil.get(StringEnum.SEASON_REG, mainName, 2);
+        // 统一规范化，匹配时 O(1) 查找
+        index.add(seasonEpisode.season() + ":" + seasonEpisode.episode());
+    }
+
+    /**
+     * 从主名解析「季 / 集」，是全库解析 {@code SxxEyy} 的单点实现。
+     * <p>
+     * 与 {@link #addMainNameToEpisodeIndex(Set, String, boolean)} 同一口径，有两条硬约束：
+     * <ul>
+     *   <li>集数是 {@code double}：{@code S01E01.5} 这类半集必须保留小数。此前刮削链路直接用
+     *       {@code Integer.parseInt}，对 {@code "1.5"} 抛 {@code NumberFormatException}，
+     *       异常冒出导入循环后被外层 catch 拦下 —— 表现为「整季 nfo/thumb 一个都不生成」；</li>
+     *   <li>解析失败一律返回 {@code null}，由调用方决定跳过还是报错，不把解析异常漏进业务循环。</li>
+     * </ul>
+     * 失败模式全集：主名为空 / 不含 {@code SxxEyy} / 季组或集组为空 / 季或集不是数字。
+     *
+     * @param mainName 主名（不含扩展名）
+     * @return 季与集；解析不出时为 {@code null}
+     */
+    public static SeasonEpisode getSeasonEpisode(String mainName) {
+        if (StrUtil.isBlank(mainName)) {
+            return null;
+        }
+        String name = mainName.trim();
+        if (!ReUtil.contains(StringEnum.SEASON_REG, name)) {
+            return null;
+        }
+        String seasonStr = ReUtil.get(StringEnum.SEASON_REG, name, 1);
+        String episodeStr = ReUtil.get(StringEnum.SEASON_REG, name, 2);
         if (StrUtil.isBlank(seasonStr) || StrUtil.isBlank(episodeStr)) {
-            return;
+            return null;
         }
         try {
-            int s = Integer.parseInt(seasonStr);
-            double e = Double.parseDouble(episodeStr);
-            // 统一规范化，匹配时 O(1) 查找
-            index.add(s + ":" + e);
-        } catch (Exception ignored) {
+            return new SeasonEpisode(Integer.parseInt(seasonStr), Double.parseDouble(episodeStr));
+        } catch (NumberFormatException ignored) {
+            return null;
         }
+    }
+
+    /**
+     * 「季 / 集」解析结果，集数为 {@code double}（半集形如 {@code 1.5}）。
+     */
+    public record SeasonEpisode(int season, double episode) {
     }
 
     /**
