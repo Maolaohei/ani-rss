@@ -307,6 +307,9 @@ public class AniController extends BaseController {
             for (Ani ani : anis) {
                 File torrentDir = TorrentUtil.getTorrentDir(ani);
                 FileUtil.del(torrentDir);
+                // 洗版状态随订阅一起回收：订阅 id 是随机串，留着只会长期占用条目上限。
+                // 放在异步清理段（与 torrents 目录删除同处）：锁内只做内存操作，不做写盘 IO。
+                WashState.forget(ani);
                 clearService.clearParentFile(torrentDir);
                 log.info("删除订阅 {} {} {}", ani.getTitle(), ani.getUrl(), ani.getId());
                 EventWebhookUtil.emit(EventTypeEnum.SUBSCRIPTION_DELETED, ani, Map.of("deleteFiles", deleteFiles));

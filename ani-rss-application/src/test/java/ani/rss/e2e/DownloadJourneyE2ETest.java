@@ -1,12 +1,16 @@
 package ani.rss.e2e;
 
 import ani.rss.AniRssApplication;
+import ani.rss.commons.CacheUtils;
 import ani.rss.commons.GsonStatic;
+import ani.rss.entity.Ani;
 import ani.rss.entity.Config;
+import ani.rss.entity.Item;
 import ani.rss.entity.Login;
 import ani.rss.testsupport.FakeOpenListServer;
 import ani.rss.testsupport.TestTorrent;
 import ani.rss.util.other.ConfigUtil;
+import ani.rss.util.other.WashState;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.crypto.SecureUtil;
 import cn.hutool.http.HttpRequest;
@@ -102,6 +106,23 @@ class DownloadJourneyE2ETest {
     /** BgmUtil 里硬编码的第三方镜像主机，必须一并代理，否则 e2e 仍会真的出网 */
     static final String MIRROR_HOST = "cache.wushuo.top";
 
+    // ==================== 洗版场景输入（v1 先落地，再出 v2） ====================
+
+    /**
+     * 洗版订阅：先下载 v1，再把 RSS 换成同集 v2，验证
+     * 「v1→v2 洗一次版，之后同一 v2 不再洗」——这正是线上无限洗版的最小复现。
+     * v2 与 v1 同集同标题，只有种子（infoHash）与标题里的 {@code v2} 不同。
+     */
+    static final String WASH_ANI_ID = "e2e-ani-0002";
+    static final String WASH_TITLE = "WashShow";
+    static final String WASH_SEED_FILE = "[LoliHouse] WashShow - 01 [1080p].mkv";
+    static final String WASH_SEED_FILE_V2 = "[LoliHouse] WashShow - 01 v2 [1080p].mkv";
+    static final String WASH_FEED_PATH = "/feed/wash.xml";
+    static final String WASH_TORRENT_V1_PATH = "/torrents/wash-01.torrent";
+    static final String WASH_TORRENT_V2_PATH = "/torrents/wash-01-v2.torrent";
+    static final String WASH_SAVE_PATH = REMOTE_ROOT + "/" + WASH_TITLE + "/Season 1";
+    static final String WASH_EXPECTED_FILE = WASH_TITLE + " S01E01.mkv";
+
     // ==================== 外部世界与隔离环境 ====================
 
     static final FakeOriginServer ORIGIN = new FakeOriginServer();
@@ -111,6 +132,10 @@ class DownloadJourneyE2ETest {
     static Path configDir;
     static File torrentFile;
     static String infoHash;
+    static File washTorrentFileV1;
+    static File washTorrentFileV2;
+    static String washInfoHashV1;
+    static String washInfoHashV2;
     static Path torrentSourceDir;
 
     static {
@@ -149,6 +174,21 @@ class DownloadJourneyE2ETest {
         String feedHalf = feedHalfXml();
         ORIGIN.serveText(FEED_HALF_PATH, "application/rss+xml", feedHalf);
         ORIGIN.serve(TORRENT_PATH, "application/x-bittorrent", Files.readAllBytes(torrentFile.toPath()));
+
+        // 洗版场景：v1 / v2 两份种子同集同长度、仅文件名（含 v2）与 infoHash 不同。
+        // 同长度是刻意的：归位计划按字节数匹配，v1/v2 除了版本标记外没有别的差异。
+        washTorrentFileV1 = TestTorrent.write(torrentSourceDir.resolve("wash-01.torrent").toFile(),
+                WASH_SEED_FILE, List.of(TestTorrent.file(WASH_SEED_FILE, SEED_SIZE)));
+        washInfoHashV1 = TestTorrent.infoHash(washTorrentFileV1);
+        washTorrentFileV2 = TestTorrent.write(torrentSourceDir.resolve("wash-01-v2.torrent").toFile(),
+                WASH_SEED_FILE_V2, List.of(TestTorrent.file(WASH_SEED_FILE_V2, SEED_SIZE)));
+        washInfoHashV2 = TestTorrent.infoHash(washTorrentFileV2);
+        String washFeedV1 = washFeedXml(false);
+        ORIGIN.serveText(WASH_FEED_PATH, "application/rss+xml", washFeedV1);
+        ORIGIN.serve(WASH_TORRENT_V1_PATH, "application/x-bittorrent",
+                Files.readAllBytes(washTorrentFileV1.toPath()));
+        ORIGIN.serve(WASH_TORRENT_V2_PATH, "application/x-bittorrent",
+                Files.readAllBytes(washTorrentFileV2.toPath()));
         // BGM 假端点：/addAni 会强制查一次 BGM（AniUtil 先断言 bgmUrl 非空，再 getBgmInfo），
         // 而 getBgmInfo 内部是"官方 API + cache.wushuo.top 镜像"两路并行。
         // 必须把两路都指到假公网，否则这条链路会真的出网 —— 结论就不再可复现了。
@@ -172,6 +212,14 @@ class DownloadJourneyE2ETest {
         ARTIFACT.inputFile("feed.xml", feed);
         ARTIFACT.inputFile("feed-half.xml", feedHalf);
         ARTIFACT.inputFile("show-01.torrent", Files.readAllBytes(torrentFile.toPath()));
+        ARTIFACT.input("washAniId", WASH_ANI_ID);
+        ARTIFACT.input("washFeedUrl", ORIGIN.url(WASH_FEED_PATH));
+        ARTIFACT.input("washInfoHashV1", washInfoHashV1);
+        ARTIFACT.input("washInfoHashV2", washInfoHashV2);
+        ARTIFACT.inputFile("wash-feed-v1.xml", washFeedV1);
+        ARTIFACT.inputFile("wash-feed-v2.xml", washFeedXml(true));
+        ARTIFACT.inputFile("wash-01.torrent", Files.readAllBytes(washTorrentFileV1.toPath()));
+        ARTIFACT.inputFile("wash-01-v2.torrent", Files.readAllBytes(washTorrentFileV2.toPath()));
         ARTIFACT.inputFile("config.v2.json", Files.readAllBytes(ConfigUtil.getConfigFile().toPath()));
     }
 
@@ -205,8 +253,10 @@ class DownloadJourneyE2ETest {
                 .setRenameTemplate("${title} S${seasonFormat}E${episodeFormat}")
                 .setOvaRenameTemplate("${title} (${year})")
                 .setDelete(true)
+                // 洗版（备用RSS替换）必须在 e2e 里真的开着：线上无限洗版的现场正是
+                // "备用RSS自动删除旧文件 + 重新离线"，关掉它就只能测到一半。
                 .setDeleteStandbyRSSOnly(false)
-                .setStandbyRss(false)
+                .setStandbyRss(true)
                 .setCoexist(false)
                 .setFileExist(false)
                 .setAutoDisabled(false)
@@ -226,6 +276,8 @@ class DownloadJourneyE2ETest {
                 .setRssRetry(1)
                 .setRssConcurrency(1)
                 .setStaggeredUpdateEnable(false)
+                // 24h：周期轮次不得插进多阶段的洗版场景里（每阶段都用 /refreshAni 手动升轮）
+                .setRssSleepMinutes(1440)
                 // 关掉所有会出网 / 会自动改状态的功能，保证结论只由被测链路决定
                 .setAutoTrackersUpdate(false)
                 .setAutoUpdate(false)
@@ -304,6 +356,35 @@ class DownloadJourneyE2ETest {
                 </rss>
                 """.formatted(ORIGIN.url(FEED_HALF_PATH), SEED_HALF_FILE,
                 ORIGIN.url("/torrents/show-01.5.torrent"));
+    }
+
+    /**
+     * 假 RSS 源：洗版场景单条 E01，{@code v2=true} 时标题带版本标记。
+     * <p>
+     * v1/v2 除了标题里的 {@code v2} 与 infoHash 外完全一致（同集、同长度），
+     * 因此"是否洗版"只能由版本状态决定，排除了画质/大小等其余变量。
+     */
+    private static String washFeedXml(boolean v2) {
+        String seed = v2 ? WASH_SEED_FILE_V2 : WASH_SEED_FILE;
+        String torrentPath = v2 ? WASH_TORRENT_V2_PATH : WASH_TORRENT_V1_PATH;
+        String hash = v2 ? washInfoHashV2 : washInfoHashV1;
+        return """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <rss version="2.0">
+                  <channel>
+                    <title>ani-rss e2e wash</title>
+                    <link>%s</link>
+                    <description>ani-rss 端到端测试源（洗版）</description>
+                    <item>
+                      <title>%s</title>
+                      <guid>%s</guid>
+                      <enclosure url="%s" length="%d" type="application/x-bittorrent" />
+                      <pubDate>Mon, 01 Jan 2024 12:00:00 +0800</pubDate>
+                    </item>
+                  </channel>
+                </rss>
+                """.formatted(ORIGIN.url(WASH_FEED_PATH), seed, hash,
+                ORIGIN.url(torrentPath), SEED_SIZE);
     }
 
     // ==================== 被测行为 ====================
@@ -444,7 +525,125 @@ class DownloadJourneyE2ETest {
 
     @Test
     @Order(3)
-    @DisplayName("E2E-3 保存设置：密码留空不改层数、不踢下线")
+    @DisplayName("E2E-3 洗版只发生一次：v1→v2 洗一轮，同一 v2 再扫不得重下")
+    void wash_runs_once_per_version() throws Exception {
+        long start = System.currentTimeMillis();
+        String token = login();
+
+        // 阶段 ①：v1 正常落地（盘上版本 = 1）
+        CLOUD.seedFileName = WASH_SEED_FILE;
+        long baseline = lastFinishedAt(token);
+        JsonObject add = postResult("/addAni", token,
+                aniJson(WASH_ANI_ID, WASH_TITLE, ORIGIN.url(WASH_FEED_PATH), 2));
+        assertEquals("添加订阅成功", add.get("message").getAsString());
+        awaitRound(token, baseline, 180_000);
+        awaitOfflineDone(token, 180_000);
+
+        int submissionsV1 = washSubmissions();
+        List<String> topV1 = CLOUD.topLevel(WASH_SAVE_PATH);
+
+        // 阶段 ②：RSS 换发 v2（同集、新 infoHash）—— 应且只应洗一次版
+        CLOUD.seedFileName = WASH_SEED_FILE_V2;
+        ORIGIN.serveText(WASH_FEED_PATH, "application/rss+xml", washFeedXml(true));
+        // RSS 内容缓存 45s：不主动失效的话，阶段 ② 拿到的仍是 v1 的那份 feed
+        CacheUtils.remove("rss:" + ORIGIN.url(WASH_FEED_PATH));
+        long washBaseline = lastFinishedAt(token);
+        postResult("/refreshAni", token, "{\"id\":\"" + WASH_ANI_ID + "\"}");
+        awaitRound(token, washBaseline, 180_000);
+        awaitOfflineDone(token, 180_000);
+
+        int submissionsAfterWash = washSubmissions();
+        List<String> topAfterWash = CLOUD.topLevel(WASH_SAVE_PATH);
+
+        // 阶段 ③：同一 v2 再扫一轮 —— 线上无限洗版就发生在这里：
+        // 原先只要标题带 v2，每轮都会"准备洗版"，重新删旧文件 + 重新离线
+        long repeatBaseline = lastFinishedAt(token);
+        postResult("/refreshAni", token, "{\"id\":\"" + WASH_ANI_ID + "\"}");
+        JsonObject status = awaitRound(token, repeatBaseline, 180_000);
+        status = awaitOfflineDone(token, 180_000);
+
+        int submissionsAfterRepeat = washSubmissions();
+        List<String> topAfterRepeat = CLOUD.topLevel(WASH_SAVE_PATH);
+        List<String> washStateLines = readWashStateFile();
+
+        Map<String, Object> evidence = new LinkedHashMap<>();
+        evidence.put("washInfoHashV1", washInfoHashV1);
+        evidence.put("washInfoHashV2", washInfoHashV2);
+        evidence.put("submissionsV1", submissionsV1);
+        evidence.put("submissionsAfterWash", submissionsAfterWash);
+        evidence.put("submissionsAfterRepeat", submissionsAfterRepeat);
+        evidence.put("topV1", topV1);
+        evidence.put("topAfterWash", topAfterWash);
+        evidence.put("topAfterRepeat", topAfterRepeat);
+        evidence.put("washState", washStateLines);
+        evidence.put("washSubmissions", washSubmissionText());
+        evidence.put("jobStatus", status.toString());
+
+        boolean ok = submissionsV1 == 1
+                && submissionsAfterWash == 2
+                && submissionsAfterRepeat == 2
+                && List.of(WASH_EXPECTED_FILE).equals(topAfterRepeat);
+        String detail = ok
+                ? "v1 提交 1 次，v2 洗版 1 次（第 2 次提交），再扫一轮未新增提交，终态 " + WASH_EXPECTED_FILE
+                : "提交次数 v1=" + submissionsV1 + " 洗版后=" + submissionsAfterWash
+                + " 重复轮后=" + submissionsAfterRepeat + " 终态=" + topAfterRepeat;
+        ARTIFACT.scenario("E2E-3 洗版只发生一次（v1→v2 洗一次，同一 v2 不再洗）",
+                ok ? "PASS" : "FAIL", System.currentTimeMillis() - start, detail, evidence);
+
+        assertEquals(0, status.get("subscriptionFailed").getAsInt(),
+                "洗版轮次不应有失败订阅: " + status);
+        assertEquals(1, submissionsV1, "v1 应只提交 1 次离线任务：" + washSubmissionText());
+        assertEquals(2, submissionsAfterWash,
+                "RSS 升级到 v2 后应洗版一次（第 2 次提交）：" + washSubmissionText());
+        assertEquals(2, submissionsAfterRepeat,
+                "同一 v2 再扫一轮不得重新洗版：" + washSubmissionText());
+        assertEquals(List.of(WASH_EXPECTED_FILE), topAfterRepeat,
+                "洗版后终态应仍是唯一一个重命名文件：" + CLOUD.tree());
+        assertEquals(2, WashState.versionOf(washAni(), washItem(2)),
+                "洗版完成后版本 2 必须已持久化：" + washStateLines);
+    }
+
+    /** 洗版订阅的离线提交（按落点目录过滤，与 Show 订阅的提交区分开） */
+    private static int washSubmissions() {
+        return (int) CLOUD.offlineSubmissions.stream()
+                .filter(s -> s.path() != null && s.path().startsWith(WASH_SAVE_PATH))
+                .count();
+    }
+
+    private static List<String> washSubmissionText() {
+        return CLOUD.offlineSubmissions.stream()
+                .filter(s -> s.path() != null && s.path().startsWith(WASH_SAVE_PATH))
+                .map(s -> s.path() + " <= " + s.magnet() + " tid=" + s.tid()
+                        + (s.duplicateRejected() ? " (重复被拒)" : ""))
+                .toList();
+    }
+
+    /** 读盘上的 wash-state.json（应用自己写出来的真相） */
+    private static List<String> readWashStateFile() {
+        try {
+            File file = new File(configDir.toFile(), WashState.FILE_NAME);
+            return file.exists() ? List.of(FileUtil.readUtf8String(file)) : List.of("(wash-state.json 不存在)");
+        } catch (Exception e) {
+            return List.of("(读取失败: " + e.getMessage() + ")");
+        }
+    }
+
+    private static Ani washAni() {
+        Ani ani = new Ani();
+        ani.setId(WASH_ANI_ID).setTitle(WASH_TITLE).setSeason(1).setNamingVersion(2);
+        return ani;
+    }
+
+    private static Item washItem(int version) {
+        Item item = new Item();
+        item.setTitle(WASH_SEED_FILE_V2).setReName(WASH_TITLE + " S01E01")
+                .setEpisode(1.0).setVersion(version);
+        return item;
+    }
+
+    @Test
+    @Order(4)
+    @DisplayName("E2E-4 保存设置：密码留空不改层数、不踢下线")
     void saving_config_must_not_touch_stored_password() throws Exception {
         long start = System.currentTimeMillis();
         String token = login();
@@ -484,7 +683,7 @@ class DownloadJourneyE2ETest {
         evidence.put("configResponseMasked", masked);
         evidence.put("rssJobStatusCodeAfterSave", status.get("code").getAsInt());
 
-        ARTIFACT.scenario("E2E-3 保存设置不改变密码层数、不踢下线", "PASS",
+        ARTIFACT.scenario("E2E-4 保存设置不改变密码层数、不踢下线", "PASS",
                 System.currentTimeMillis() - start,
                 "密码仍是单层摘要，且保存后旧 token 依然可用", evidence);
     }
@@ -497,8 +696,8 @@ class DownloadJourneyE2ETest {
     }
 
     @Test
-    @Order(4)
-    @DisplayName("E2E-4 工件自证：report.json / report.md / inputs 落盘且内容与断言一致")
+    @Order(5)
+    @DisplayName("E2E-5 工件自证：report.json / report.md / inputs 落盘且内容与断言一致")
     void journey_artifact_is_self_verifiable() throws Exception {
         long start = System.currentTimeMillis();
         Path dir = ARTIFACT.write();
@@ -508,6 +707,8 @@ class DownloadJourneyE2ETest {
         assertTrue(Files.exists(md), "应生成 report.md: " + dir);
         assertTrue(Files.exists(dir.resolve("inputs").resolve("feed.xml")), "应留存原始输入 feed.xml");
         assertTrue(Files.exists(dir.resolve("inputs").resolve("show-01.torrent")), "应留存原始输入 show-01.torrent");
+        assertTrue(Files.exists(dir.resolve("inputs").resolve("wash-feed-v2.xml")), "应留存洗版 v2 的 RSS 输入");
+        assertTrue(Files.exists(dir.resolve("inputs").resolve("wash-01-v2.torrent")), "应留存洗版 v2 的种子输入");
 
         JsonObject report = JsonParser.parseString(Files.readString(json, StandardCharsets.UTF_8))
                 .getAsJsonObject();
@@ -520,9 +721,9 @@ class DownloadJourneyE2ETest {
         evidence.put("inputHashes", inputs.toString());
         evidence.put("scenarioCount", scenarios.size());
 
-        // 此刻工件里只可能有 E2E-1 / E2E-2 / E2E-3 三条<b>业务</b>场景：E2E-4 的结论要等它自己读完
-        // report.json 才记录，而 @AfterAll 会再写一次把 E2E-4 补齐。所以断言"业务场景都在"，
-        // 不写死总数（写死 4 永远不成立，写死 3 又会随场景增减而脆）。
+        // 此刻工件里只可能有 E2E-1 / E2E-2 / E2E-3 / E2E-4 四条<b>业务</b>场景：E2E-5 的结论要等它自己读完
+        // report.json 才记录，而 @AfterAll 会再写一次把 E2E-5 补齐。所以断言"业务场景都在"，
+        // 不写死总数（写死 5 永远不成立，写死 4 又会随场景增减而脆）。
         List<String> scenarioNames = new ArrayList<>();
         for (int i = 0; i < scenarios.size(); i++) {
             scenarioNames.add(scenarios.get(i).getAsJsonObject().get("name").getAsString());
@@ -534,6 +735,10 @@ class DownloadJourneyE2ETest {
         assertEquals(infoHash, inputs.get("infoHash").getAsString(), "工件应记录种子 infoHash");
         assertTrue(inputs.has("feed.xml.sha256"), "工件应记录输入 RSS 的哈希");
         assertTrue(inputs.has("show-01.torrent.sha256"), "工件应记录输入种子的哈希");
+        assertTrue(inputs.has("wash-01-v2.torrent.sha256"), "工件应记录洗版 v2 种子的哈希");
+        assertNotEquals(inputs.get("washInfoHashV1").getAsString(),
+                inputs.get("washInfoHashV2").getAsString(),
+                "v1/v2 必须是两份不同种子，洗版才有意义");
         assertEquals(64, inputs.get("config.v2.json.sha256").getAsString().length(),
                 "配置哈希应为 SHA-256");
         assertTrue(scenarioNames.stream().anyMatch(n -> n.startsWith("E2E-1")),
@@ -541,12 +746,13 @@ class DownloadJourneyE2ETest {
         assertTrue(scenarioNames.stream().anyMatch(n -> n.startsWith("E2E-2")),
                 "工件应含 E2E-2 结论，实际=" + scenarioNames);
         assertTrue(scenarioNames.stream().anyMatch(n -> n.startsWith("E2E-3")),
-                "工件应含 E2E-3 结论，实际=" + scenarioNames);
+                "工件应含 E2E-3 洗版结论，实际=" + scenarioNames);
         assertTrue(raw.contains(EXPECTED_FILE), "工件应包含云盘终态证据");
+        assertTrue(raw.contains(WASH_EXPECTED_FILE), "工件应包含洗版终态证据");
         assertTrue(raw.contains(FEED_PATH), "工件应包含假 RSS 请求证据");
         assertEquals(0, ARTIFACT.failureCount(), "不应有失败场景: " + scenarios);
 
-        ARTIFACT.scenario("E2E-4 工件自证", "PASS", System.currentTimeMillis() - start,
+        ARTIFACT.scenario("E2E-5 工件自证", "PASS", System.currentTimeMillis() - start,
                 "工件目录=" + dir, evidence);
     }
 
@@ -640,10 +846,14 @@ class DownloadJourneyE2ETest {
 
     /** 订阅对象：字段全部显式给出，避免 null 走进各条默认分支导致结论不可复现 */
     private static String aniJson() {
+        return aniJson(ANI_ID, ANI_TITLE, ORIGIN.url(FEED_PATH), 1);
+    }
+
+    private static String aniJson(String id, String title, String url, int namingVersion) {
         JsonObject ani = new JsonObject();
-        ani.addProperty("id", ANI_ID);
-        ani.addProperty("title", ANI_TITLE);
-        ani.addProperty("url", ORIGIN.url(FEED_PATH));
+        ani.addProperty("id", id);
+        ani.addProperty("title", title);
+        ani.addProperty("url", url);
         // /addAni 强制要求 bgmUrl 非空，且要能从中取出 subjectId（正则 ^http(s)?://.+/(\d+)/?$）
         ani.addProperty("bgmUrl", "https://bgm.tv/subject/" + BGM_SUBJECT_ID);
         ani.addProperty("season", 1);
@@ -652,7 +862,7 @@ class DownloadJourneyE2ETest {
         ani.addProperty("enable", true);
         ani.addProperty("ova", false);
         ani.addProperty("globalExclude", false);
-        ani.addProperty("namingVersion", 1);
+        ani.addProperty("namingVersion", namingVersion);
         ani.addProperty("downloadNew", false);
         // 遗漏检测：字段可空，而 ItemsUtil 里是 `if (!ani.getOmit())` 直接拆箱 —— 不给值就会 NPE，
         // 表现为"订阅加上了但每轮都失败"。这里显式关掉，也让本轮的下载行为可预期。
@@ -697,6 +907,7 @@ class DownloadJourneyE2ETest {
             ARTIFACT.section("云盘最终目录树", CLOUD.tree());
             ARTIFACT.section("假公网收到的请求", String.join("\n", ORIGIN.requests()));
             ARTIFACT.section("离线提交记录", String.join("\n", offlineSubmissionText()));
+            ARTIFACT.section("洗版状态 wash-state.json", String.join("\n", readWashStateFile()));
             ARTIFACT.section("订阅落盘 ani.v2.json", readAniFile());
             ARTIFACT.write();
         } finally {

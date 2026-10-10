@@ -158,11 +158,19 @@ public class DownloadService {
             // 占位文件会被白删 —— 该集在等待窗口内既无占位文件也没有主RSS文件。
             TorrentsInfo pendingStandbyPlaceholder = null;
 
+            // 洗版 = RSS 版本<b>高于</b>盘上已落地版本（见 WashState）。
+            // 原先只看 `version > 1`，是无状态的：同一 v2 标题每轮都会被判成"待洗版"，
+            // 而重命名后的文件名不含版本号，盘上那份是不是 v2 无处可知 ——
+            // 于是每轮都重新下载→改名→删旧文件，形成无限洗版。
+            // 现在同一版本只洗一次，且状态跨重启有效。
+            boolean wash = needsWash(ani, item);
+
             // 已经下载过
             if (torrent.exists()) {
                 // v2: 检查版本号，高版本覆盖低版本（洗版）
-                if (v2 && item.getVersion() != null && item.getVersion() > 1) {
-                    log.info("检测到高版本 {} v{}, 准备洗版", reName, item.getVersion());
+                if (wash) {
+                    log.info("检测到高版本 {} v{}, 准备洗版（本地当前 v{}）",
+                            reName, item.getVersion(), WashState.versionOf(ani, item));
                     // 不跳过，继续下载流程
                 } else {
                     // 记录有效性校验: 下载器有对应任务 或 本地有对应文件 才视为已下载;
@@ -307,8 +315,7 @@ public class DownloadService {
             // pubDate 为 null 放行（部分 RSS 源无该字段，不能永远卡住）；
             // 洗版条目（v2 高版本）不拦截——修正版通常来自已有种子的重新发布。
             Integer newTorrentWaitHours = ObjectUtil.defaultIfNull(config.getNewTorrentWaitHours(), 2);
-            boolean washingItem = v2 && item.getVersion() != null && item.getVersion() > 1;
-            if (Objects.nonNull(pubDate) && newTorrentWaitHours > 0 && !washingItem) {
+            if (Objects.nonNull(pubDate) && newTorrentWaitHours > 0 && !wash) {
                 long earliest = System.currentTimeMillis() - TimeUnit.HOURS.toMillis(newTorrentWaitHours);
                 if (pubDate.getTime() > earliest) {
                     // 站点时钟偏移导致 pubDate 在未来：按已过期处理，避免长期卡住
@@ -390,8 +397,7 @@ public class DownloadService {
             }
 
             // 未开启rename不进行检测; 洗版(高版本)不受本地已下载判断拦截
-            boolean washing = v2 && item.getVersion() != null && item.getVersion() > 1;
-            if (!washing && itemDownloaded(ani, item, true, localEpisodeIndex)) {
+            if (!wash && itemDownloaded(ani, item, true, localEpisodeIndex)) {
                 // 主RSS更新时该集被"备用RSS占位": 登记待清除, 由主RSS替换(洗版)。
                 // 同样只登记不删除, 见 pendingStandbyPlaceholder 声明处。
                 TorrentsInfo standbyPlaceholder = findRemovableStandbyPlaceholder(ani, item, torrentsInfos);
@@ -562,6 +568,24 @@ public class DownloadService {
         if (stateDirty) {
             AniUtil.syncStateOnly();
         }
+    }
+
+    /**
+     * 是否需要洗版：只有 RSS 提供的版本<b>高于</b>盘上已落地版本才洗。
+     * <p>
+     * 判定必须有状态（{@link WashState}）：只看标题里的版本号，会把"已经洗过的同一版本"
+     * 每轮重新洗一遍 —— 重命名后的文件名里没有版本号，那份状态除了持久化记录没有别处可查。
+     * 版本为 1（无版本标记）不洗；无记录（新装/升级）按 0 处理，会洗一次后即收敛。
+     */
+    static boolean needsWash(Ani ani, Item item) {
+        if (!RenameUtil.isNamingV2(ani) || item == null) {
+            return false;
+        }
+        Integer version = item.getVersion();
+        if (version == null || version <= 1) {
+            return false;
+        }
+        return version > WashState.versionOf(ani, item);
     }
 
     /**
@@ -1029,6 +1053,11 @@ public class DownloadService {
                     ok = TorrentUtil.DOWNLOAD.download(ani, item, savePath, torrentFile);
                 }
                 if (ok) {
+                    // 洗版状态：下载器受理即记账，下一轮同版本不再洗版（见 WashState）。
+                    // 记账点是"受理"而不是"完成"——这是所有下载器、所有入口
+                    // （RSS 主流程 / 失败重试 / 强制下载）唯一的公共落点；
+                    // "受理但最终没完成"由既有本地存在判定接管（文件不在 → 照常重下）。
+                    WashState.markDownloadAccepted(ani, item);
                     // OpenList: 提交即受理——等待/提升/失败处理已移交 OpenList 独立长任务池，
                     // pending 标记保持到离线真正完成，预览不会误判"已下载"
                     if (openListTool) {
