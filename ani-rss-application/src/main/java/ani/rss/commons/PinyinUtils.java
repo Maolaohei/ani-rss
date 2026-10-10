@@ -3,10 +3,17 @@ package ani.rss.commons;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.extra.pinyin.PinyinEngine;
 import cn.hutool.extra.pinyin.engine.tinypinyin.TinyPinyinEngine;
+import com.github.promeg.pinyinhelper.Pinyin;
 
 public class PinyinUtils {
 
-    public static final PinyinEngine ENGINE = new TinyPinyinEngine();
+    public static final PinyinEngine ENGINE;
+
+    static {
+        Pinyin.Config pinyinConfig = Pinyin.newConfig();
+        pinyinConfig.with(new CustomPinyinMapDict());
+        ENGINE = new TinyPinyinEngine(pinyinConfig);
+    }
 
     public static PinyinEngine getEngine() {
         return ENGINE;
