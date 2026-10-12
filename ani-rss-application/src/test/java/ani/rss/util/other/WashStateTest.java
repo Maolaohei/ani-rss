@@ -14,6 +14,7 @@ import java.nio.file.Path;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -58,8 +59,11 @@ class WashStateTest {
 
     @Test
     void mark_then_version_is_visible_after_reload() {
-        WashState.markDownloadAccepted(ani(), item(1.0, 2));
+        assertTrue(WashState.markDownloaded(ani(), item(1.0, 2)),
+                "首次记账应报告状态变化（供补记只打一条日志）");
         assertEquals(2, WashState.versionOf(ani(), item(1.0, 2)));
+        assertFalse(WashState.markDownloaded(ani(), item(1.0, 2)),
+                "同版本重复记账不是状态变化");
 
         // 模拟进程重启：丢掉内存态，重新从盘上读
         WashState.resetForTest();
@@ -74,11 +78,22 @@ class WashStateTest {
     }
 
     @Test
+    void version_never_downgrades() {
+        WashState.markDownloaded(ani(), item(1.0, 3));
+        // 陈旧的低版本条目（RSS 回退 / 同集多路源版本不同）不得把已记录的高版本改回去，
+        // 否则下一个 v3 条目会又被判成“待洗版”而重新下载。
+        assertFalse(WashState.markDownloaded(ani(), item(1.0, 2)),
+                "低版本记账不应改变状态");
+        assertEquals(3, WashState.versionOf(ani(), item(1.0, 2)),
+                "已落地版本必须单调不减");
+    }
+
+    @Test
     void collection_version_is_min_of_range() {
         // 合集 E01-E03 已完成 E01/E02，E03 尚未落地
         Item part = item(1.0, 2);
         part.setEpisodeRange(List.of(1.0, 2.0));
-        WashState.markDownloadAccepted(ani(), part);
+        WashState.markDownloaded(ani(), part);
 
         Item full = item(3.0, 2);
         full.setEpisodeRange(List.of(1.0, 2.0, 3.0));
@@ -89,14 +104,14 @@ class WashStateTest {
     @Test
     void only_v2_naming_is_recorded() {
         Ani legacy = ani().setNamingVersion(1);
-        WashState.markDownloadAccepted(legacy, item(1.0, 2));
+        WashState.markDownloaded(legacy, item(1.0, 2));
         assertEquals(0, WashState.versionOf(legacy, item(1.0, 2)),
                 "非 v2 命名下版本号不参与判定，不应留下记录");
     }
 
     @Test
     void forget_removes_subscription_records() {
-        WashState.markDownloadAccepted(ani(), item(1.0, 2));
+        WashState.markDownloaded(ani(), item(1.0, 2));
         assertTrue(new File(tempDir.toFile(), WashState.FILE_NAME).exists(),
                 "记账后应落盘 " + WashState.FILE_NAME);
 

@@ -158,92 +158,94 @@ public class DownloadService {
             // 占位文件会被白删 —— 该集在等待窗口内既无占位文件也没有主RSS文件。
             TorrentsInfo pendingStandbyPlaceholder = null;
 
-            // 洗版 = RSS 版本<b>高于</b>盘上已落地版本（见 WashState）。
-            // 原先只看 `version > 1`，是无状态的：同一 v2 标题每轮都会被判成"待洗版"，
-            // 而重命名后的文件名不含版本号，盘上那份是不是 v2 无处可知 ——
-            // 于是每轮都重新下载→改名→删旧文件，形成无限洗版。
-            // 现在同一版本只洗一次，且状态跨重启有效。
-            boolean wash = needsWash(ani, item);
+            // 高版本标记：RSS 标题里带 v2+。这是"标题声称的版本"，不是"盘上那份的版本"。
+            boolean higherVersion = v2 && item.getVersion() != null && item.getVersion() > 1;
+            // 洗版 = 本版<b>尚未落地</b>（没有自己的正式种子记录）且版本<b>高于</b>已落地版本（见 needsWash）。
+            // 原先只看 `version > 1`：那是无状态的，而重命名后的文件名不含版本号 ——
+            // 盘上那份是不是 v2 无处可知，于是同一 v2 每轮都被判成"待洗版"重新下载，
+            // 哪怕它自己的种子记录就摆在那里（离线正式记录只在产物落地后才提升）。
+            boolean wash = needsWash(ani, item, torrent.exists());
+            if (wash) {
+                log.info("检测到高版本 {} v{}, 准备洗版（本地已落地 v{}）",
+                        reName, item.getVersion(), WashState.versionOf(ani, item));
+            }
 
             // 已经下载过
             if (torrent.exists()) {
-                // v2: 检查版本号，高版本覆盖低版本（洗版）
-                if (wash) {
-                    log.info("检测到高版本 {} v{}, 准备洗版（本地当前 v{}）",
-                            reName, item.getVersion(), WashState.versionOf(ani, item));
-                    // 不跳过，继续下载流程
+                // 记录有效性校验: 下载器有对应任务 或 本地有对应文件 才视为已下载;
+                // OpenList/Alist: 下载目录是网盘虚拟路径, 本地文件不可见且任务列表恒空,
+                // 先归位对账, 对账未确认再兜底检查, 兜底也没找到才清理记录触发重新下载
+                //
+                // 判定必须是三态：VALID / ABSENT(确认没有) / UNVERIFIABLE(查不到)。
+                // 只有 ABSENT 才允许删记录重下——把"查不到"读成"确认没有"，
+                // 会让一次网盘抖动直接演变成"删记录 + 整季重新下单"。
+                Presence presence;
+                UnknownReason unknownReason = UnknownReason.NONE;
+                if (!Boolean.TRUE.equals(config.getRename())) {
+                    presence = Presence.VALID;
+                } else if (isOpenListTool() && TorrentUtil.DOWNLOAD instanceof OfflineDownloader offline) {
+                    PresenceDecision decision = resolveOpenListPresence(ani, item, reName, savePath, offline, localEpisodeIndex);
+                    presence = decision.presence();
+                    unknownReason = decision.reason();
                 } else {
-                    // 记录有效性校验: 下载器有对应任务 或 本地有对应文件 才视为已下载;
-                    // OpenList/Alist: 下载目录是网盘虚拟路径, 本地文件不可见且任务列表恒空,
-                    // 先归位对账, 对账未确认再兜底检查, 兜底也没找到才清理记录触发重新下载
-                    //
-                    // 判定必须是三态：VALID / ABSENT(确认没有) / UNVERIFIABLE(查不到)。
-                    // 只有 ABSENT 才允许删记录重下——把"查不到"读成"确认没有"，
-                    // 会让一次网盘抖动直接演变成"删记录 + 整季重新下单"。
-                    Presence presence;
-                    UnknownReason unknownReason = UnknownReason.NONE;
-                    if (!Boolean.TRUE.equals(config.getRename())) {
-                        presence = Presence.VALID;
-                    } else if (isOpenListTool() && TorrentUtil.DOWNLOAD instanceof OfflineDownloader offline) {
-                        PresenceDecision decision = resolveOpenListPresence(ani, item, reName, savePath, offline, localEpisodeIndex);
-                        presence = decision.presence();
-                        unknownReason = decision.reason();
+                    // 本地型下载器：索引已在订阅级预构建，失败路径极少；保持原有布尔语义
+                    presence = itemDownloaded(ani, item, true, localEpisodeIndex)
+                            ? Presence.VALID : Presence.ABSENT;
+                }
+                if (presence == Presence.UNVERIFIABLE) {
+                    // 既不能断言"有"也不能断言"没有"：保留记录、本轮不重下，网盘恢复后自会发现文件本来就在。
+                    // 但必须带出<b>成因</b>——统称"网盘不可用"会把"等 60s 冷却"和"下载路径配错了"
+                    // 说成同一件事，用户除了猜没有别的办法（2026-09-20 的排查正是卡在这里）。
+                    log.info("本地状态无法确认（{}），本轮保留记录不重下 {}{}",
+                            unknownReasonText(unknownReason), reName, cooldownRemainText(unknownReason));
+                    RssTask.countRoundLocalState(LocalState.UNKNOWN);
+                    RssTask.countRoundUnknownReason(unknownReason);
+                    continue;
+                }
+                if (presence == Presence.RETRY_EXHAUSTED) {
+                    // 连续失败已达上限：保留种子记录以"停推"，等用户在失败列表手动重试
+                    log.warn("本集连续下载失败已达 {} 次，停止自动重推（条目保留在失败队列，可手动重试） {}",
+                            MAX_OPENLIST_AUTO_RETRY_ATTEMPTS, reName);
+                    RssTask.countRoundLocalState(LocalState.UNKNOWN);
+                    continue;
+                }
+                if (presence.valid()) {
+                    // 主RSS记录被"备用RSS占位"证据命中: 登记待清除, 按未下载继续走流程,
+                    // 实现主RSS替换。否则备用RSS先下载过的集会被"种子记录已存在/本地文件已存在"永久锁死。
+                    // 注意这里只登记不删除(见 pendingStandbyPlaceholder 声明处)。
+                    TorrentsInfo standbyPlaceholder = findRemovableStandbyPlaceholder(ani, item, torrentsInfos);
+                    if (standbyPlaceholder != null) {
+                        pendingStandbyPlaceholder = standbyPlaceholder;
+                        // fall through 继续正常下载流程(主RSS自己的种子记录保留, 下载时幂等重写)
                     } else {
-                        // 本地型下载器：索引已在订阅级预构建，失败路径极少；保持原有布尔语义
-                        presence = itemDownloaded(ani, item, true, localEpisodeIndex)
-                                ? Presence.VALID : Presence.ABSENT;
-                    }
-                    if (presence == Presence.UNVERIFIABLE) {
-                        // 既不能断言"有"也不能断言"没有"：保留记录、本轮不重下，网盘恢复后自会发现文件本来就在。
-                        // 但必须带出<b>成因</b>——统称"网盘不可用"会把"等 60s 冷却"和"下载路径配错了"
-                        // 说成同一件事，用户除了猜没有别的办法（2026-09-20 的排查正是卡在这里）。
-                        log.info("本地状态无法确认（{}），本轮保留记录不重下 {}{}",
-                                unknownReasonText(unknownReason), reName, cooldownRemainText(unknownReason));
-                        RssTask.countRoundLocalState(LocalState.UNKNOWN);
-                        RssTask.countRoundUnknownReason(unknownReason);
+                        log.debug("种子记录已存在 {}", reName);
+                        // 记录有效 = 这一版的产物确实在盘上（离线正式记录只在确认成功后才提升）：
+                        // 补记「已落地版本」，让升级前没有 wash-state 记录的存量数据当轮收敛，
+                        // 而不是把"没有记录"一直读成"本地是 v0"。
+                        backfillWashState(ani, item);
+                        if (master && !is5) {
+                            currentDownloadCount++;
+                        }
+                        if (v2 && downloadedEpisodes != null) {
+                            downloadedEpisodes.add(episode);
+                        }
                         continue;
                     }
-                    if (presence == Presence.RETRY_EXHAUSTED) {
-                        // 连续失败已达上限：保留种子记录以"停推"，等用户在失败列表手动重试
-                        log.warn("本集连续下载失败已达 {} 次，停止自动重推（条目保留在失败队列，可手动重试） {}",
-                                MAX_OPENLIST_AUTO_RETRY_ATTEMPTS, reName);
+                } else {
+                    // D1：正式种子记录只增不删——删除只允许用户显式操作（强制下载 / 精确重下 / 删除记录）。
+                    // 对 OpenList 路径，ABSENT 已不可能由"读失败"产生（读失败一律是 UNVERIFIABLE），
+                    // 所以"删记录重下"这条路径没有存在意义，直接删掉：保留记录、不重下，
+                    // 用户若确认文件已不在，可用「强制下载」显式重下。
+                    // 本地型下载器（qB/TR/Aria2）保留原语义：它的 ABSENT 来自下载器自身的确切答复，
+                    // 且"删记录重下"是既有行为，改动风险大于收益。
+                    if (isOpenListTool()) {
+                        log.warn("种子记录存在但未确认网盘产物，按 v3 保留记录（不删、不重下），"
+                                + "等下一轮复核 {}", reName);
                         RssTask.countRoundLocalState(LocalState.UNKNOWN);
                         continue;
                     }
-                    if (presence.valid()) {
-                        // 主RSS记录被"备用RSS占位"证据命中: 登记待清除, 按未下载继续走流程,
-                        // 实现主RSS替换。否则备用RSS先下载过的集会被"种子记录已存在/本地文件已存在"永久锁死。
-                        // 注意这里只登记不删除(见 pendingStandbyPlaceholder 声明处)。
-                        TorrentsInfo standbyPlaceholder = findRemovableStandbyPlaceholder(ani, item, torrentsInfos);
-                        if (standbyPlaceholder != null) {
-                            pendingStandbyPlaceholder = standbyPlaceholder;
-                            // fall through 继续正常下载流程(主RSS自己的种子记录保留, 下载时幂等重写)
-                        } else {
-                            log.debug("种子记录已存在 {}", reName);
-                            if (master && !is5) {
-                                currentDownloadCount++;
-                            }
-                            if (v2 && downloadedEpisodes != null) {
-                                downloadedEpisodes.add(episode);
-                            }
-                            continue;
-                        }
-                    } else {
-                        // D1：正式种子记录只增不删——删除只允许用户显式操作（强制下载 / 精确重下 / 删除记录）。
-                        // 对 OpenList 路径，ABSENT 已不可能由"读失败"产生（读失败一律是 UNVERIFIABLE），
-                        // 所以"删记录重下"这条路径没有存在意义，直接删掉：保留记录、不重下，
-                        // 用户若确认文件已不在，可用「强制下载」显式重下。
-                        // 本地型下载器（qB/TR/Aria2）保留原语义：它的 ABSENT 来自下载器自身的确切答复，
-                        // 且"删记录重下"是既有行为，改动风险大于收益。
-                        if (isOpenListTool()) {
-                            log.warn("种子记录存在但未确认网盘产物，按 v3 保留记录（不删、不重下），"
-                                    + "等下一轮复核 {}", reName);
-                            RssTask.countRoundLocalState(LocalState.UNKNOWN);
-                            continue;
-                        }
-                        log.warn("清理过期种子记录(无对应任务/文件) {}", reName);
-                        FileUtil.del(torrent);
-                    }
+                    log.warn("清理过期种子记录(无对应任务/文件) {}", reName);
+                    FileUtil.del(torrent);
                 }
             }
 
@@ -313,9 +315,11 @@ public class DownloadService {
             // 新种子下载等待：发布时间距今不足 N 小时的种子暂缓下载（离线场景云端无人做种，
             // 立即提交只会超时失败并反复重提）。到期由下一轮 RSS 自然重查，无需新定时器。
             // pubDate 为 null 放行（部分 RSS 源无该字段，不能永远卡住）；
-            // 洗版条目（v2 高版本）不拦截——修正版通常来自已有种子的重新发布。
+            // 高版本（v2+）条目不拦截——修正版通常来自已有种子的重新发布。
+            // 用 higherVersion 而不是 wash：本版记录已存在的高版本条目会在这里被拦下，
+            // 而它下一轮本来也不会重下（记录终态），拦住只是白等 2 小时。
             Integer newTorrentWaitHours = ObjectUtil.defaultIfNull(config.getNewTorrentWaitHours(), 2);
-            if (Objects.nonNull(pubDate) && newTorrentWaitHours > 0 && !wash) {
+            if (Objects.nonNull(pubDate) && newTorrentWaitHours > 0 && !higherVersion) {
                 long earliest = System.currentTimeMillis() - TimeUnit.HOURS.toMillis(newTorrentWaitHours);
                 if (pubDate.getTime() > earliest) {
                     // 站点时钟偏移导致 pubDate 在未来：按已过期处理，避免长期卡住
@@ -571,14 +575,25 @@ public class DownloadService {
     }
 
     /**
-     * 是否需要洗版：只有 RSS 提供的版本<b>高于</b>盘上已落地版本才洗。
+     * 是否需要洗版：本版<b>尚未落地</b>（没有自己的正式种子记录）、且版本<b>高于</b>已落地版本。
      * <p>
-     * 判定必须有状态（{@link WashState}）：只看标题里的版本号，会把"已经洗过的同一版本"
-     * 每轮重新洗一遍 —— 重命名后的文件名里没有版本号，那份状态除了持久化记录没有别处可查。
-     * 版本为 1（无版本标记）不洗；无记录（新装/升级）按 0 处理，会洗一次后即收敛。
+     * 判定分两层，缺一层就会无限洗版：
+     * <ol>
+     *   <li><b>记录终态（本地事实）</b>：本版自己的正式种子记录已存在 → 这一版已经下载过了，
+     *       不是洗版目标。离线下载（OpenList）的正式记录只在离线完成、归位与重命名成功之后，
+     *       才从 {@code .pending} 提升而来（{@code OpenList#promoteAfterConfirmed}）——
+     *       它存在就是"产物已在盘上"的正证据。记录与文件确实不一致时，会走上面的存在性校验：
+     *       把它当"记录失效"走<b>普通</b>重下，而不是每轮一次的洗版循环。</li>
+     *   <li><b>版本状态（跨版本事实）</b>：{@code item.version} 必须严格高于
+     *       {@link WashState} 里已落地的版本。升级前的存量数据没有 wash-state 记录，
+     *       只看这一条会永远算 {@code 0}（{@code v2 > 0} 恒真）而每轮重下——
+     *       这正是线上"V2 明明已下载却被一直当成旧版"的成因。</li>
+     * </ol>
+     *
+     * @param recordExists 本版自己的正式种子记录是否存在（调用方传入，避免重复读缓存文件）
      */
-    static boolean needsWash(Ani ani, Item item) {
-        if (!RenameUtil.isNamingV2(ani) || item == null) {
+    static boolean needsWash(Ani ani, Item item, boolean recordExists) {
+        if (!RenameUtil.isNamingV2(ani) || item == null || recordExists) {
             return false;
         }
         Integer version = item.getVersion();
@@ -586,6 +601,26 @@ public class DownloadService {
             return false;
         }
         return version > WashState.versionOf(ani, item);
+    }
+
+    /**
+     * 观察到「本版自己的正式种子记录有效」时，补记已落地版本。
+     * <p>
+     * 为什么必须补记：{@link WashState} 是修复后新增的文件，升级前已经下载完的
+     * 存量数据一条记录都没有。不补记则"已落地版本"永远停在 0，条目一旦走到需要版本比较
+     * 的路径（记录被清理、同版本重新发布换了 infoHash）就又会当成"从没洗过"。
+     * <p>
+     * 只在<b>自己确认过</b>的分支调用（走完归位对账/兜底校验，记录与产物都对上了），
+     * 且只对 v2 命名生效（见 {@link WashState#markDownloaded}）。
+     */
+    private void backfillWashState(Ani ani, Item item) {
+        try {
+            if (WashState.markDownloaded(ani, item)) {
+                log.debug("补记已落地版本 {} v{}", item.getReName(), item.getVersion());
+            }
+        } catch (Exception e) {
+            log.debug("补记已落地版本失败 {}: {}", item.getReName(), ExceptionUtils.getMessage(e));
+        }
     }
 
     /**
@@ -1053,11 +1088,12 @@ public class DownloadService {
                     ok = TorrentUtil.DOWNLOAD.download(ani, item, savePath, torrentFile);
                 }
                 if (ok) {
-                    // 洗版状态：下载器受理即记账，下一轮同版本不再洗版（见 WashState）。
+                    // 受理即记账：下一轮同一版本不再洗版（见 WashState）。
                     // 记账点是"受理"而不是"完成"——这是所有下载器、所有入口
                     // （RSS 主流程 / 失败重试 / 强制下载）唯一的公共落点；
                     // "受理但最终没完成"由既有本地存在判定接管（文件不在 → 照常重下）。
-                    WashState.markDownloadAccepted(ani, item);
+                    // 另有一处补记：存量数据在观察到"本版记录有效"时由 backfillWashState 收敛。
+                    WashState.markDownloaded(ani, item);
                     // OpenList: 提交即受理——等待/提升/失败处理已移交 OpenList 独立长任务池，
                     // pending 标记保持到离线真正完成，预览不会误判"已下载"
                     if (openListTool) {

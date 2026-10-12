@@ -38,15 +38,19 @@ import java.util.concurrent.ConcurrentHashMap;
  * 「女友的朋友 S01E01 v2」约每 35 分钟洗一轮，多订阅同时中招。
  *
  * <h2>语义</h2>
- * 记的是"下载器<b>受理</b>时的版本"（受理即记账，见 {@code DownloadService#download}）：
+ * 记的是"下载器已经落地（或已受理，见 {@code DownloadService#download}）的版本"：
  * <ul>
  *   <li>判定是单调比较：只有 {@code item.version > 已落地版本} 才洗版；</li>
- *   <li>同一版本只洗一次，且跨进程重启依然有效（这正是无状态判定缺的那一半）；</li>
+ *   <li>同一版本只洗一次，且跨进程重启依然有效；</li>
  *   <li>记录缺失（新装/升级）时按 {@code 0} 处理：会洗一次，随后即收敛，不会循环。</li>
  * </ul>
- * 为什么记账点是"受理"而不是"完成"：受理是唯一在所有下载器、所有入口
- * （RSS 主流程 / 失败重试 / 强制下载）都存在的公共落点；而"受理但最终没完成"
- * 的场景由既有的本地存在判定接管（文件不在 → 照常重下），不会把洗版锁死。
+ * 
+ * <h2>它不是洗版的唯一依据</h2>
+ * 本状态是<b>兜底/单调基线</b>，不是终态判定。真正的终态是"这一版自己的种子记录"：
+ * 离线下载（OpenList）的正式记录只在离线完成且归位成功后才从 {@code .pending} 提升而来
+ * （{@code OpenList#promoteAfterConfirmed}），记录存在就是"这一版已落地"的正证据。
+ * 因此 {@code DownloadService#needsWash} 先看记录、再看本状态：
+ * 升级前的存量 v2 没有本状态记录，但记录已在 —— 只看状态会把它永远判成 v0 而每轮重洗。
  *
  * <h2>落盘口径</h2>
  * 与 {@link FailedDownloadQueue} / {@link DownloadHistory} 一致：temp + rename 原子写、
@@ -106,16 +110,24 @@ public final class WashState {
     }
 
     /**
-     * 下载器受理后记账：记录本集（含合集范围）已落地的版本。
+     * 记账：把本集（含合集范围）的已落地版本写为 {@code item.version}。
+     * <p>
+     * 两个记账点：
+     * <ol>
+     *   <li>下载器<b>受理成功</b>时（RSS 主流程 / 失败重试 / 强制下载的公共落点）；</li>
+     *   <li>观察到"本版自己的正式种子记录已存在且产物在盘上"时（升级前存量数据的补记）。</li>
+     * </ol>
      * 只对 v2 命名（洗版特性的宿主）记账；其它命名下版本号不参与任何判定。
+     *
+     * @return 是否真的改了状态（供调用方只在本轮完成补记时打一条日志）
      */
-    public static void markDownloadAccepted(Ani ani, Item item) {
+    public static boolean markDownloaded(Ani ani, Item item) {
         if (ani == null || item == null || !RenameUtil.isNamingV2(ani)) {
-            return;
+            return false;
         }
         Integer version = item.getVersion();
         if (version == null || version < 1) {
-            return;
+            return false;
         }
         Set<Double> episodes = episodesOf(item);
         List<String> keys = new ArrayList<>();
@@ -126,7 +138,7 @@ public final class WashState {
                 keys.add(keyOf(ani, episodeKey(episode)));
             }
         }
-        mark(keys, version);
+        return mark(keys, version);
     }
 
     /**
@@ -143,18 +155,28 @@ public final class WashState {
         }
     }
 
-    private static void mark(Collection<String> keys, int version) {
+    /**
+     * 写入已落地版本，<b>单调不减</b>：低版本不会把已记录的高版本改回去。
+     * <p>
+     * 为什么必须单调：RSS 源偶尔会把已发布的高版本条目回退/重排（或同一集多路源版本不同），
+     * 而补记路径拿的是“当前条目的版本号”。允许降级就等于让一个陈旧条目把“已洗到 v3”
+     * 改回“v2”，下一个 v3 条目又会再次触发洗版。
+     */
+    private static boolean mark(Collection<String> keys, int version) {
         if (keys.isEmpty()) {
-            return;
+            return false;
         }
         ensureLoaded();
         long now = System.currentTimeMillis();
         boolean changed = false;
         for (String key : keys) {
             Entry entry = VERSIONS.get(key);
-            if (entry != null && entry.getVersion() != null && entry.getVersion() == version) {
-                // 版本没变也要刷新时间：同版本重复记账不该被当成"最旧记录"淘汰
-                entry.setAt(now);
+            if (entry != null && entry.getVersion() != null && entry.getVersion() >= version) {
+                // 版本没变也要刷新时间：同版本重复记账不该被当成"最旧记录"淘汰。
+                // 更高版本（entry > version）则连时间也不动：别让陈旧条目把高版本的内存淘汰优先级拉高。
+                if (entry.getVersion() == version) {
+                    entry.setAt(now);
+                }
                 continue;
             }
             VERSIONS.put(key, new Entry().setVersion(version).setAt(now));
@@ -163,6 +185,7 @@ public final class WashState {
         if (changed) {
             save();
         }
+        return changed;
     }
 
     private static int versionOfKey(String key) {
@@ -290,9 +313,12 @@ public final class WashState {
     }
 
     /**
-     * 测试用：重置内存态，下次读取从当前 CONFIG 目录重新加载
+     * 测试用：重置内存态，下次读取从当前 CONFIG 目录重新加载。
+     * <p>
+     * {@code public} 是刻意的：e2e 需要用它模拟"升级/重启后进程内状态清空"
+     * （存量 v2 只有盘上记录、没有 wash-state.json 的真实场景）。
      */
-    static synchronized void resetForTest() {
+    public static synchronized void resetForTest() {
         VERSIONS.clear();
         loaded = false;
         LAST_SAVED_JSON = null;

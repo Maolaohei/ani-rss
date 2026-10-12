@@ -566,28 +566,57 @@ class DownloadJourneyE2ETest {
         List<String> topAfterRepeat = CLOUD.topLevel(WASH_SAVE_PATH);
         List<String> washStateLines = readWashStateFile();
 
+        // 阶段 ④：模拟“升级/重启后进程内状态丢失”（删掉 wash-state.json + 清内存态）。
+        // 这正是 2026-10-12 线上日志的现场：
+        //   v2 已经下载完（种子记录就在盘上），但本地版本记录是空的 ——
+        //   修复前会把“没有记录”读成“本地是 v0”，v2 每轮判成“待洗版”而无限重下。
+        // 必须靠“本版自己的正式种子记录已存在”终止洗版，并把版本补记回来。
+        List<String> recordsBeforeUpgrade = torrentRecordNames();
+        FileUtil.del(new File(configDir.toFile(), WashState.FILE_NAME));
+        WashState.resetForTest();
+        String washStateAfterReset = String.join("", readWashStateFile());
+
+        long upgradeBaseline = lastFinishedAt(token);
+        postResult("/refreshAni", token, "{\"id\":\"" + WASH_ANI_ID + "\"}");
+        status = awaitRound(token, upgradeBaseline, 180_000);
+        status = awaitOfflineDone(token, 180_000);
+
+        int submissionsAfterUpgrade = washSubmissions();
+        List<String> topAfterUpgrade = CLOUD.topLevel(WASH_SAVE_PATH);
+        List<String> washStateAfterRecovery = readWashStateFile();
+
         Map<String, Object> evidence = new LinkedHashMap<>();
         evidence.put("washInfoHashV1", washInfoHashV1);
         evidence.put("washInfoHashV2", washInfoHashV2);
         evidence.put("submissionsV1", submissionsV1);
         evidence.put("submissionsAfterWash", submissionsAfterWash);
         evidence.put("submissionsAfterRepeat", submissionsAfterRepeat);
+        evidence.put("submissionsAfterUpgrade", submissionsAfterUpgrade);
         evidence.put("topV1", topV1);
         evidence.put("topAfterWash", topAfterWash);
         evidence.put("topAfterRepeat", topAfterRepeat);
-        evidence.put("washState", washStateLines);
+        evidence.put("topAfterUpgrade", topAfterUpgrade);
+        evidence.put("washStateAfterWash", washStateLines);
+        evidence.put("washStateAfterReset", washStateAfterReset);
+        evidence.put("washStateAfterRecovery", washStateAfterRecovery);
+        evidence.put("torrentRecordsBeforeUpgrade", recordsBeforeUpgrade);
         evidence.put("washSubmissions", washSubmissionText());
         evidence.put("jobStatus", status.toString());
 
+        boolean recordOfV2 = recordsBeforeUpgrade.stream().anyMatch(n -> n.contains(washInfoHashV2));
         boolean ok = submissionsV1 == 1
                 && submissionsAfterWash == 2
                 && submissionsAfterRepeat == 2
-                && List.of(WASH_EXPECTED_FILE).equals(topAfterRepeat);
+                && submissionsAfterUpgrade == 2
+                && recordOfV2
+                && List.of(WASH_EXPECTED_FILE).equals(topAfterUpgrade);
         String detail = ok
-                ? "v1 提交 1 次，v2 洗版 1 次（第 2 次提交），再扫一轮未新增提交，终态 " + WASH_EXPECTED_FILE
+                ? "v1 提交 1 次，v2 洗版 1 次（第 2 次提交），重复轮与「升级后记录终态」均未新增提交，终态 "
+                + WASH_EXPECTED_FILE
                 : "提交次数 v1=" + submissionsV1 + " 洗版后=" + submissionsAfterWash
-                + " 重复轮后=" + submissionsAfterRepeat + " 终态=" + topAfterRepeat;
-        ARTIFACT.scenario("E2E-3 洗版只发生一次（v1→v2 洗一次，同一 v2 不再洗）",
+                + " 重复轮后=" + submissionsAfterRepeat + " 升级后=" + submissionsAfterUpgrade
+                + " v2记录存在=" + recordOfV2 + " 终态=" + topAfterUpgrade;
+        ARTIFACT.scenario("E2E-3 洗版只发生一次（v1→v2 洗一次，同一 v2 / 状态丢失后均不再洗）",
                 ok ? "PASS" : "FAIL", System.currentTimeMillis() - start, detail, evidence);
 
         assertEquals(0, status.get("subscriptionFailed").getAsInt(),
@@ -597,10 +626,15 @@ class DownloadJourneyE2ETest {
                 "RSS 升级到 v2 后应洗版一次（第 2 次提交）：" + washSubmissionText());
         assertEquals(2, submissionsAfterRepeat,
                 "同一 v2 再扫一轮不得重新洗版：" + washSubmissionText());
-        assertEquals(List.of(WASH_EXPECTED_FILE), topAfterRepeat,
+        assertTrue(recordOfV2,
+                "阶段④的前提是 v2 自己的正式种子记录已存在；实际记录=" + recordsBeforeUpgrade);
+        assertEquals(2, submissionsAfterUpgrade,
+                "模拟升级（wash-state 丢失）后不得重新洗版：本版记录已存在就是已下载："
+                        + washSubmissionText());
+        assertEquals(List.of(WASH_EXPECTED_FILE), topAfterUpgrade,
                 "洗版后终态应仍是唯一一个重命名文件：" + CLOUD.tree());
         assertEquals(2, WashState.versionOf(washAni(), washItem(2)),
-                "洗版完成后版本 2 必须已持久化：" + washStateLines);
+                "记录有效时应把已落地版本补记回来：" + washStateAfterRecovery);
     }
 
     /** 洗版订阅的离线提交（按落点目录过滤，与 Show 订阅的提交区分开） */
