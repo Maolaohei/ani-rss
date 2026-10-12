@@ -5,6 +5,7 @@ import ani.rss.entity.Item;
 import org.junit.jupiter.api.Test;
 
 import java.util.Date;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -143,6 +144,44 @@ class RenameAccuracyTest {
         // 非番剧/游戏/外语散包: 应拒绝, 不得乱解析
         assertFalse(ok("幸运的卢克西行纪.Lucky.Luke.Go.West.PAL.Wii-WiiZARD.[ENG-SPA-FRA-ITA-GER-NED]"));
         assertFalse(ok("足球小将.Capitán Tsubasa (Super Campeones) 1983 640p Spa Latino - Pitu"));
+    }
+
+    /**
+     * 版本号与集数的配对关系（洗版判定的输入契约）。
+     * <p>
+     * 同一集第一次发布无版本标记、第二次带 v2 —— 两条的 {@code reName} 必须完全一致
+     * （重命名模板里没有版本号），只有 {@code version} 从 1 变 2。洗版全靠这个差异工作：
+     * 若 v2 标题把集数也解析变了（例如把 "01v2" 当成别的集），就会变成"洗版洗到另一集"，
+     * 而不是替换同一集。
+     * <p>
+     * 四种 v2 形态均为真实字幕组常见写法（空格 / 无空格 / 下划线 / 大写 V）。
+     */
+    @Test
+    void version_marker_pairs_share_episode_and_differ_in_version() {
+        ConfigUtil.CONFIG.setRenameTemplate(null).setOvaRenameTemplate(null)
+                .setRenameDelYear(false).setRenameDelTmdbId(false).setSkip5(false);
+        // 关键：两条必须用【同一个订阅对象】（同一个 ani.title）——真实场景里 v1/v2 来自
+        // 同一个订阅，${title} 相同，重命名模板里又没有版本号，所以 reName 必须逐字一致。
+        Ani ani = ani("测试番剧");
+
+        Item v1 = item("[LoliHouse] 测试番剧 - 01 [1080p]");
+        assertTrue(RenameUtil.rename(ani, v1));
+        assertEquals(1.0, v1.getEpisode());
+        assertEquals(1, v1.getVersion(), "无版本标记必须算 v1");
+        assertTrue(v1.getReName().contains("S01E01"), v1.getReName());
+
+        for (String v2Title : List.of(
+                "[LoliHouse] 测试番剧 - 01 v2 [1080p]",
+                "[LoliHouse] 测试番剧 - 01v2 [1080p]",
+                "[LoliHouse] 测试番剧 - 01 V2 [1080p]",
+                "[LoliHouse] 测试番剧 - 01_V2 [1080p]")) {
+            Item v2 = item(v2Title);
+            assertTrue(RenameUtil.rename(ani, v2));
+            assertEquals(1.0, v2.getEpisode(), "v2 标题的集数不得漂移: " + v2Title);
+            assertEquals(2, v2.getVersion(), "v2 标题必须解析出版本 2: " + v2Title);
+            assertEquals(v1.getReName(), v2.getReName(),
+                    "同一集 v1/v2 的 reName 必须一致（否则洗版会洗错条目）: " + v2Title);
+        }
     }
 
     @Test

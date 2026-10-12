@@ -56,6 +56,30 @@ class WashDecisionTest {
         return item;
     }
 
+    /**
+     * 用户场景：第一次下载的是无版本标记的 {@code XXX S01E01}，第二次 RSS 出 {@code XXX S01E01v2}。
+     * <p>
+     * 期望恰好洗一次，然后彻底停住（无论后续记录在不在、状态在不在）。
+     */
+    @Test
+    void v1_then_v2_is_exactly_one_wash() {
+        Ani ani = ani(1, 2);
+        Item v1 = item(1.0, 1);
+        Item v2 = item(1.0, 2);
+
+        // 第一次：无记录、无状态。v1 不是洗版目标，走普通下载；受理后记账 = 1
+        assertFalse(DownloadService.needsWash(ani, v1, false));
+        WashState.markDownloaded(ani, v1);
+
+        // 第二次：v2 到达（新 infoHash，本版尚无记录）→ 必须洗一次
+        assertTrue(DownloadService.needsWash(ani, v2, false), "v1→v2 必须洗一次版");
+        WashState.markDownloaded(ani, v2);
+
+        // 之后：本版记录已存在 → 不洗；即使记录丢了，版本也不再高于已落地版本 → 仍不洗
+        assertFalse(DownloadService.needsWash(ani, v2, true), "v2 已下载（记录在）不得再洗");
+        assertFalse(DownloadService.needsWash(ani, v2, false), "v2 已落地（状态在）不得再洗");
+    }
+
     @Test
     void record_exists_terminates_wash() {
         // 事故现场：v2 已经下载完（记录在），wash-state.json 里什么都没有（升级前存量数据）。
