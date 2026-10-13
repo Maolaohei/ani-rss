@@ -96,7 +96,7 @@ const editAni = () => {
         ElMessage.success(res.message)
         // 保存成功：清掉未保存标记，避免关闭时再次确认
         aniDirty.value = false
-        window.$reLoadList()
+        window.$reLoadList?.()
         dialogVisible.value = false
         // 主RSS变化(如备用互换)时自动触发一次刷新, 拉取新主源集数
         let url = ani.value.url
