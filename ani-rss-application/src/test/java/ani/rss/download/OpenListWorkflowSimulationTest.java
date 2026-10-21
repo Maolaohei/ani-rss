@@ -5,6 +5,8 @@ import ani.rss.entity.Config;
 import ani.rss.entity.Item;
 import ani.rss.entity.OpenListFileInfo;
 import ani.rss.entity.OpenListTaskInfo;
+import ani.rss.download.openlist.residual.TempDirResidualItem;
+import ani.rss.download.openlist.residual.TempDirResidualSnapshot;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -480,8 +482,8 @@ class OpenListWorkflowSimulationTest {
         OpenList openList = openList(savePath);
         primeSubscriptions(savePath);
 
-        OpenList.TempDirResidualSnapshot snap = openList.scanTempDirResiduals(true);
-        OpenList.TempDirResidualItem item = snap.getItems() == null ? null : snap.getItems().stream()
+        TempDirResidualSnapshot snap = openList.scanTempDirResiduals(true);
+        TempDirResidualItem item = snap.getItems() == null ? null : snap.getItems().stream()
                 .filter(i -> i != null && tempDirName.equals(i.getName()))
                 .findFirst().orElse(null);
         assertNotNull(item, "应扫到临时目录 " + tempDirName + "，实际=" + snap.getItems());

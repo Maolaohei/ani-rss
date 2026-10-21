@@ -1,0 +1,267 @@
+.metric-grid {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.metric-item {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 8px;
+  background-color: var(--el-bg-color);
+}
+
+.metric-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.metric-icon.subscriptions {
+  color: var(--el-color-primary);
+  background-color: var(--el-color-primary-light-9);
+}
+
+.metric-icon.enabled {
+  color: var(--el-color-success);
+  background-color: var(--el-color-success-light-9);
+}
+
+.metric-icon.downloading {
+  color: var(--el-color-warning);
+  background-color: var(--el-color-warning-light-9);
+}
+
+.metric-icon.seeding {
+  color: var(--el-color-info);
+  background-color: var(--el-color-info-light-9);
+}
+
+.metric-value {
+  margin-top: 2px;
+  font-size: 24px;
+  line-height: 1.2;
+  font-weight: 700;
+}
+
+.dashboard-scrollbar {
+  flex: 1;
+  min-height: 0;
+}
+
+.dashboard-content {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.9fr) minmax(320px, 1.1fr);
+  gap: 14px;
+  padding-bottom: 8px;
+}
+
+/* 「近 7 天下载」独占整行：图表横向跨度更充裕，双柱对比一目了然 */
+.dashboard-section-full {
+  grid-column: 1 / -1;
+}
+
+.dashboard-section {
+  min-width: 0;
+  padding: 12px;
+  border-radius: 8px;
+  background-color: var(--el-bg-color);
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.section-title h3 {
+  font-size: 16px;
+  line-height: 1.4;
+}
+
+.today-section {
+  position: relative;
+  grid-column: 1 / -1;
+  overflow: hidden;
+}
+
+.today-section-content {
+  min-width: 0;
+}
+
+.today-heading-actions,
+.today-scroll-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.today-scroll-actions .el-button {
+  width: 28px;
+  height: 28px;
+  margin-left: 0;
+}
+
+.today-track {
+  min-width: 0;
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 2px 8px;
+  scroll-behavior: smooth;
+  scroll-snap-type: x proximity;
+  scrollbar-color: var(--el-border-color) transparent;
+  scrollbar-width: thin;
+}
+
+.today-track::-webkit-scrollbar {
+  height: 6px;
+}
+
+.today-track::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background-color: var(--el-border-color);
+}
+
+.today-track::-webkit-scrollbar-track {
+  background-color: transparent;
+}
+
+.today-item {
+  flex: 0 0 142px;
+  min-width: 0;
+  scroll-snap-align: start;
+}
+
+.dashboard-table {
+  width: 100%;
+}
+
+.trend {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.trend-col {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 46px;
+}
+
+.trend-bars {
+  height: 60px;
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+}
+
+.bar {
+  width: 16px;
+  border-radius: 2px 2px 0 0;
+}
+
+.bar.success {
+  background: var(--el-color-success);
+}
+
+.bar.failed {
+  background: var(--el-color-danger);
+}
+
+.trend-label {
+  font-size: 11px;
+  color: var(--el-text-color-placeholder);
+}
+
+.health-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 8px;
+}
+
+.health-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--el-fill-color-light);
+  font-size: 13px;
+}
+
+.health-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.health-dot.is-good {
+  background: var(--el-color-success);
+}
+
+.health-dot.is-warn {
+  background: var(--el-color-warning);
+}
+
+.health-dot.is-bad {
+  background: var(--el-color-danger);
+}
+
+.health-dot.is-paused,
+.health-dot.is-completed {
+  background: var(--el-text-color-placeholder);
+}
+
+.health-label {
+  flex: 1;
+  color: var(--el-text-color-regular);
+}
+
+.health-count {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 900px) {
+  .metric-grid,
+  .dashboard-content {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 560px) {
+  .metric-grid,
+  .dashboard-content {
+    grid-template-columns: 1fr;
+  }
+
+  .metric-item {
+    padding: 10px;
+  }
+
+  .today-scroll-actions {
+    display: none;
+  }
+
+  .today-item {
+    flex-basis: 118px;
+  }
+}

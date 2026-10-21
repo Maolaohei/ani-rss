@@ -3,6 +3,9 @@ package ani.rss.controller;
 import ani.rss.annotation.Auth;
 import ani.rss.commons.ExceptionUtils;
 import ani.rss.download.OpenList;
+import ani.rss.download.openlist.residual.CleanResult;
+import ani.rss.download.openlist.residual.ResidualSnapshot;
+import ani.rss.download.openlist.residual.TempDirResidualSnapshot;
 import ani.rss.entity.Ani;
 import ani.rss.entity.Item;
 import ani.rss.entity.vo.RssJobStatus;
@@ -16,10 +19,10 @@ import ani.rss.util.other.ItemsUtil;
 import ani.rss.util.other.TorrentUtil;
 import cn.hutool.core.text.StrFormatter;
 import cn.hutool.core.util.StrUtil;
-import cn.hutool.extra.spring.SpringUtil;
 import io.swagger.v3.oas.annotations.Operation;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -34,6 +37,15 @@ import java.util.Set;
 @Slf4j
 @RestController
 public class RssJobController extends BaseController {
+
+    private final OpenList openList;
+    private final DownloadService downloadService;
+
+    @Autowired
+    public RssJobController(OpenList openList, DownloadService downloadService) {
+        this.openList = openList;
+        this.downloadService = downloadService;
+    }
 
     @Auth
     @Operation(summary = "RSS 任务状态")
@@ -85,7 +97,7 @@ public class RssJobController extends BaseController {
     @PostMapping("/rssJobRecheckDownloaded")
     public Result<RssJobStatus> rssJobRecheckDownloaded() {
         // 对记录被误删的已下载集数: 重新检查文件真实存在并补回种子记录, 避免重新下载
-        DownloadService downloadService = SpringUtil.getBean(DownloadService.class);
+        DownloadService downloadService = this.downloadService;
         int checked = 0;
         int downloaded = 0;
         int restored = 0;
@@ -151,7 +163,7 @@ public class RssJobController extends BaseController {
             return result;
         }
         try {
-            OpenList.ResidualSnapshot snap = SpringUtil.getBean(OpenList.class).scanOfflineResiduals(true);
+            ResidualSnapshot snap = openList.scanOfflineResiduals(true);
             Result<RssJobStatus> result = Result.success(RssTask.getJobStatus());
             int total = snap == null ? 0 : snap.getTotalCount();
             int active = snap == null ? 0 : snap.getActiveCount();
@@ -178,7 +190,7 @@ public class RssJobController extends BaseController {
             return result;
         }
         try {
-            OpenList.CleanResult cleaned = SpringUtil.getBean(OpenList.class).cleanOfflineResiduals(true);
+            CleanResult cleaned = openList.cleanOfflineResiduals(true);
             String message = cleaned == null || StrUtil.isBlank(cleaned.getMessage())
                     ? "清理完成"
                     : cleaned.getMessage();
@@ -207,7 +219,7 @@ public class RssJobController extends BaseController {
             return result;
         }
         try {
-            OpenList.RepairResult repair = SpringUtil.getBean(OpenList.class).repairLegacyNestedDirs();
+            OpenList.RepairResult repair = openList.repairLegacyNestedDirs();
             Result<RssJobStatus> result = Result.success(RssTask.getJobStatus());
             result.setMessage(repair == null || StrUtil.isBlank(repair.message()) ? "遗留修复完成" : repair.message());
             return result;
@@ -228,7 +240,7 @@ public class RssJobController extends BaseController {
             return result;
         }
         try {
-            OpenList.TempDirResidualSnapshot snap = SpringUtil.getBean(OpenList.class).scanTempDirResiduals(true);
+            TempDirResidualSnapshot snap = openList.scanTempDirResiduals(true);
             Result<RssJobStatus> result = Result.success(RssTask.getJobStatus());
             int total = snap == null ? 0 : snap.getTotalCount();
             int cleanable = snap == null ? 0 : snap.getCleanableCount();
@@ -254,7 +266,7 @@ public class RssJobController extends BaseController {
             return result;
         }
         try {
-            OpenList.CleanResult cleaned = SpringUtil.getBean(OpenList.class).cleanTempDirResiduals();
+            CleanResult cleaned = openList.cleanTempDirResiduals();
             String message = cleaned == null || StrUtil.isBlank(cleaned.getMessage())
                     ? "临时目录清理完成"
                     : cleaned.getMessage();

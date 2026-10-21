@@ -441,12 +441,9 @@ class RssJobControlTest {
         List<RssJobItem> tasks = invokeBuildTaskItems(
                 false, false, "idle", "", "空闲", null,
                 0L, 0L, null,
-                false, null,
-                null, null, null, null,
-                true, 0, 0, 0,
-                System.currentTimeMillis(), false,
-                "无离线残留", List.of(),
-                null, null, null, null,
+                offlineView(false, null, null, null, null, null),
+                residualView(true, 0, 0, 0, System.currentTimeMillis(), false, "无离线残留", List.of(),
+                        null, null, null, null),
                 0L, 0L, "", "", null, null
         );
         assertTrue(tasks.stream().noneMatch(t -> "residual-summary".equals(t.getId())),
@@ -458,12 +455,9 @@ class RssJobControlTest {
         List<RssJobItem> activeOnly = invokeBuildTaskItems(
                 false, false, "idle", "", "空闲", null,
                 0L, 0L, null,
-                false, null,
-                null, null, null, null,
-                true, 1, 0, 1,
-                System.currentTimeMillis(), false,
-                "进行中 1 / 终态 0", List.of("tid=abc"),
-                null, null, null, null,
+                offlineView(false, null, null, null, null, null),
+                residualView(true, 1, 0, 1, System.currentTimeMillis(), false, "进行中 1 / 终态 0",
+                        List.of("tid=abc"), null, null, null, null),
                 0L, 0L, "", "", null, null
         );
         assertTrue(activeOnly.stream().anyMatch(t -> "residual-summary".equals(t.getId())
@@ -472,12 +466,9 @@ class RssJobControlTest {
         List<RssJobItem> terminalOnly = invokeBuildTaskItems(
                 false, false, "idle", "", "空闲", null,
                 0L, 0L, null,
-                false, null,
-                null, null, null, null,
-                true, 0, 2, 2,
-                System.currentTimeMillis(), false,
-                "进行中 0 / 终态 2", List.of(),
-                null, null, null, null,
+                offlineView(false, null, null, null, null, null),
+                residualView(true, 0, 2, 2, System.currentTimeMillis(), false, "进行中 0 / 终态 2",
+                        List.of(), null, null, null, null),
                 0L, 0L, "", "", null, null
         );
         assertTrue(terminalOnly.stream().anyMatch(t -> "residual-summary".equals(t.getId())
@@ -489,12 +480,9 @@ class RssJobControlTest {
         List<RssJobItem> cleaning = invokeBuildTaskItems(
                 false, false, "idle", "", "空闲", null,
                 0L, 0L, null,
-                false, null,
-                null, null, null, null,
-                true, 0, 0, 0,
-                System.currentTimeMillis(), true,
-                "清理中", List.of(),
-                null, null, null, null,
+                offlineView(false, null, null, null, null, null),
+                residualView(true, 0, 0, 0, System.currentTimeMillis(), true, "清理中", List.of(),
+                        null, null, null, null),
                 0L, 0L, "", "", null, null
         );
         assertTrue(cleaning.stream().anyMatch(t -> "residual-summary".equals(t.getId())
@@ -503,15 +491,26 @@ class RssJobControlTest {
         List<RssJobItem> error = invokeBuildTaskItems(
                 false, false, "idle", "", "空闲", null,
                 0L, 0L, null,
-                false, null,
-                null, null, null, null,
-                true, 0, 0, 0,
-                System.currentTimeMillis(), false,
-                "OpenList 残留快照不可用", List.of(),
-                null, null, null, null,
+                offlineView(false, null, null, null, null, null),
+                residualView(true, 0, 0, 0, System.currentTimeMillis(), false,
+                        "OpenList 残留快照不可用", List.of(), null, null, null, null),
                 0L, 0L, "", "", null, null
         );
         assertTrue(error.stream().anyMatch(t -> "residual-summary".equals(t.getId())));
+    }
+
+    private static RssTask.OfflineRuntimeView offlineView(
+            boolean busy, String currentHash, String title, Integer progress, String state, Long etaMs) {
+        return new RssTask.OfflineRuntimeView(currentHash, title, progress, state, null, etaMs, busy);
+    }
+
+    private static RssTask.ResidualRuntimeView residualView(
+            boolean supported, Integer active, Integer terminal, Integer total, Long scannedAt,
+            Boolean cleaning, String message, List<String> samples,
+            Integer tempDirTotal, Integer tempDirCleanable, Boolean tempDirCleaning, String tempDirMessage) {
+        return new RssTask.ResidualRuntimeView(supported, active, terminal, total, scannedAt, cleaning,
+                message, samples, null, tempDirTotal, tempDirCleanable, null, null, null, tempDirCleaning,
+                tempDirMessage, null);
     }
 
     @SuppressWarnings("unchecked")
@@ -525,24 +524,8 @@ class RssJobControlTest {
             long startedAt,
             long elapsed,
             Object pending,
-            boolean openListBusy,
-            String currentHash,
-            String offlineTitle,
-            Integer offlineProgress,
-            String offlineState,
-            Long offlineEtaMs,
-            boolean residualSupported,
-            Integer residualActive,
-            Integer residualTerminal,
-            Integer residualTotal,
-            Long residualScannedAt,
-            Boolean residualCleaning,
-            String residualMessage,
-            List<String> residualSamples,
-            Integer tempDirTotal,
-            Integer tempDirCleanable,
-            Boolean tempDirCleaning,
-            String tempDirMessage,
+            Object offline,
+            Object residual,
             long finishedAt,
             long lastDuration,
             String lastMsg,
@@ -552,7 +535,7 @@ class RssJobControlTest {
     ) throws Exception {
         Method m = null;
         for (Method method : RssTask.class.getDeclaredMethods()) {
-            if ("buildTaskItems".equals(method.getName()) && method.getParameterCount() == 33) {
+            if ("buildTaskItems".equals(method.getName())) {
                 m = method;
                 break;
             }
@@ -562,11 +545,7 @@ class RssJobControlTest {
         Object result = m.invoke(null,
                 running, canceling, scope, title, message, source,
                 startedAt, elapsed, pending,
-                openListBusy, currentHash,
-                offlineTitle, offlineProgress, offlineState, offlineEtaMs,
-                residualSupported, residualActive, residualTerminal, residualTotal,
-                residualScannedAt, residualCleaning, residualMessage, residualSamples,
-                tempDirTotal, tempDirCleanable, tempDirCleaning, tempDirMessage,
+                offline, residual,
                 finishedAt, lastDuration, lastMsg, lastJobTitle, lastJobSource, lastJobScope
         );
         return (List<RssJobItem>) result;

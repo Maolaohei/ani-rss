@@ -3,10 +3,18 @@ package ani.rss.task;
 import ani.rss.commons.ExceptionUtils;
 import ani.rss.download.OpenList;
 import ani.rss.download.OpenListApi;
+import ani.rss.download.openlist.runtime.OpenListCancellationSignal;
+import ani.rss.download.openlist.runtime.OpenListRuntimeView;
+import ani.rss.download.openlist.runtime.OpenListRuntimeViewProvider;
+import ani.rss.download.openlist.residual.ResidualItem;
+import ani.rss.download.openlist.residual.ResidualSnapshot;
+import ani.rss.download.openlist.residual.TempDirResidualItem;
+import ani.rss.download.openlist.residual.TempDirResidualSnapshot;
 import ani.rss.entity.Ani;
 import ani.rss.entity.Config;
 import ani.rss.entity.TorrentsInfo;
 import ani.rss.entity.vo.RssJobItem;
+import ani.rss.entity.vo.ResidualPreviewItem;
 import ani.rss.entity.vo.RssJobStatus;
 import ani.rss.enums.EventTypeEnum;
 import ani.rss.enums.TorrentsTags;
@@ -24,7 +32,6 @@ import cn.hutool.core.thread.NamedThreadFactory;
 import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.core.util.ObjectUtil;
 import cn.hutool.core.util.StrUtil;
-import cn.hutool.extra.spring.SpringUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -49,7 +56,7 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 @Slf4j
 @Component
-public class RssTask implements BaseTask {
+public class RssTask implements BaseTask, OpenListCancellationSignal {
     /**
      * ===== RSS 任务状态机（显式状态对象）=====
      * 生命周期/当前轮/上一轮状态与轮次生命周期方法收拢于此。
@@ -380,7 +387,8 @@ public class RssTask implements BaseTask {
      * 下载目录 + 每个子目录各一次 {@code fs/list}。取 4 作为经验估算（1 个根目录 + 约 3 个子目录）。
      * 这只是"给足"的参考量，真正决定上限的是周期负担（见 {@link #resolveAffordableListingsPerRound}）。
      */
-    static final int LISTINGS_PER_SUBSCRIPTION_ESTIMATE = 4;
+    static final int LISTINGS_PER_SUBSCRIPTION_ESTIMATE =
+            RssSchedulerPolicy.LISTINGS_PER_SUBSCRIPTION_ESTIMATE;
 
     /**
      * 单轮网盘 API 预算（F7-5）。
@@ -400,14 +408,7 @@ public class RssTask implements BaseTask {
      * <b>计算出的默认值不受它约束</b>，否则上面的"给足"会被 200 重新压回去，修复等于没做。
      */
     static int resolveApiBudgetPerRound(Config config, int enabledCount) {
-        int subscriptions = Math.max(1, enabledCount);
-        Integer configured = config == null ? null : config.getOpenListApiBudgetPerRound();
-        if (configured != null) {
-            return Math.max(1, Math.min(configured, OpenListApi.MAX_API_BUDGET_PER_ROUND));
-        }
-        int estimate = subscriptions * LISTINGS_PER_SUBSCRIPTION_ESTIMATE;
-        int affordable = resolveAffordableListingsPerRound(config);
-        return Math.max(subscriptions, Math.min(estimate, affordable));
+        return RssSchedulerPolicy.apiBudgetPerRound(config, enabledCount);
     }
 
     /**
@@ -419,12 +420,7 @@ public class RssTask implements BaseTask {
      * 保证与限流器的判断一致、两处默认值不会各自漂移。
      */
     static int resolveAffordableListingsPerRound(Config config) {
-        int perSecond = OpenListApi.effectiveApiPerSecond(config);
-        int sleepMinutes = config == null || config.getRssSleepMinutes() == null
-                ? DEFAULT_RSS_SLEEP_MINUTES
-                : Math.max(1, config.getRssSleepMinutes());
-        long affordable = (long) (perSecond * TimeUnit.MINUTES.toSeconds(sleepMinutes) / 4.0);
-        return (int) Math.max(1L, Math.min(affordable, Integer.MAX_VALUE));
+        return RssSchedulerPolicy.affordableListingsPerRound(config);
     }
 
     /**
@@ -614,6 +610,15 @@ public class RssTask implements BaseTask {
     }
 
     /**
+     * 把轻量配置策略从调度主类中剥离的入口。
+     * <p>
+     * 当前仍委托原实现，后续阶段可逐项迁入独立策略对象而不改变调用面。
+     */
+    static int apiBudgetPerRound(Config config, int subscriptionCount) {
+        return RssSchedulerPolicy.apiBudgetPerRound(config, subscriptionCount);
+    }
+
+    /**
      * 评估当前是否处于静默窗口（F4-1 ~ F4-4、F4-8）。
      * <p>
      * 三条件全部满足才算静默：无在跑轮次、离线 pending 已清空、下载器里没有未完成任务
@@ -672,7 +677,7 @@ public class RssTask implements BaseTask {
     private static Set<String> resolveAniIds(Set<String> torrentNames) {
         Set<String> ids = new LinkedHashSet<>();
         try {
-            DownloadService downloadService = SpringUtil.getBean(DownloadService.class);
+            RssDownloadPort downloadService = downloadPort();
             List<TorrentsInfo> torrentsInfos = TorrentUtil.getTorrentsInfos();
             for (TorrentsInfo ti : torrentsInfos) {
                 if (ti == null || !torrentNames.contains(StrUtil.blankToDefault(ti.getName(), ""))) {
@@ -873,8 +878,8 @@ public class RssTask implements BaseTask {
 
         ExecutorService pool = null;
         try {
-            // getBean 放入 try：bean 获取失败也要走 finally 释放全局锁，避免幽灵锁
-            DownloadService downloadService = SpringUtil.getBean(DownloadService.class);
+            // 取端口放入 try：端口不可用时也要走 finally 释放全局锁，避免幽灵锁
+            RssDownloadPort downloadService = downloadPort();
 
             if (!TorrentUtil.login()) {
                 RssJobState.jobMessage.set("下载器登录失败");
@@ -1584,36 +1589,12 @@ public class RssTask implements BaseTask {
         }
 
         long elapsed = (running && startedAt > 0) ? Math.max(0L, System.currentTimeMillis() - startedAt) : 0L;
-        String currentHash = null;
-        String offlineTitle = null;
-        Integer offlineProgress = null;
-        String offlineState = null;
-        Long offlineDeadlineMs = null;
-        Long offlineEtaMs = null;
-        if (isOpenListTool()) {
-            try {
-                OpenList openList = SpringUtil.getBean(OpenList.class);
-                currentHash = openList.getCurrentInfoHash();
-                OpenList.OfflineWaitSnapshot wait = openList.getOfflineWaitSnapshot();
-                if (wait != null) {
-                    offlineTitle = wait.getTitle();
-                    offlineProgress = wait.getProgress();
-                    offlineState = wait.getState();
-                    offlineDeadlineMs = wait.getDeadlineMs();
-                    if (offlineDeadlineMs != null && offlineDeadlineMs > 0) {
-                        offlineEtaMs = Math.max(0L, offlineDeadlineMs - System.currentTimeMillis());
-                    }
-                }
-            } catch (Exception ignored) {
-                // OpenList bean 暂不可用
-            }
-        }
-        boolean openListBusy = StrUtil.isNotBlank(currentHash);
+        OfflineRuntimeView offlineView = readOfflineRuntimeView();
         // 兜底文案：旁路直接 downloadAni 时，RSS 锁空闲但 OpenList 仍在跑
-        if (!running && openListBusy && pending == null) {
+        if (!running && offlineView.busy() && pending == null) {
             message = "OpenList 离线处理中";
-            if (offlineProgress != null) {
-                message = "OpenList 离线处理中 " + offlineProgress + "%";
+            if (offlineView.progress() != null) {
+                message = "OpenList 离线处理中 " + offlineView.progress() + "%";
             }
         }
         int failedQueueCount = 0;
@@ -1621,151 +1602,77 @@ public class RssTask implements BaseTask {
             failedQueueCount = FailedDownloadQueue.list().size();
         } catch (Exception ignored) {
         }
-        boolean residualSupported = isOpenListTool();
-        Integer residualActive = null;
-        Integer residualTerminal = null;
-        Integer residualTotal = null;
-        Long residualScannedAt = null;
-        Boolean residualCleaning = null;
-        String residualMessage = null;
-        java.util.List<String> residualSamples = null;
-        java.util.List<ani.rss.entity.vo.ResidualPreviewItem> residualItems = null;
-        Integer tempDirTotal = null;
-        Integer tempDirCleanable = null;
-        Integer tempDirProtected = null;
-        Integer tempDirKeep = null;
-        Long tempDirScannedAt = null;
-        Boolean tempDirCleaning = null;
-        String tempDirMessage = null;
-        java.util.List<ani.rss.entity.vo.ResidualPreviewItem> tempDirItems = null;
-        if (residualSupported) {
-            try {
-                OpenList openListBean = SpringUtil.getBean(OpenList.class);
-                OpenList.ResidualSnapshot snap = openListBean.getResidualSnapshot();
-                if (snap != null) {
-                    residualActive = snap.getActiveCount();
-                    residualTerminal = snap.getTerminalCount();
-                    residualTotal = snap.getTotalCount();
-                    residualScannedAt = snap.getScannedAt();
-                    residualCleaning = snap.getCleaning();
-                    residualMessage = snap.getMessage();
-                    residualSamples = snap.getSamples();
-                    residualItems = toResidualPreviewItems(snap.getItems());
-                }
-                OpenList.TempDirResidualSnapshot tempSnap = openListBean.getTempDirResidualSnapshot();
-                if (tempSnap != null) {
-                    tempDirTotal = tempSnap.getTotalCount();
-                    tempDirCleanable = tempSnap.getCleanableCount();
-                    tempDirProtected = tempSnap.getProtectedCount();
-                    tempDirKeep = tempSnap.getKeepCount();
-                    tempDirScannedAt = tempSnap.getScannedAt();
-                    tempDirCleaning = tempSnap.getCleaning();
-                    tempDirMessage = tempSnap.getMessage();
-                    tempDirItems = toTempDirPreviewItems(tempSnap.getItems());
-                }
-            } catch (Exception ignored) {
-                residualMessage = "OpenList 残留快照不可用";
-            }
-        }
+        ResidualRuntimeView residualView = readResidualRuntimeView();
 
         List<RssJobItem> tasks = buildTaskItems(
-                running,
-                canceling,
-                scope,
-                title,
-                message,
-                source,
-                startedAt,
-                elapsed,
-                pending,
-                openListBusy,
-                currentHash,
-                offlineTitle,
-                offlineProgress,
-                offlineState,
-                offlineEtaMs,
-                residualSupported,
-                residualActive,
-                residualTerminal,
-                residualTotal,
-                residualScannedAt,
-                residualCleaning,
-                residualMessage,
-                residualSamples,
-                tempDirTotal,
-                tempDirCleanable,
-                tempDirCleaning,
-                tempDirMessage,
-                finishedAt,
-                lastDuration,
-                lastMsg,
-                lastJobTitle,
-                lastJobSource,
-                lastJobScope
-        );
-        boolean canCancel = tasks.stream().anyMatch(t -> Boolean.TRUE.equals(t.getCancellable()));
-
-        return new RssJobStatus()
-                .setRunning(running)
-                .setCancelRequested(canceling)
-                .setCanCancel(canCancel)
-                .setScope(scope)
-                .setTitle(title)
-                .setAniId(aniId)
-                .setStartedAt(startedAt > 0 ? startedAt : null)
-                .setElapsedMs(elapsed)
-                .setSubscriptionTotal(total)
-                .setSubscriptionActive(active)
-                .setSubscriptionCompleted(completed)
-                .setSubscriptionFailed(failed)
-                .setCurrentBatch(totalBatch > 1 ? currentBatch : null)
-                .setTotalBatch(totalBatch > 0 ? totalBatch : null)
-                .setNextBatchAt(nextBatchAt > 0L ? nextBatchAt : null)
-                .setQuiescentForced(running ? quiescentForced : null)
-                .setQuiescentSkipped(running && quiescentSkipped > 0 ? quiescentSkipped : null)
-                .setRoundLocalState(running ? getRoundLocalStateSummary() : null)
-                // 存疑成因：只说"有 N 条无法确认"用户不知道该做什么，分开计数才有行动价值
-                .setUnknownReasons(running ? getRoundUnknownReasonSummary() : null)
-                // 失败明细：让用户直接看到"是哪几个订阅、失败在哪一步、怎么办"
-                .setFailedSubscriptions(List.copyOf(RssJobState.failedSubscriptions))
-                .setLastFinishedAt(finishedAt > 0 ? finishedAt : null)
-                .setLastDurationMs(finishedAt > 0 ? lastDuration : null)
-                .setLastResultMessage(StrUtil.blankToDefault(lastMsg, null))
-                .setLastTitle(StrUtil.blankToDefault(lastJobTitle, null))
-                .setLastSource(lastJobSource)
-                .setLastScope(lastJobScope)
-                .setMessage(message)
-                .setCurrentHash(currentHash)
-                .setOfflineTitle(offlineTitle)
-                .setOfflineProgress(offlineProgress)
-                .setOfflineState(offlineState)
-                .setOfflineDeadlineMs(offlineDeadlineMs)
-                .setOfflineEtaMs(offlineEtaMs)
-                .setFailedQueueCount(failedQueueCount)
-                .setOpenListBusy(openListBusy)
-                .setSource(source == null ? null : source.name().toLowerCase())
-                .setPending(pending != null)
-                .setPendingTitle(pending == null ? null : pending.title)
-                .setPendingScope(pending == null ? null : pending.scope)
-                .setResidualSupported(residualSupported)
-                .setResidualActiveCount(residualActive)
-                .setResidualTerminalCount(residualTerminal)
-                .setResidualTotalCount(residualTotal)
-                .setResidualScannedAt(residualScannedAt)
-                .setResidualCleaning(residualCleaning)
-                .setResidualMessage(residualMessage)
-                .setResidualSamples(residualSamples)
-                .setResidualItems(residualItems)
-                .setTempDirResidualTotalCount(tempDirTotal)
-                .setTempDirResidualCleanableCount(tempDirCleanable)
-                .setTempDirResidualProtectedCount(tempDirProtected)
-                .setTempDirResidualKeepCount(tempDirKeep)
-                .setTempDirResidualScannedAt(tempDirScannedAt)
-                .setTempDirResidualCleaning(tempDirCleaning)
-                .setTempDirResidualMessage(tempDirMessage)
-                .setTempDirResidualItems(tempDirItems)
-                .setTasks(tasks);
+                running, canceling, scope, title, message, source, startedAt, elapsed, pending,
+                offlineView, residualView,
+                finishedAt, lastDuration, lastMsg, lastJobTitle, lastJobSource, lastJobScope);
+        return new RssJobStatusProjection(
+                running, canceling, startedAt, scope, title, aniId, message, pending,
+                source == null ? null : source.name().toLowerCase(),
+                total, active, completed, failed, currentBatch, totalBatch, nextBatchAt,
+                quiescentForced, quiescentSkipped, finishedAt, lastDuration,
+                StrUtil.blankToDefault(lastMsg, null),
+                StrUtil.blankToDefault(lastJobTitle, null),
+                lastJobSource, lastJobScope, elapsed, offlineView.currentHash(), offlineView.title(),
+                offlineView.progress(), offlineView.state(), offlineView.deadlineMs(), offlineView.etaMs(),
+                offlineView.busy(), failedQueueCount, residualView.supported(),
+                residualView.active(), residualView.terminal(), residualView.total(), residualView.scannedAt(),
+                residualView.cleaning(), residualView.message(), residualView.samples(),
+                residualView.tempDirTotal(), residualView.tempDirCleanable(), residualView.tempDirCleaning(),
+                residualView.tempDirMessage(),
+                tasks,
+                running ? getRoundLocalStateSummary() : null,
+                running ? getRoundUnknownReasonSummary() : null,
+                List.copyOf(RssJobState.failedSubscriptions),
+                residualView.items(), residualView.tempDirItems(),
+                residualView.tempDirProtected(), residualView.tempDirKeep(), residualView.tempDirScannedAt()
+        ).toStatus();
     }
+
+    /**
+     * OpenList 离线运行的只读视图：RSS 锁空闲但 OpenList 仍在跑时，
+     * 任务管理器仍要能展示进度，因此这里把运行态读取收敛成一次快照。
+     */
+    record OfflineRuntimeView(
+            String currentHash,
+            String title,
+            Integer progress,
+            String state,
+            Long deadlineMs,
+            Long etaMs,
+            boolean busy) {
+        static final OfflineRuntimeView EMPTY =
+                new OfflineRuntimeView(null, null, null, null, null, null, false);
+    }
+
+    /**
+     * OpenList 残留（离线残留 + 临时目录残留）的只读视图。
+     */
+    record ResidualRuntimeView(
+            boolean supported,
+            Integer active,
+            Integer terminal,
+            Integer total,
+            Long scannedAt,
+            Boolean cleaning,
+            String message,
+            List<String> samples,
+            List<ResidualPreviewItem> items,
+            Integer tempDirTotal,
+            Integer tempDirCleanable,
+            Integer tempDirProtected,
+            Integer tempDirKeep,
+            Long tempDirScannedAt,
+            Boolean tempDirCleaning,
+            String tempDirMessage,
+            List<ResidualPreviewItem> tempDirItems) {
+        static final ResidualRuntimeView EMPTY = new ResidualRuntimeView(
+                false, null, null, null, null, null, null, null, null,
+                null, null, null, null, null, null, null, null);
+    }
+
     private static List<RssJobItem> buildTaskItems(
             boolean running,
             boolean canceling,
@@ -1776,24 +1683,8 @@ public class RssTask implements BaseTask {
             long startedAt,
             long elapsed,
             PendingManual pending,
-            boolean openListBusy,
-            String currentHash,
-            String offlineTitle,
-            Integer offlineProgress,
-            String offlineState,
-            Long offlineEtaMs,
-            boolean residualSupported,
-            Integer residualActive,
-            Integer residualTerminal,
-            Integer residualTotal,
-            Long residualScannedAt,
-            Boolean residualCleaning,
-            String residualMessage,
-            List<String> residualSamples,
-            Integer tempDirTotal,
-            Integer tempDirCleanable,
-            Boolean tempDirCleaning,
-            String tempDirMessage,
+            OfflineRuntimeView offline,
+            ResidualRuntimeView residual,
             long finishedAt,
             long lastDuration,
             String lastMsg,
@@ -1813,14 +1704,14 @@ public class RssTask implements BaseTask {
                     .setSource(source == null ? null : source.name().toLowerCase())
                     .setScope(scope)
                     // 便于单条观察：RSS 运行中若正占用 OpenList，一并带上 hash
-                    .setHash(openListBusy ? currentHash : null)
+                    .setHash(offline.busy() ? offline.currentHash() : null)
                     .setStartedAt(startedAt > 0 ? startedAt : null)
                     .setElapsedMs(elapsed)
                     .setProcessedAt(null)
                     .setDurationMs(null)
                     .setCancellable(true)
-                    .setProgress(openListBusy ? offlineProgress : null)
-                    .setEtaMs(openListBusy ? offlineEtaMs : null));
+                    .setProgress(offline.busy() ? offline.progress() : null)
+                    .setEtaMs(offline.busy() ? offline.etaMs() : null));
         }
 
         if (pending != null) {
@@ -1840,56 +1731,56 @@ public class RssTask implements BaseTask {
                     .setCancellable(true));
         }
 
-        if (openListBusy) {
+        if (offline.busy()) {
             StringBuilder offlineMsg = new StringBuilder();
-            if (StrUtil.isNotBlank(offlineTitle)) {
-                offlineMsg.append(offlineTitle);
+            if (StrUtil.isNotBlank(offline.title())) {
+                offlineMsg.append(offline.title());
             } else {
                 offlineMsg.append(running ? "当前 RSS 关联的离线下载进行中" : "OpenList 离线处理中");
             }
-            if (StrUtil.isNotBlank(offlineState)) {
-                offlineMsg.append(" · ").append(offlineState);
+            if (StrUtil.isNotBlank(offline.state())) {
+                offlineMsg.append(" · ").append(offline.state());
             }
-            if (offlineProgress != null) {
-                offlineMsg.append(" · ").append(offlineProgress).append('%');
+            if (offline.progress() != null) {
+                offlineMsg.append(" · ").append(offline.progress()).append('%');
             }
-            if (offlineEtaMs != null) {
-                long min = Math.max(0L, offlineEtaMs / 60_000L);
+            if (offline.etaMs() != null) {
+                long min = Math.max(0L, offline.etaMs() / 60_000L);
                 offlineMsg.append(" · 剩余约 ").append(min).append(" 分钟");
             }
             tasks.add(new RssJobItem()
                     .setId("openlist-current")
                     .setKind("openlist_current")
                     .setStatus("busy")
-                    .setTitle(StrUtil.blankToDefault(offlineTitle, "OpenList 离线任务"))
+                    .setTitle(StrUtil.blankToDefault(offline.title(), "OpenList 离线任务"))
                     .setMessage(offlineMsg.toString())
                     .setSource("openlist")
                     .setScope("offline")
-                    .setHash(currentHash)
+                    .setHash(offline.currentHash())
                     .setStartedAt(running && startedAt > 0 ? startedAt : null)
                     .setElapsedMs(running ? elapsed : null)
                     .setProcessedAt(null)
                     .setDurationMs(null)
                     .setCancellable(true)
-                    .setProgress(offlineProgress)
-                    .setEtaMs(offlineEtaMs));
+                    .setProgress(offline.progress())
+                    .setEtaMs(offline.etaMs()));
         }
 
-        if (residualSupported) {
-            int active = residualActive == null ? 0 : residualActive;
-            int terminal = residualTerminal == null ? 0 : residualTerminal;
-            int total = residualTotal == null ? (active + terminal) : residualTotal;
-            boolean cleaning = Boolean.TRUE.equals(residualCleaning);
+        if (residual.supported()) {
+            int active = residual.active() == null ? 0 : residual.active();
+            int terminal = residual.terminal() == null ? 0 : residual.terminal();
+            int total = residual.total() == null ? (active + terminal) : residual.total();
+            boolean cleaning = Boolean.TRUE.equals(residual.cleaning());
             // 空闲且无残留时不占任务列表；仅有残留/清理中/扫描异常才展示
-            boolean hasResidualError = StrUtil.isNotBlank(residualMessage)
-                    && !residualMessage.contains("无离线残留")
+            boolean hasResidualError = StrUtil.isNotBlank(residual.message())
+                    && !residual.message().contains("无离线残留")
                     && total == 0
                     && !cleaning;
             if (total > 0 || cleaning || hasResidualError) {
-                String sampleText = (residualSamples == null || residualSamples.isEmpty())
+                String sampleText = (residual.samples() == null || residual.samples().isEmpty())
                         ? ""
-                        : ("；样例: " + String.join(" | ", residualSamples));
-                String residualMsg = StrUtil.blankToDefault(residualMessage,
+                        : ("；样例: " + String.join(" | ", residual.samples()));
+                String residualMsg = StrUtil.blankToDefault(residual.message(),
                         "进行中 " + active + " / 终态 " + terminal);
                 // 仅进行中/清理中视为 busy；纯终态残留不伪装成待执行，避免前端误高频轮询
                 String residualStatus = cleaning || active > 0 ? "busy" : "idle";
@@ -1904,20 +1795,20 @@ public class RssTask implements BaseTask {
                         .setHash(null)
                         .setStartedAt(null)
                         .setElapsedMs(null)
-                        .setProcessedAt(residualScannedAt)
+                        .setProcessedAt(residual.scannedAt())
                         .setDurationMs(null)
                         .setCancellable(false));
             }
 
-            int tdTotal = tempDirTotal == null ? 0 : tempDirTotal;
-            int tdCleanable = tempDirCleanable == null ? 0 : tempDirCleanable;
-            boolean tdCleaning = Boolean.TRUE.equals(tempDirCleaning);
-            boolean hasTempDirError = StrUtil.isNotBlank(tempDirMessage)
-                    && !tempDirMessage.contains("无临时目录残留")
+            int tdTotal = residual.tempDirTotal() == null ? 0 : residual.tempDirTotal();
+            int tdCleanable = residual.tempDirCleanable() == null ? 0 : residual.tempDirCleanable();
+            boolean tdCleaning = Boolean.TRUE.equals(residual.tempDirCleaning());
+            boolean hasTempDirError = StrUtil.isNotBlank(residual.tempDirMessage())
+                    && !residual.tempDirMessage().contains("无临时目录残留")
                     && tdTotal == 0
                     && !tdCleaning;
             if (tdTotal > 0 || tdCleaning || hasTempDirError) {
-                String tdMsg = StrUtil.blankToDefault(tempDirMessage,
+                String tdMsg = StrUtil.blankToDefault(residual.tempDirMessage(),
                         "可清理 " + tdCleanable + " / 合计 " + tdTotal);
                 tasks.add(new RssJobItem()
                         .setId("tempdir-residual-summary")
@@ -1964,6 +1855,96 @@ public class RssTask implements BaseTask {
         return tasks;
     }
 
+    /**
+     * 读取 OpenList 离线运行视图；未走 OpenList 或 bean 暂不可用时返回空视图（不抛异常）。
+     */
+    private static OfflineRuntimeView readOfflineRuntimeView() {
+        if (!isOpenListTool()) {
+            return OfflineRuntimeView.EMPTY;
+        }
+        String currentHash = null;
+        String offlineTitle = null;
+        Integer offlineProgress = null;
+        String offlineState = null;
+        Long offlineDeadlineMs = null;
+        Long offlineEtaMs = null;
+        try {
+            currentHash = openListRuntimeView().currentInfoHash();
+            OpenList.OfflineWaitSnapshot wait =
+                    (OpenList.OfflineWaitSnapshot) openListRuntimeView().offlineWaitSnapshot();
+            if (wait != null) {
+                offlineTitle = wait.getTitle();
+                offlineProgress = wait.getProgress();
+                offlineState = wait.getState();
+                offlineDeadlineMs = wait.getDeadlineMs();
+                if (offlineDeadlineMs != null && offlineDeadlineMs > 0) {
+                    offlineEtaMs = Math.max(0L, offlineDeadlineMs - System.currentTimeMillis());
+                }
+            }
+        } catch (Exception ignored) {
+            // OpenList bean 暂不可用
+        }
+        return new OfflineRuntimeView(currentHash, offlineTitle, offlineProgress, offlineState,
+                offlineDeadlineMs, offlineEtaMs, StrUtil.isNotBlank(currentHash));
+    }
+
+    /**
+     * 读取 OpenList 残留视图；未走 OpenList 或读取失败时保留“快照不可用”文案，不抛异常。
+     */
+    private static ResidualRuntimeView readResidualRuntimeView() {
+        boolean supported = isOpenListTool();
+        Integer residualActive = null;
+        Integer residualTerminal = null;
+        Integer residualTotal = null;
+        Long residualScannedAt = null;
+        Boolean residualCleaning = null;
+        String residualMessage = null;
+        List<String> residualSamples = null;
+        List<ResidualPreviewItem> residualItems = null;
+        Integer tempDirTotal = null;
+        Integer tempDirCleanable = null;
+        Integer tempDirProtected = null;
+        Integer tempDirKeep = null;
+        Long tempDirScannedAt = null;
+        Boolean tempDirCleaning = null;
+        String tempDirMessage = null;
+        List<ResidualPreviewItem> tempDirItems = null;
+        if (supported) {
+            try {
+                ResidualSnapshot snap =
+                        (ResidualSnapshot) openListRuntimeView().residualSnapshot();
+                if (snap != null) {
+                    residualActive = snap.getActiveCount();
+                    residualTerminal = snap.getTerminalCount();
+                    residualTotal = snap.getTotalCount();
+                    residualScannedAt = snap.getScannedAt();
+                    residualCleaning = snap.getCleaning();
+                    residualMessage = snap.getMessage();
+                    residualSamples = snap.getSamples();
+                    residualItems = toResidualPreviewItems(snap.getItems());
+                }
+                TempDirResidualSnapshot tempSnap =
+                        (TempDirResidualSnapshot) openListRuntimeView().tempDirResidualSnapshot();
+                if (tempSnap != null) {
+                    tempDirTotal = tempSnap.getTotalCount();
+                    tempDirCleanable = tempSnap.getCleanableCount();
+                    tempDirProtected = tempSnap.getProtectedCount();
+                    tempDirKeep = tempSnap.getKeepCount();
+                    tempDirScannedAt = tempSnap.getScannedAt();
+                    tempDirCleaning = tempSnap.getCleaning();
+                    tempDirMessage = tempSnap.getMessage();
+                    tempDirItems = toTempDirPreviewItems(tempSnap.getItems());
+                }
+            } catch (Exception ignored) {
+                residualMessage = "OpenList 残留快照不可用";
+            }
+        }
+        return new ResidualRuntimeView(supported, residualActive, residualTerminal, residualTotal,
+                residualScannedAt, residualCleaning, residualMessage, residualSamples, residualItems,
+                tempDirTotal, tempDirCleanable, tempDirProtected, tempDirKeep, tempDirScannedAt,
+                tempDirCleaning, tempDirMessage, tempDirItems);
+    }
+
     private static String scopeText(String scope) {
         if ("all".equals(scope)) {
             return "全部启用订阅";
@@ -1980,16 +1961,16 @@ public class RssTask implements BaseTask {
         return "空闲";
     }
 
-    private static List<ani.rss.entity.vo.ResidualPreviewItem> toResidualPreviewItems(List<OpenList.ResidualItem> items) {
+    private static List<ResidualPreviewItem> toResidualPreviewItems(List<ResidualItem> items) {
         if (items == null || items.isEmpty()) {
             return List.of();
         }
-        List<ani.rss.entity.vo.ResidualPreviewItem> out = new ArrayList<>(items.size());
-        for (OpenList.ResidualItem item : items) {
+        List<ResidualPreviewItem> out = new ArrayList<>(items.size());
+        for (ResidualItem item : items) {
             if (item == null) {
                 continue;
             }
-            out.add(new ani.rss.entity.vo.ResidualPreviewItem()
+            out.add(new ResidualPreviewItem()
                     .setId(item.getId())
                     .setName(item.getName())
                     .setState(item.getState())
@@ -2003,16 +1984,16 @@ public class RssTask implements BaseTask {
         return out;
     }
 
-    private static List<ani.rss.entity.vo.ResidualPreviewItem> toTempDirPreviewItems(List<OpenList.TempDirResidualItem> items) {
+    private static List<ResidualPreviewItem> toTempDirPreviewItems(List<TempDirResidualItem> items) {
         if (items == null || items.isEmpty()) {
             return List.of();
         }
-        List<ani.rss.entity.vo.ResidualPreviewItem> out = new ArrayList<>(items.size());
-        for (OpenList.TempDirResidualItem item : items) {
+        List<ResidualPreviewItem> out = new ArrayList<>(items.size());
+        for (TempDirResidualItem item : items) {
             if (item == null) {
                 continue;
             }
-            out.add(new ani.rss.entity.vo.ResidualPreviewItem()
+            out.add(new ResidualPreviewItem()
                     .setId(item.getId())
                     .setName(item.getName())
                     .setState(item.getState())
@@ -2044,7 +2025,7 @@ public class RssTask implements BaseTask {
             if (isOpenListTool()) {
                 String hash = null;
                 try {
-                    hash = SpringUtil.getBean(OpenList.class).getCurrentInfoHash();
+                    hash = openListRuntimeView().currentInfoHash();
                 } catch (Exception ignored) {
                 }
                 if (StrUtil.isNotBlank(hash)) {
@@ -2119,7 +2100,7 @@ public class RssTask implements BaseTask {
             }
             String hash = null;
             try {
-                hash = SpringUtil.getBean(OpenList.class).getCurrentInfoHash();
+                hash = openListRuntimeView().currentInfoHash();
             } catch (Exception ignored) {
             }
             if (StrUtil.isBlank(hash)) {
@@ -2147,7 +2128,7 @@ public class RssTask implements BaseTask {
             return;
         }
         try {
-            SpringUtil.getBean(OpenList.class).cancelCurrentOffline();
+            openListRuntimeView().cancelCurrentOffline();
         } catch (Exception e) {
             log.debug("{} 时清理 OpenList 失败: {}", reason, e.getMessage());
         }
@@ -2184,6 +2165,22 @@ public class RssTask implements BaseTask {
 
     public static boolean isCancelRequested() {
         return RssJobState.cancelRequested.get();
+    }
+
+    /**
+     * OpenList 只依赖这个能力接口判断本轮是否被取消。
+     */
+    @Override
+    public boolean isCancellationRequested() {
+        return RssTask.isCancelRequested();
+    }
+
+    private static OpenListRuntimeView openListRuntimeView() {
+        return OpenListRuntimeViewProvider.get();
+    }
+
+    private static RssDownloadPort downloadPort() {
+        return RssDownloadPortProvider.get();
     }
 
     /** 测试/诊断：当前是否有待执行手动刷新 */

@@ -1,5 +1,7 @@
 package ani.rss.util.other;
 
+import ani.rss.commons.FileUtils;
+import ani.rss.entity.OpenListFileInfo;
 import cn.hutool.core.util.StrUtil;
 
 import java.util.Locale;
@@ -97,6 +99,42 @@ public final class TempDirResidualPolicy {
             return new Decision(Action.KEEP, "临时目录内仍有媒体且未见最终成片，需人工确认");
         }
         return new Decision(Action.KEEP, "无法判断，保留");
+    }
+
+    /**
+     * 临时目录内应保留的文件：视频/字幕，或非垃圾的正文文件。
+     * 仅在 force=false 的谨慎清理路径使用。
+     */
+    public static boolean isProtectedTempFile(OpenListFileInfo f) {
+        if (f == null || Boolean.TRUE.equals(f.getIsDir())) {
+            return false;
+        }
+        String name = f.getName();
+        if (StrUtil.isBlank(name)) {
+            return false;
+        }
+        if (FileUtils.isVideoFormat(name) || FileUtils.isSubtitleFormat(name)) {
+            return true;
+        }
+        return !isJunkTempFile(f);
+    }
+
+    /**
+     * 纯垃圾文件（下载器临时文件、缩略图），可安全删除。
+     */
+    public static boolean isJunkTempFile(OpenListFileInfo f) {
+        if (f == null || Boolean.TRUE.equals(f.getIsDir())) {
+            return false;
+        }
+        String name = StrUtil.blankToDefault(f.getName(), "").toLowerCase(Locale.ROOT);
+        return name.endsWith(".aria2")
+                || name.endsWith(".tmp")
+                || name.endsWith(".temp")
+                || name.endsWith(".!qb")
+                || name.endsWith(".part")
+                || name.endsWith(".bc!")
+                || name.equals("thumbs.db")
+                || name.equals(".ds_store");
     }
 
     public static boolean looksLikeTempEpisodeDir(String dirName, String seasonKey) {

@@ -1,103 +1,16 @@
 <template>
   <div class="task-manager-panel">
     <div class="job-body">
-      <!-- 状态不可用时常驻告警：此前会把“接口失败”显示成“空闲” -->
-      <el-alert
-          v-if="statusError"
-          class="status-error"
-          type="error"
-          :closable="false"
-          show-icon
-          :title="`任务状态获取失败：${statusError}`">
-        <template #default>
-          <div class="status-error-body">
-            <span>{{ staleText }}</span>
-            <el-button size="small" bg text type="primary" :loading="loading" @click="refreshNow">重试</el-button>
-          </div>
-        </template>
-      </el-alert>
-      <div class="job-summary">
-        <div class="job-row">
-          <span class="job-label">总览</span>
-          <el-tag :type="status.running ? 'warning' : 'info'">
-            {{ status.running ? '运行中' : '空闲' }}
-          </el-tag>
-          <el-tag v-if="status.cancelRequested" type="danger" style="margin-left: 8px;">
-            取消中
-          </el-tag>
-          <el-tag v-if="status.pending" type="success" style="margin-left: 8px;">
-            有待执行
-          </el-tag>
-          <el-tag v-if="status.openListBusy" type="warning" style="margin-left: 8px;">
-            OpenList 处理中
-          </el-tag>
-        </div>
-        <div class="job-row">
-          <span class="job-label">消息</span>
-          <span class="job-value">{{ status.message || '-' }}</span>
-        </div>
-        <div v-if="status.running && status.subscriptionTotal > 0" class="job-row">
-          <span class="job-label">订阅进度</span>
-          <span class="job-value progress-summary">
-            已处理 {{ status.subscriptionCompleted }}/{{ status.subscriptionTotal }}
-            <span>运行中 {{ status.subscriptionActive }}</span>
-            <span v-if="status.subscriptionFailed > 0" class="progress-failed">失败 {{ status.subscriptionFailed }}</span>
-            <span v-if="status.totalBatch > 1" class="progress-batch">
-              批次 {{ status.currentBatch || 1 }}/{{ status.totalBatch }}
-              <template v-if="nextBatchCountdownText">· {{ nextBatchCountdownText }}</template>
-            </span>
-          </span>
-        </div>
-        <!-- 静默超时强制开轮：必须明示，否则用户会把"跳过订阅/结果偏差"当成 bug -->
-        <div v-if="status.running && status.quiescentForced" class="job-row">
-          <span class="job-label">静默窗口</span>
-          <span class="job-value">
-            <el-tooltip content="等待后处理（改名/上传/离线归位）收尾超时，本轮为强制开启。结果可信度低于平时，建议查看是否有订阅长期卡在收尾阶段。"
-                        placement="top">
-              <el-tag type="warning" size="small">超时强制开轮</el-tag>
-            </el-tooltip>
-            <span v-if="status.quiescentSkipped > 0" class="progress-batch">
-              · 跳过未收尾订阅 {{ status.quiescentSkipped }}
-            </span>
-          </span>
-        </div>
-        <!-- 本轮本地状态分布：回答"这一轮为什么什么都没下" -->
-        <div v-if="status.running && status.roundLocalState" class="job-row">
-          <span class="job-label">本地状态</span>
-          <span class="job-value progress-summary">
-            <span>已存在 {{ status.roundLocalState.exists }}</span>
-            <span>无法确认 {{ status.roundLocalState.unknown }}</span>
-            <span>已下发 {{ status.roundLocalState.absent }}</span>
-          </span>
-        </div>
-        <!-- 存疑成因：只说"有 N 条无法确认"用户不知道该做什么，分开列才有行动价值 -->
-        <div v-if="status.running && unknownReasonText" class="job-row">
-          <span class="job-label">存疑原因</span>
-          <span class="job-value progress-summary">
-            <el-tooltip placement="top" :show-after="300">
-              <template #content>
-                <div>熔断冷却中：网盘连续失败触发了接口冷却，本轮一个请求都没发，等冷却结束即可自愈</div>
-                <div>列举失败：网盘查询失败（超时 / 连接被重置 / 5xx），确认网盘可用后会自行恢复</div>
-                <div>超预算：本轮网盘 API 预算用尽，可调大「单轮预算」或减少订阅</div>
-                <div>索引不完整：网盘目录文件数超过「列举上限」被截断，可调大该上限</div>
-                <div>等待改名：下载器里已有任务但尚未改名落地，稍后会自行收敛</div>
-                <div>缺席未确认：网盘目录列举自带缓存（可达 1 小时），刚下完可能列不到；约 1 小时后复核确认才会清理记录重下</div>
-              </template>
-              <span class="muted">为什么无法确认？</span>
-            </el-tooltip>
-            <span v-if="status.unknownReasons.cooldown">冷却中 {{ status.unknownReasons.cooldown }}</span>
-            <span v-if="status.unknownReasons.verifyFailed">列举失败 {{ status.unknownReasons.verifyFailed }}</span>
-            <span v-if="status.unknownReasons.budgetExhausted">超预算 {{ status.unknownReasons.budgetExhausted }}</span>
-            <span v-if="status.unknownReasons.indexIncomplete">索引不完整 {{ status.unknownReasons.indexIncomplete }}</span>
-            <span v-if="status.unknownReasons.downloading">等待改名 {{ status.unknownReasons.downloading }}</span>
-            <span v-if="status.unknownReasons.absenceUnconfirmed">缺席未确认 {{ status.unknownReasons.absenceUnconfirmed }}</span>
-          </span>
-        </div>
-        <div class="job-row">
-          <span class="job-label">已处理时间</span>
-          <span>{{ lastProcessedText }}</span>
-        </div>
-      </div>
+      <JobStatusPanel
+          :status="status"
+          :status-error="statusError"
+          :stale-text="staleText"
+          :loading="loading"
+          :last-processed-text="lastProcessedText"
+          :next-batch-countdown-text="nextBatchCountdownText"
+          :unknown-reason-text="unknownReasonText"
+          @refresh="refreshNow"
+      />
 
       <!-- 订阅级失败明细：此前只有一个"失败 N"计数，用户不知道是哪几个订阅、失败在哪一步 -->
       <div v-if="failedSubscriptions.length" class="failed-subscriptions">
@@ -121,107 +34,52 @@
 
       <div class="job-divider"></div>
 
-      <div v-if="taskList.length" class="task-list">
-        <div v-for="item in taskList" :key="item.id" class="task-card">
-          <div class="task-head">
-            <div class="task-title-wrap">
-              <el-tag size="small" :type="statusTagType(item.status)">{{ statusText(item.status) }}</el-tag>
-              <span class="task-title">{{ item.title || kindText(item.kind) }}</span>
-            </div>
-            <el-button
-                type="danger"
-                bg
-                text
-                size="small"
-                :disabled="!item.cancellable || item.status === 'canceling'"
-                :loading="cancelingId === item.id"
-                @click="cancelItem(item)"
-            >
-              取消
-            </el-button>
-          </div>
-          <div class="task-meta">
-            <span>类型：{{ kindText(item.kind) }}</span>
-            <span>来源：{{ sourceText(item.source) }}</span>
-            <span>范围：{{ scopeText(item.scope) }}</span>
-          </div>
-          <div class="task-message">{{ item.message || '-' }}</div>
-          <div v-if="item.progress != null" class="task-progress">
-            <el-progress :percentage="Number(item.progress) || 0" :stroke-width="10"/>
-            <span v-if="item.etaMs != null" class="muted eta">ETA {{ formatDuration(item.etaMs, true) }}</span>
-          </div>
-          <div class="task-grid">
-            <div><span class="muted">已运行</span> {{ formatDuration(item.elapsedMs, item.status === 'running' || item.status === 'busy' || item.status === 'canceling') }}</div>
-            <div><span class="muted">已处理时间</span> {{ formatTime(item.processedAt) }}</div>
-            <div v-if="item.durationMs != null"><span class="muted">耗时</span> {{ formatDuration(item.durationMs, true) }}</div>
-            <div v-if="item.hash" class="mono"><span class="muted">Hash</span> {{ item.hash }}</div>
-          </div>
-        </div>
-      </div>
+      <RssTaskTable
+          v-if="taskList.length"
+          :items="taskList"
+          :canceling-id="cancelingId"
+          :status-tag-type="statusTagType"
+          :status-text="statusText"
+          :kind-text="kindText"
+          :source-text="sourceText"
+          :scope-text="scopeText"
+          @cancel="cancelItem"
+      />
       <el-empty v-else description="当前没有可观察任务" :image-size="80"/>
 
-      <div v-if="Number(status.failedQueueCount || 0) > 0" class="failed-queue">
-        <div class="residual-preview-head">
-          <span class="residual-preview-title">失败队列 {{ status.failedQueueCount }}</span>
-          <div class="failed-queue-actions">
-            <el-button size="small" bg text :loading="failedLoading" @click="loadFailedQueue">加载明细</el-button>
-            <el-button size="small" bg text type="danger" :loading="failedClearing" @click="clearFailedQueue">清空</el-button>
-          </div>
-        </div>
-        <div v-if="!failedItems.length" class="muted">点击刷新加载明细</div>
-        <div v-for="row in failedItems" :key="row.id" class="residual-row">
-          <div class="residual-row-main">
-            <el-tag size="small" type="danger">{{ row.errorCode || 'FAIL' }}</el-tag>
-            <span class="residual-name" :title="row.reName || row.title">{{ row.reName || row.title || row.id }}</span>
-            <el-button size="small" bg text type="primary" :loading="failedActingId === row.id" @click="retryFailed(row)">重试</el-button>
-            <el-button size="small" bg text @click="removeFailed(row)">移除</el-button>
-          </div>
-          <div class="residual-row-meta">
-            <span>{{ row.message || '-' }}</span>
-            <span v-if="row.suggestion">{{ row.suggestion }}</span>
-            <span v-if="row.attempts">×{{ row.attempts }}</span>
-            <span>{{ formatTime(row.failedAt) }}</span>
-          </div>
-        </div>
-      </div>
+      <FailedQueuePanel
+          :visible="Number(status.failedQueueCount || 0) > 0"
+          :count="Number(status.failedQueueCount || 0)"
+          :items="failedItems"
+          :loading="failedLoading"
+          :clearing="failedClearing"
+          :acting-id="failedActingId"
+          @load="loadFailedQueue"
+          @clear="clearFailedQueue"
+          @retry="retryFailed"
+          @remove="removeFailed"
+      />
 
-      <div v-if="residualPreview.length" class="residual-preview">
-        <div class="residual-preview-head">
-          <span class="residual-preview-title">离线残留预览</span>
-          <span class="muted">共 {{ residualCountText }}，展示 {{ residualPreview.length }} 条</span>
-        </div>
-        <div v-for="row in residualPreview" :key="row.id || row.name" class="residual-row">
-          <div class="residual-row-main">
-            <el-tag size="small" :type="residualKindTag(row)">{{ residualKindText(row) }}</el-tag>
-            <el-tag v-if="row.protectedCurrent" size="small" type="success" style="margin-left: 6px;">保护中</el-tag>
-            <span class="residual-name" :title="row.name">{{ row.name || row.id || '-' }}</span>
-          </div>
-          <div class="residual-row-meta">
-            <span>{{ row.state || '-' }}</span>
-            <span v-if="row.progress != null">进度 {{ row.progress }}%</span>
-            <span class="residual-action">{{ row.action || residualDefaultAction(row) }}</span>
-          </div>
-          <div v-if="row.error" class="residual-error">{{ row.error }}</div>
-        </div>
-      </div>
+      <ResidualPanel
+          :visible="residualPreview.length > 0"
+          title="离线残留预览"
+          :summary="residualCountText"
+          :items="residualPreview"
+          :tag-type="residualKindTag"
+          :kind-text="residualKindText"
+          :secondary-text="row => row.state || '-'"
+          :default-action="residualDefaultAction"
+      />
 
-      <div v-if="tempDirPreview.length" class="residual-preview">
-        <div class="residual-preview-head">
-          <span class="residual-preview-title">临时目录残留</span>
-          <span class="muted">共 {{ tempDirCountText }}，展示 {{ tempDirPreview.length }} 条</span>
-        </div>
-        <div v-for="row in tempDirPreview" :key="row.id || row.name" class="residual-row">
-          <div class="residual-row-main">
-            <el-tag size="small" :type="tempDirKindTag(row)">{{ row.state || 'TEMP' }}</el-tag>
-            <el-tag v-if="row.protectedCurrent" size="small" type="success" style="margin-left: 6px;">保护中</el-tag>
-            <span class="residual-name" :title="row.name">{{ row.name || row.id || '-' }}</span>
-          </div>
-          <div class="residual-row-meta">
-            <span class="residual-action">{{ row.action || '-' }}</span>
-          </div>
-          <div v-if="row.error" class="residual-error">{{ row.error }}</div>
-        </div>
-      </div>
+      <ResidualPanel
+          :visible="tempDirPreview.length > 0"
+          title="临时目录残留"
+          :summary="tempDirCountText"
+          :items="tempDirPreview"
+          :tag-type="tempDirKindTag"
+          :kind-text="row => row.state || 'TEMP'"
+          :secondary-text="() => ''"
+      />
 
       <el-alert
           type="info"
@@ -301,11 +159,15 @@
 </template>
 
 <script setup>
-import {computed, onActivated, onDeactivated, onMounted, onUnmounted, ref} from "vue";
+import {computed} from "vue";
 import {useRouter} from "vue-router";
-import {useIntervalFn} from "@vueuse/core";
-import {ElMessage, ElMessageBox} from "element-plus";
-import * as http from "@/js/http.js";
+import {useRssJobStatus} from "./task-manager/useRssJobStatus.js";
+import {formatDuration, formatTime} from "./task-manager/format.js";
+import FailedQueuePanel from "./task-manager/FailedQueuePanel.vue";
+import ResidualPanel from "./task-manager/ResidualPanel.vue";
+import RssTaskTable from "./task-manager/RssTaskTable.vue";
+import JobStatusPanel from "./task-manager/JobStatusPanel.vue";
+import {useRssJobActions} from "./task-manager/useRssJobActions.js";
 
 /**
  * 任务管理器面板（原独立弹窗，现为任务中心「追番流水线」Tab 的内容）。
@@ -313,88 +175,18 @@ import * as http from "@/js/http.js";
  */
 const router = useRouter()
 
-let disposed = false
-let pollToken = 0
-let requestSeq = 0
-let appliedSeq = 0
-let actionInFlight = 0
-const loading = ref(false)
-const cancelingAll = ref(false)
-const rechecking = ref(false)
-const cancelingId = ref('')
-const cleaning = ref(false)
-const cleaningTemp = ref(false)
-const failedLoading = ref(false)
-const failedClearing = ref(false)
-const failedActingId = ref('')
-const failedItems = ref([])
-const status = ref(emptyStatus())
-/** 状态查询失败原因：常驻展示，避免面板停在旧数据上误导用户 */
-const statusError = ref('')
-const lastSuccessAt = ref(0)
-const consecutiveFailures = ref(0)
-
-function emptyStatus() {
-  return {
-    running: false,
-    cancelRequested: false,
-    canCancel: false,
-    scope: 'idle',
-    title: '',
-    aniId: '',
-    startedAt: null,
-    elapsedMs: 0,
-    subscriptionTotal: 0,
-    subscriptionActive: 0,
-    subscriptionCompleted: 0,
-    subscriptionFailed: 0,
-    currentBatch: null,
-    totalBatch: null,
-    nextBatchAt: null,
-    quiescentForced: null,
-    quiescentSkipped: null,
-    roundLocalState: null,
-    unknownReasons: null,
-    lastFinishedAt: null,
-    lastDurationMs: null,
-    lastResultMessage: null,
-    lastTitle: null,
-    lastSource: null,
-    lastScope: null,
-    message: '空闲',
-    currentHash: null,
-    offlineTitle: null,
-    offlineProgress: null,
-    offlineState: null,
-    offlineDeadlineMs: null,
-    offlineEtaMs: null,
-    failedQueueCount: 0,
-    source: null,
-    pending: false,
-    pendingTitle: null,
-    pendingScope: null,
-    openListBusy: false,
-    residualSupported: false,
-    residualActiveCount: 0,
-    residualTerminalCount: 0,
-    residualTotalCount: 0,
-    residualScannedAt: null,
-    residualCleaning: false,
-    residualMessage: null,
-    residualSamples: [],
-    residualItems: [],
-    tempDirResidualTotalCount: 0,
-    tempDirResidualCleanableCount: 0,
-    tempDirResidualProtectedCount: 0,
-    tempDirResidualKeepCount: 0,
-    tempDirResidualScannedAt: null,
-    tempDirResidualCleaning: false,
-    tempDirResidualMessage: null,
-    tempDirResidualItems: [],
-    failedSubscriptions: [],
-    tasks: []
-  }
-}
+const {
+  status,
+  statusError,
+  loading,
+  staleText,
+  fetchStatus,
+  applyResponseStatus,
+  nextRequestSeq,
+  refreshNow,
+  beginAction,
+  endAction
+} = useRssJobStatus(() => loadFailedQueue())
 
 const residualPreview = computed(() => {
   const items = status.value.residualItems
@@ -404,6 +196,37 @@ const residualPreview = computed(() => {
 const tempDirPreview = computed(() => {
   const items = status.value.tempDirResidualItems
   return Array.isArray(items) ? items : []
+})
+
+const {
+  cancelingAll,
+  rechecking,
+  cancelingId,
+  cleaning,
+  cleaningTemp,
+  repairingLegacy,
+  failedLoading,
+  failedClearing,
+  failedActingId,
+  failedItems,
+  cancelAll,
+  cancelItem,
+  recheckDownloaded,
+  cleanResidual,
+  cleanTempDir,
+  repairLegacy,
+  loadFailedQueue,
+  clearFailedQueue,
+  removeFailed,
+  retryFailed
+} = useRssJobActions({
+  status,
+  applyResponseStatus,
+  nextRequestSeq,
+  beginAction,
+  endAction,
+  fetchStatus,
+  residualPreview
 })
 
 /** 本轮订阅级失败明细（后端 RssJobStatus.failedSubscriptions） */
@@ -630,650 +453,6 @@ const statusTagType = (st) => {
   return 'info'
 }
 
-const formatDuration = (ms, force = false) => {
-  const n = Number(ms || 0)
-  if (!force && n <= 0) return '-'
-  if (!n && n !== 0) return '-'
-  const totalSec = Math.floor(Math.max(0, n) / 1000)
-  const h = Math.floor(totalSec / 3600)
-  const m = Math.floor((totalSec % 3600) / 60)
-  const s = totalSec % 60
-  if (h > 0) return `${h}小时${m}分${s}秒`
-  if (m > 0) return `${m}分${s}秒`
-  return `${s}秒`
-}
-
-const formatTime = (ts) => {
-  const n = Number(ts || 0)
-  if (!n) return '-'
-  try {
-    return new Date(n).toLocaleString()
-  } catch (_) {
-    return String(n)
-  }
-}
-
-const applyStatus = (data) => {
-  status.value = {
-    ...emptyStatus(),
-    ...(data || {})
-  }
-  // 兼容旧字段：没有 canCancel 时前端推断
-  if (status.value.canCancel == null) {
-    status.value.canCancel = !!(status.value.running || status.value.pending || status.value.openListBusy || status.value.currentHash)
-  }
-}
-
-const nextRequestSeq = () => ++requestSeq
-
-const applyResponseStatus = (seq, data) => {
-  if (!data || seq < appliedSeq) return
-  appliedSeq = seq
-  applyStatus(data)
-}
-
-const show = () => {
-  // 本页被 <KeepAlive> 缓存，离开再回来是「复用」而不是重新挂载：
-  // 必须先把上一轮轮询停掉并复位 disposed，否则 pollStatus 的 while 会因为
-  // disposed=true 立刻退出，页面看起来"打开但一直不刷新"。
-  disposed = false
-  pollToken++
-  statusError.value = ''
-  pollStatus()
-  // 先取一次真实状态再决定是否加载失败明细：
-  // 此前判断的是上一次会话残留的 status，首次打开时即使后端有失败记录也不会加载
-  fetchStatus().then(() => {
-    if (Number(status.value.failedQueueCount || 0) > 0) {
-      loadFailedQueue()
-    }
-  })
-}
-
-/** 停止轮询：递增 token 让在途的 pollStatus 循环下一轮退出 */
-const stopPolling = () => {
-  disposed = true
-  pollToken++
-}
-
-/** 状态不可用时常驻告警里的“数据已过期”说明（tick 每秒推进以刷新秒数） */
-const tick = ref(0)
-
-useIntervalFn(() => {
-  if (statusError.value) {
-    tick.value++
-  }
-}, 1000)
-
-const staleText = computed(() => {
-  void tick.value
-  if (!lastSuccessAt.value) {
-    return '尚未成功获取过状态'
-  }
-  const seconds = Math.max(0, Math.round((Date.now() - lastSuccessAt.value) / 1000))
-  if (seconds < 60) {
-    return `以下数据来自 ${seconds} 秒前`
-  }
-  return `以下数据来自 ${Math.round(seconds / 60)} 分钟前，可能已过期`
-})
-
-const refreshNow = async () => {
-  loading.value = true
-  try {
-    await fetchStatus()
-  } finally {
-    loading.value = false
-  }
-}
-
-const fetchStatus = async () => {
-  if (actionInFlight > 0) return
-  const seq = nextRequestSeq()
-  try {
-    const res = await http.rssJobStatus({silent: true})
-    applyResponseStatus(seq, res?.data)
-    if (statusError.value) {
-      statusError.value = ''
-    }
-    lastSuccessAt.value = Date.now()
-    consecutiveFailures.value = 0
-  } catch (err) {
-    // 此前静默吞掉：面板会停在旧快照上继续显示“空闲/运行中”，
-    // 同时 api.js 每 2~4 秒重复弹同一条错误 toast。这里改为常驻告警 + 轮询退避。
-    consecutiveFailures.value++
-    if (!statusError.value) {
-      statusError.value = err?.message || '无法获取任务状态'
-    }
-  }
-}
-
-const pollStatus = async () => {
-  const token = ++pollToken
-  while (!disposed && token === pollToken) {
-    await fetchStatus()
-    if (disposed || token !== pollToken) break
-    const busy = status.value.running
-        || status.value.pending
-        || status.value.openListBusy
-        || status.value.residualCleaning
-        || status.value.tempDirResidualCleaning
-        || status.value.cancelRequested
-        // residual 终态/空闲不触发高频轮询；pending 仅指 RSS 排队
-        || taskList.value.some(t => {
-          if (t.kind === 'residual' || t.kind === 'tempdir_residual' || t.kind === 'last_finished') return false
-          return t.status === 'running' || t.status === 'busy' || t.status === 'canceling' || t.status === 'pending'
-        })
-    // 连续失败时退避：避免对不可用的服务每 2 秒打一次并持续弹错
-    const failures = consecutiveFailures.value
-    const backoff = failures > 0 ? Math.min(30000, 2000 * Math.pow(2, Math.min(failures, 4))) : 0
-    await sleep(Math.max(busy ? 2000 : 4000, backoff))
-  }
-}
-
-const cancelAll = async () => {
-  const seq = nextRequestSeq()
-  actionInFlight++
-  cancelingAll.value = true
-  try {
-    const res = await http.rssJobCancel()
-    const msg = res.message || '已请求取消'
-    if (msg.includes('没有') || msg.includes('不可取消') || msg.includes('不存在')) {
-      ElMessage.warning(msg)
-    } else {
-      ElMessage.success(msg)
-    }
-    applyResponseStatus(seq, res?.data)
-  } catch (_) {
-  } finally {
-    actionInFlight--
-    cancelingAll.value = false
-  }
-}
-
-const cancelItem = async (item) => {
-  if (!item?.id || !item.cancellable) return
-  const seq = nextRequestSeq()
-  actionInFlight++
-  cancelingId.value = item.id
-  try {
-    const res = await http.rssJobCancelItem(item.id)
-    const msg = res.message || '已请求取消'
-    // 后端无任务时仍 200，用文案判断
-    if (msg.includes('没有') || msg.includes('不可取消') || msg.includes('不存在')) {
-      ElMessage.warning(msg)
-    } else {
-      ElMessage.success(msg)
-    }
-    applyResponseStatus(seq, res?.data)
-  } catch (_) {
-  } finally {
-    actionInFlight--
-    cancelingId.value = ''
-  }
-}
-
-const recheckDownloaded = async () => {
-  const seq = nextRequestSeq()
-  actionInFlight++
-  rechecking.value = true
-  try {
-    const res = await http.rssJobRecheckDownloaded()
-    ElMessage.success(res.message || '识别完成')
-    applyResponseStatus(seq, res?.data)
-  } catch (_) {
-  } finally {
-    actionInFlight--
-    rechecking.value = false
-  }
-}
-
-const cleanResidual = async () => {
-  // 先扫描刷新最新残留数据，再展示确认框（合并原独立"扫描"按钮）
-  const seq0 = nextRequestSeq()
-  actionInFlight++
-  try {
-    const scanRes = await http.rssJobResidualScan()
-    applyResponseStatus(seq0, scanRes?.data)
-  } catch (_) {
-  } finally {
-    actionInFlight--
-  }
-  const active = Number(status.value.residualActiveCount || 0)
-  const terminal = Number(status.value.residualTerminalCount || 0)
-  const previewN = residualPreview.value.length
-  const detail = previewN > 0
-      ? `当前扫描：进行中 ${active} / 终态 ${terminal}（预览 ${previewN} 条）。`
-      : `当前扫描：进行中 ${active} / 终态 ${terminal}。`
-  try {
-    await ElMessageBox.confirm(
-        `${detail}将取消进行中离线任务并删除记录；已成功任务仅删记录。当前 RSS 正在等待的 hash 会跳过。是否继续？`,
-        '一键清理离线残留',
-        {type: 'warning', confirmButtonText: '清理', cancelButtonText: '取消'}
-    )
-  } catch (_) {
-    return
-  }
-  const seq = nextRequestSeq()
-  actionInFlight++
-  cleaning.value = true
-  try {
-    const res = await http.rssJobResidualClean()
-    ElMessage.success(res.message || '清理完成')
-    applyResponseStatus(seq, res?.data)
-  } catch (_) {
-  } finally {
-    actionInFlight--
-    cleaning.value = false
-  }
-}
-
-const cleanTempDir = async () => {
-  // 先扫描刷新最新临时目录残留数据，再展示确认框（合并原独立"扫描"按钮）
-  const seq0 = nextRequestSeq()
-  actionInFlight++
-  try {
-    const scanRes = await http.rssJobTempDirResidualScan()
-    applyResponseStatus(seq0, scanRes?.data)
-  } catch (_) {
-  } finally {
-    actionInFlight--
-  }
-  const cleanable = Number(status.value.tempDirResidualCleanableCount || 0)
-  const total = Number(status.value.tempDirResidualTotalCount || 0)
-  try {
-    await ElMessageBox.confirm(
-        `将仅删除 FORCE/JUNK 临时目录（可清理约 ${cleanable} / 合计 ${total}）。PROTECT/KEEP 不会自动删除。是否继续？`,
-        '清理临时目录残留',
-        {type: 'warning', confirmButtonText: '清理', cancelButtonText: '取消'}
-    )
-  } catch (_) {
-    return
-  }
-  const seq = nextRequestSeq()
-  actionInFlight++
-  cleaningTemp.value = true
-  try {
-    const res = await http.rssJobTempDirResidualClean()
-    ElMessage.success(res.message || '临时目录清理完成')
-    applyResponseStatus(seq, res?.data)
-  } catch (_) {
-  } finally {
-    actionInFlight--
-    cleaningTemp.value = false
-  }
-}
-
-const repairingLegacy = ref(false)
-const repairLegacy = async () => {
-  // 该操作会归位并清理云盘目录结构（动用户文件），此前单击即执行且无确认
-  try {
-    await ElMessageBox.confirm(
-        '将归位 OpenList/云盘中被错误嵌套的目录并清理空壳，会移动已有文件。是否继续？',
-        '遗留问题修复',
-        {type: 'warning', confirmButtonText: '开始修复', cancelButtonText: '取消'}
-    )
-  } catch (_) {
-    return
-  }
-  const seq = nextRequestSeq()
-  actionInFlight++
-  repairingLegacy.value = true
-  try {
-    const res = await http.rssJobLegacyRepair()
-    ElMessageBox.alert(res.message || '遗留修复完成', '遗留问题修复结果', {
-      confirmButtonText: '知道了',
-      customClass: 'legacy-repair-result'
-    }).catch(() => {
-    })
-    applyResponseStatus(seq, res?.data)
-  } catch (_) {
-  } finally {
-    actionInFlight--
-    repairingLegacy.value = false
-  }
-}
-
-const loadFailedQueue = async () => {
-  failedLoading.value = true
-  try {
-    const res = await http.failedDownloadQueue()
-    failedItems.value = Array.isArray(res?.data) ? res.data : []
-  } catch (_) {
-  } finally {
-    failedLoading.value = false
-  }
-}
-
-const clearFailedQueue = async () => {
-  try {
-    await ElMessageBox.confirm('清空全部失败队列条目？', '清空失败队列', {type: 'warning'})
-  } catch (_) {
-    return
-  }
-  failedClearing.value = true
-  try {
-    const res = await http.failedDownloadQueueClear()
-    ElMessage.success(res.message || '已清空')
-    failedItems.value = []
-    await fetchStatus()
-  } catch (_) {
-  } finally {
-    failedClearing.value = false
-  }
-}
-
-const removeFailed = async (row) => {
-  if (!row?.id) return
-  try {
-    const res = await http.failedDownloadQueueRemove(row.id)
-    ElMessage.success(res.message || '已移除')
-    failedItems.value = failedItems.value.filter(i => i.id !== row.id)
-    await fetchStatus()
-  } catch (_) {
-  }
-}
-
-const retryFailed = async (row) => {
-  if (!row?.id) return
-  failedActingId.value = row.id
-  const beforeAttempts = row.attempts
-  const beforeFailedAt = row.failedAt
-  try {
-    const res = await http.failedDownloadQueueRetry(row.id)
-    // 接口恒返回 200，真实结果在后台线程里：约 3 秒后回查该条目是否真的被消费，
-    // 避免“绿色成功提示 + 列表纹丝不动”的误导。
-    ElMessage.info(res.message || '已提交精确重下，正在确认结果…')
-    await sleep(3000)
-    await loadFailedQueue()
-    await fetchStatus()
-    const still = failedItems.value.find(i => i.id === row.id)
-    if (still && still.attempts === beforeAttempts && still.failedAt === beforeFailedAt) {
-      ElMessage.error(`重下未生效：${still.message || '条目仍留在失败队列中'}${still.suggestion ? `（${still.suggestion}）` : ''}`)
-    } else if (!still) {
-      ElMessage.success('已从失败队列移除，说明重下已受理')
-    }
-  } catch (_) {
-  } finally {
-    failedActingId.value = ''
-  }
-}
-
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
-
-onMounted(show)
-
-// <KeepAlive> 下离开路由只触发 deactivated、不会 unmounted，
-// 只挂 onUnmounted 会让 2–4 秒一次的轮询常驻后台。
-onActivated(show)
-onDeactivated(stopPolling)
-onUnmounted(stopPolling)
 </script>
 
-<style scoped>
-.task-manager-panel {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-
-.job-body {
-  min-height: 260px;
-}
-
-.status-error {
-  margin-bottom: 10px;
-}
-
-.status-error-body {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-top: 4px;
-}
-
-.job-summary {
-  margin-bottom: 4px;
-}
-
-.job-row {
-  display: flex;
-  align-items: flex-start;
-  margin-bottom: 10px;
-  line-height: 1.5;
-}
-
-.job-label {
-  width: 88px;
-  flex-shrink: 0;
-  color: var(--el-text-color-secondary);
-}
-
-.job-value {
-  flex: 1;
-  word-break: break-all;
-}
-
-.progress-summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 14px;
-}
-
-.progress-failed {
-  color: var(--el-color-danger);
-}
-
-.progress-batch {
-  color: var(--el-color-info);
-}
-
-.job-divider {
-  height: 1px;
-  background: var(--el-border-color-lighter);
-  margin: 8px 0 12px;
-}
-
-.task-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.task-card {
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 8px;
-  padding: 12px;
-  /* 灰底：白底面板上仅靠边框区分层次不足 */
-  background: var(--el-fill-color-light);
-}
-
-.task-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.task-title-wrap {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.task-title {
-  font-weight: 600;
-  word-break: break-all;
-}
-
-.task-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  color: var(--el-text-color-secondary);
-  font-size: 12px;
-  margin-bottom: 6px;
-}
-
-.task-message {
-  margin-bottom: 8px;
-  word-break: break-all;
-}
-
-.task-progress {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 8px;
-}
-
-.task-progress .el-progress {
-  flex: 1;
-}
-
-.eta {
-  white-space: nowrap;
-  font-size: 12px;
-}
-
-.failed-queue {
-  margin-top: 14px;
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 8px;
-  padding: 10px 12px;
-  background: var(--el-fill-color-light);
-  max-height: 240px;
-  overflow: auto;
-}
-
-.failed-subscriptions {
-  margin-top: 10px;
-  border: 1px solid var(--el-color-danger-light-9);
-  border-radius: 8px;
-  padding: 10px 12px;
-  background: var(--el-color-danger-light-9);
-  max-height: 200px;
-  overflow: auto;
-}
-
-.failed-queue-actions {
-  display: flex;
-  gap: 6px;
-}
-
-.task-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px 12px;
-  font-size: 13px;
-}
-
-.muted {
-  color: var(--el-text-color-secondary);
-  margin-right: 6px;
-}
-
-.mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-  font-size: 12px;
-  word-break: break-all;
-}
-
-.job-footer {
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  width: 100%;
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--el-border-color-lighter);
-}
-
-.job-footer-group {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.job-footer-spacer {
-  flex: 1;
-}
-
-.residual-preview {
-  margin-top: 14px;
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 8px;
-  padding: 10px 12px;
-  background: var(--el-fill-color-light);
-  max-height: 280px;
-  overflow: auto;
-}
-
-.residual-preview-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.residual-preview-title {
-  font-weight: 600;
-}
-
-.residual-row {
-  padding: 8px 0;
-  border-top: 1px dashed var(--el-border-color-lighter);
-}
-
-.residual-row:first-of-type {
-  border-top: none;
-}
-
-.residual-row-main {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
-.residual-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 13px;
-}
-
-.residual-row-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 4px;
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-}
-
-.residual-action {
-  color: var(--el-color-warning);
-}
-
-.residual-error {
-  margin-top: 4px;
-  font-size: 12px;
-  color: var(--el-color-danger);
-  word-break: break-all;
-}
-
-@media (max-width: 640px) {
-  .task-grid {
-    grid-template-columns: 1fr;
-  }
-}
-</style>
+<style scoped src="./task-manager/task-manager.css"></style>

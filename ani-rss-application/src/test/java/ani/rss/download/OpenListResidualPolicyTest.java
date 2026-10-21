@@ -1,7 +1,13 @@
 package ani.rss.download;
 
+import ani.rss.download.openlist.policy.OpenListPolicy;
+import ani.rss.download.openlist.residual.OpenListResidualService;
+import ani.rss.download.openlist.residual.ResidualItem;
+import ani.rss.download.openlist.residual.ResidualKind;
+import ani.rss.download.openlist.residual.ResidualSnapshot;
 import ani.rss.entity.OpenListFileInfo;
 import ani.rss.entity.OpenListTaskInfo;
+import ani.rss.util.other.TempDirResidualPolicy;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -22,39 +28,39 @@ class OpenListResidualPolicyTest {
         List<String> tokens = List.of("SHOW", "我的番剧");
 
         // 文件名含标题：直接放行
-        assertFalse(OpenList.cloudEntryLacksTitleToken(
+        assertFalse(OpenListPolicy.cloudEntryLacksTitleToken(
                 "[LoliHouse] Show - 03 [1080p].mkv", "/云下载/[VCB] Show", "/云下载", tokens));
         // 原样结构：文件名无标题但目录链含标题 → 放行（本次修复的核心场景）
-        assertFalse(OpenList.cloudEntryLacksTitleToken(
+        assertFalse(OpenListPolicy.cloudEntryLacksTitleToken(
                 "S01E03.mkv", "/云下载/[VCB] Show", "/云下载", tokens));
-        assertFalse(OpenList.cloudEntryLacksTitleToken(
+        assertFalse(OpenListPolicy.cloudEntryLacksTitleToken(
                 "13.mp4", "/云下载/[XXXX] A", "/云下载", List.of("A")));
         // 文件名与目录链都无标题 → 拒绝（防 A/B 番互认）
-        assertTrue(OpenList.cloudEntryLacksTitleToken(
+        assertTrue(OpenListPolicy.cloudEntryLacksTitleToken(
                 "S01E03.mkv", "/云下载/[VCB] Other", "/云下载", tokens));
-        assertTrue(OpenList.cloudEntryLacksTitleToken(
+        assertTrue(OpenListPolicy.cloudEntryLacksTitleToken(
                 "S01E03.mkv", "/云下载", "/云下载", tokens));
         // 不在云下载根下 / 路径缺失：只按文件名判定
-        assertTrue(OpenList.cloudEntryLacksTitleToken(
+        assertTrue(OpenListPolicy.cloudEntryLacksTitleToken(
                 "S01E03.mkv", "/其他/[VCB] Show", "/云下载", tokens));
-        assertFalse(OpenList.cloudEntryLacksTitleToken(
+        assertFalse(OpenListPolicy.cloudEntryLacksTitleToken(
                 "Show - 03.mkv", null, "/云下载", tokens));
         // tokens 为空：不收紧
-        assertFalse(OpenList.cloudEntryLacksTitleToken(
+        assertFalse(OpenListPolicy.cloudEntryLacksTitleToken(
                 "S01E03.mkv", "/云下载/[VCB] Other", "/云下载", List.of()));
         // 大小写不敏感（生产 tokens 由 titleTokensOf 统一大写）
-        assertFalse(OpenList.cloudEntryLacksTitleToken(
+        assertFalse(OpenListPolicy.cloudEntryLacksTitleToken(
                 "S01E03.mkv", "/云下载/show Season 1", "/云下载", List.of("SHOW")));
     }
 
     @Test
     void relative_under_cloud_root_basic() {
-        assertEquals("a/b", OpenList.relativeUnderCloudRoot("/云下载/a/b", "/云下载"));
-        assertEquals("a", OpenList.relativeUnderCloudRoot("/云下载/a/", "/云下载"));
-        assertNull(OpenList.relativeUnderCloudRoot("/other/a", "/云下载"));
-        assertNull(OpenList.relativeUnderCloudRoot("/云下载", "/云下载"));
-        assertNull(OpenList.relativeUnderCloudRoot(null, "/云下载"));
-        assertNull(OpenList.relativeUnderCloudRoot("/云下载-x/a", "/云下载"));
+        assertEquals("a/b", OpenListPolicy.relativeUnderCloudRoot("/云下载/a/b", "/云下载"));
+        assertEquals("a", OpenListPolicy.relativeUnderCloudRoot("/云下载/a/", "/云下载"));
+        assertNull(OpenListPolicy.relativeUnderCloudRoot("/other/a", "/云下载"));
+        assertNull(OpenListPolicy.relativeUnderCloudRoot("/云下载", "/云下载"));
+        assertNull(OpenListPolicy.relativeUnderCloudRoot(null, "/云下载"));
+        assertNull(OpenListPolicy.relativeUnderCloudRoot("/云下载-x/a", "/云下载"));
     }
 
     @Test
@@ -179,13 +185,13 @@ class OpenListResidualPolicyTest {
     @Test
     void isEpisodeFileName_matches_season_token() {
         String re = "Show Title S01E03";
-        assertTrue(OpenList.isEpisodeFileName(re + ".mkv", re));
-        assertTrue(OpenList.isEpisodeFileName("foo.S01E03.1080p.mkv", re));
-        assertTrue(OpenList.isEpisodeFileName("foo.s01e03.mkv", re));
-        assertFalse(OpenList.isEpisodeFileName("foo.S01E01.mkv", re));
-        assertFalse(OpenList.isEpisodeFileName("foo.S01E02.mkv", re));
-        assertFalse(OpenList.isEpisodeFileName(null, re));
-        assertFalse(OpenList.isEpisodeFileName("x.mkv", null));
+        assertTrue(OpenListPolicy.isEpisodeFileName(re + ".mkv", re));
+        assertTrue(OpenListPolicy.isEpisodeFileName("foo.S01E03.1080p.mkv", re));
+        assertTrue(OpenListPolicy.isEpisodeFileName("foo.s01e03.mkv", re));
+        assertFalse(OpenListPolicy.isEpisodeFileName("foo.S01E01.mkv", re));
+        assertFalse(OpenListPolicy.isEpisodeFileName("foo.S01E02.mkv", re));
+        assertFalse(OpenListPolicy.isEpisodeFileName(null, re));
+        assertFalse(OpenListPolicy.isEpisodeFileName("x.mkv", null));
     }
 
     @Test
@@ -214,33 +220,33 @@ class OpenListResidualPolicyTest {
 
     @Test
     void classifyResidual_active_and_terminal() {
-        assertEquals(OpenList.ResidualKind.ACTIVE, OpenList.classifyResidual(OpenListTaskInfo.State.Pending));
-        assertEquals(OpenList.ResidualKind.ACTIVE, OpenList.classifyResidual(OpenListTaskInfo.State.Running));
-        assertEquals(OpenList.ResidualKind.ACTIVE, OpenList.classifyResidual(OpenListTaskInfo.State.Waiting_for_Retry));
-        assertEquals(OpenList.ResidualKind.ACTIVE, OpenList.classifyResidual(OpenListTaskInfo.State.Preparing_to_Retry));
+        assertEquals(ResidualKind.ACTIVE, OpenListResidualService.classifyResidual(OpenListTaskInfo.State.Pending));
+        assertEquals(ResidualKind.ACTIVE, OpenListResidualService.classifyResidual(OpenListTaskInfo.State.Running));
+        assertEquals(ResidualKind.ACTIVE, OpenListResidualService.classifyResidual(OpenListTaskInfo.State.Waiting_for_Retry));
+        assertEquals(ResidualKind.ACTIVE, OpenListResidualService.classifyResidual(OpenListTaskInfo.State.Preparing_to_Retry));
 
-        assertEquals(OpenList.ResidualKind.TERMINAL, OpenList.classifyResidual(OpenListTaskInfo.State.Succeeded));
-        assertEquals(OpenList.ResidualKind.TERMINAL, OpenList.classifyResidual(OpenListTaskInfo.State.Error));
-        assertEquals(OpenList.ResidualKind.TERMINAL, OpenList.classifyResidual(OpenListTaskInfo.State.Failing));
-        assertEquals(OpenList.ResidualKind.TERMINAL, OpenList.classifyResidual(OpenListTaskInfo.State.Failed));
-        assertEquals(OpenList.ResidualKind.TERMINAL, OpenList.classifyResidual(OpenListTaskInfo.State.Canceling));
-        assertEquals(OpenList.ResidualKind.TERMINAL, OpenList.classifyResidual(OpenListTaskInfo.State.Canceled));
-        assertEquals(OpenList.ResidualKind.TERMINAL, OpenList.classifyResidual(null));
+        assertEquals(ResidualKind.TERMINAL, OpenListResidualService.classifyResidual(OpenListTaskInfo.State.Succeeded));
+        assertEquals(ResidualKind.TERMINAL, OpenListResidualService.classifyResidual(OpenListTaskInfo.State.Error));
+        assertEquals(ResidualKind.TERMINAL, OpenListResidualService.classifyResidual(OpenListTaskInfo.State.Failing));
+        assertEquals(ResidualKind.TERMINAL, OpenListResidualService.classifyResidual(OpenListTaskInfo.State.Failed));
+        assertEquals(ResidualKind.TERMINAL, OpenListResidualService.classifyResidual(OpenListTaskInfo.State.Canceling));
+        assertEquals(ResidualKind.TERMINAL, OpenListResidualService.classifyResidual(OpenListTaskInfo.State.Canceled));
+        assertEquals(ResidualKind.TERMINAL, OpenListResidualService.classifyResidual(null));
     }
 
     @Test
     void taskNameContainsHash_case_insensitive() {
-        assertTrue(OpenList.taskNameContainsHash("magnet:?xt=urn:btih:ABCDEF1234", "abcdef1234"));
-        assertTrue(OpenList.taskNameContainsHash("offline-ABCDEF1234.task", "ABCDEF1234"));
-        assertFalse(OpenList.taskNameContainsHash("offline-other", "abcdef1234"));
-        assertFalse(OpenList.taskNameContainsHash(null, "abc"));
-        assertFalse(OpenList.taskNameContainsHash("name", null));
-        assertFalse(OpenList.taskNameContainsHash("", "abc"));
+        assertTrue(OpenListResidualService.taskNameContainsHash("magnet:?xt=urn:btih:ABCDEF1234", "abcdef1234"));
+        assertTrue(OpenListResidualService.taskNameContainsHash("offline-ABCDEF1234.task", "ABCDEF1234"));
+        assertFalse(OpenListResidualService.taskNameContainsHash("offline-other", "abcdef1234"));
+        assertFalse(OpenListResidualService.taskNameContainsHash(null, "abc"));
+        assertFalse(OpenListResidualService.taskNameContainsHash("name", null));
+        assertFalse(OpenListResidualService.taskNameContainsHash("", "abc"));
     }
 
     @Test
     void residualSnapshot_empty_defaults() {
-        OpenList.ResidualSnapshot empty = OpenList.ResidualSnapshot.empty();
+        ResidualSnapshot empty = ResidualSnapshot.empty();
         assertEquals(0, empty.getActiveCount());
         assertEquals(0, empty.getTerminalCount());
         assertEquals(0, empty.getTotalCount());
@@ -276,7 +282,7 @@ class OpenListResidualPolicyTest {
                 new OpenListTaskInfo().setId("t2").setName("dup").setState(OpenListTaskInfo.State.Failed)
         );
 
-        OpenList.ResidualSnapshot snap = OpenList.buildResidualSnapshot(tasks, Set.of(protectHash), false, 123L);
+        ResidualSnapshot snap = OpenListResidualService.buildResidualSnapshot(tasks, Set.of(protectHash), false, 123L);
 
         assertEquals(1, snap.getActiveCount());
         assertEquals(2, snap.getTerminalCount());
@@ -287,7 +293,7 @@ class OpenListResidualPolicyTest {
         assertTrue(snap.getMessage().contains("进行中 1"));
         assertTrue(snap.getMessage().contains("终态 2"));
 
-        OpenList.ResidualItem protectedItem = snap.getItems().stream()
+        ResidualItem protectedItem = snap.getItems().stream()
                 .filter(i -> "t1".equals(i.getId()))
                 .findFirst()
                 .orElseThrow();
@@ -296,7 +302,7 @@ class OpenListResidualPolicyTest {
         assertTrue(protectedItem.getAction().contains("保护"));
         assertEquals(40, protectedItem.getProgress());
 
-        OpenList.ResidualItem terminal = snap.getItems().stream()
+        ResidualItem terminal = snap.getItems().stream()
                 .filter(i -> "t2".equals(i.getId()))
                 .findFirst()
                 .orElseThrow();
@@ -304,7 +310,7 @@ class OpenListResidualPolicyTest {
         assertEquals(Boolean.FALSE, terminal.getProtectedCurrent());
         assertEquals("删除记录", terminal.getAction());
 
-        OpenList.ResidualItem failed = snap.getItems().stream()
+        ResidualItem failed = snap.getItems().stream()
                 .filter(i -> "t3".equals(i.getId()))
                 .findFirst()
                 .orElseThrow();
@@ -314,7 +320,7 @@ class OpenListResidualPolicyTest {
 
     @Test
     void buildResidualSnapshot_empty_tasks() {
-        OpenList.ResidualSnapshot snap = OpenList.buildResidualSnapshot(List.of(), Set.of(), true, 1L);
+        ResidualSnapshot snap = OpenListResidualService.buildResidualSnapshot(List.of(), Set.of(), true, 1L);
         assertEquals(0, snap.getTotalCount());
         assertEquals("无离线残留", snap.getMessage());
         assertTrue(snap.getItems().isEmpty());
@@ -324,18 +330,18 @@ class OpenListResidualPolicyTest {
     @Test
     void residualActionLabel_matrix() {
         assertEquals("保护中（当前 RSS 等待，清理时跳过）",
-                OpenList.residualActionLabel(OpenList.ResidualKind.ACTIVE, true));
+                OpenListResidualService.residualActionLabel(ResidualKind.ACTIVE, true));
         assertEquals("取消并删除记录",
-                OpenList.residualActionLabel(OpenList.ResidualKind.ACTIVE, false));
+                OpenListResidualService.residualActionLabel(ResidualKind.ACTIVE, false));
         assertEquals("删除记录",
-                OpenList.residualActionLabel(OpenList.ResidualKind.TERMINAL, false));
+                OpenListResidualService.residualActionLabel(ResidualKind.TERMINAL, false));
         assertEquals("保护中（当前 RSS 等待，清理时跳过）",
-                OpenList.residualActionLabel(OpenList.ResidualKind.TERMINAL, true));
+                OpenListResidualService.residualActionLabel(ResidualKind.TERMINAL, true));
     }
 
     @Test
     void toResidualItem_null_safe() {
-        OpenList.ResidualItem item = OpenList.toResidualItem(null, Set.of("abc"));
+        ResidualItem item = OpenListResidualService.toResidualItem(null, Set.of("abc"));
         assertEquals("", item.getId());
         assertEquals("TERMINAL", item.getKind());
         assertEquals("Unknown", item.getState());
@@ -344,16 +350,16 @@ class OpenListResidualPolicyTest {
 
     @Test
     void junk_and_protected_temp_file_classifier() {
-        assertTrue(OpenList.isJunkTempFile(new OpenListFileInfo().setName("a.aria2").setIsDir(false)));
-        assertTrue(OpenList.isJunkTempFile(new OpenListFileInfo().setName("x.tmp").setIsDir(false)));
-        assertFalse(OpenList.isJunkTempFile(new OpenListFileInfo().setName("a.mp4").setIsDir(false)));
-        assertFalse(OpenList.isJunkTempFile(new OpenListFileInfo().setName("notes.txt").setIsDir(false)));
+        assertTrue(TempDirResidualPolicy.isJunkTempFile(new OpenListFileInfo().setName("a.aria2").setIsDir(false)));
+        assertTrue(TempDirResidualPolicy.isJunkTempFile(new OpenListFileInfo().setName("x.tmp").setIsDir(false)));
+        assertFalse(TempDirResidualPolicy.isJunkTempFile(new OpenListFileInfo().setName("a.mp4").setIsDir(false)));
+        assertFalse(TempDirResidualPolicy.isJunkTempFile(new OpenListFileInfo().setName("notes.txt").setIsDir(false)));
 
-        assertTrue(OpenList.isProtectedTempFile(new OpenListFileInfo().setName("a.mp4").setIsDir(false)));
-        assertTrue(OpenList.isProtectedTempFile(new OpenListFileInfo().setName("a.ass").setIsDir(false)));
-        assertTrue(OpenList.isProtectedTempFile(new OpenListFileInfo().setName("notes.txt").setIsDir(false)));
-        assertFalse(OpenList.isProtectedTempFile(new OpenListFileInfo().setName("a.aria2").setIsDir(false)));
-        assertFalse(OpenList.isProtectedTempFile(new OpenListFileInfo().setName("dir").setIsDir(true)));
+        assertTrue(TempDirResidualPolicy.isProtectedTempFile(new OpenListFileInfo().setName("a.mp4").setIsDir(false)));
+        assertTrue(TempDirResidualPolicy.isProtectedTempFile(new OpenListFileInfo().setName("a.ass").setIsDir(false)));
+        assertTrue(TempDirResidualPolicy.isProtectedTempFile(new OpenListFileInfo().setName("notes.txt").setIsDir(false)));
+        assertFalse(TempDirResidualPolicy.isProtectedTempFile(new OpenListFileInfo().setName("a.aria2").setIsDir(false)));
+        assertFalse(TempDirResidualPolicy.isProtectedTempFile(new OpenListFileInfo().setName("dir").setIsDir(true)));
     }
 
     @Test
@@ -361,11 +367,11 @@ class OpenListResidualPolicyTest {
         OpenListFileInfo nested = new OpenListFileInfo()
                 .setPath("/media/Show/Season 1/[ANi] 盗墓王 - 03")
                 .setName("ep.mp4");
-        assertTrue(OpenList.isUnderPath(nested, "/media/Show/Season 1/[ANi] 盗墓王 - 03"));
-        assertTrue(OpenList.isUnderPath(nested, "/media/Show/Season 1"));
-        assertFalse(OpenList.isUnderPath(nested, "/media/Show/Season 1/Show S01E03.mp4"));
-        assertFalse(OpenList.isUnderPath(nested, null));
-        assertFalse(OpenList.isUnderPath(null, "/media"));
+        assertTrue(OpenListPolicy.isUnderPath(nested, "/media/Show/Season 1/[ANi] 盗墓王 - 03"));
+        assertTrue(OpenListPolicy.isUnderPath(nested, "/media/Show/Season 1"));
+        assertFalse(OpenListPolicy.isUnderPath(nested, "/media/Show/Season 1/Show S01E03.mp4"));
+        assertFalse(OpenListPolicy.isUnderPath(nested, null));
+        assertFalse(OpenListPolicy.isUnderPath(null, "/media"));
     }
 
     @Test
@@ -456,26 +462,26 @@ class OpenListResidualPolicyTest {
 
     @Test
     void trimTrailingSlash_normalizes_paths() {
-        assertEquals("/a/b/c", OpenList.trimTrailingSlash("/a/b/c"));
-        assertEquals("/a/b/c", OpenList.trimTrailingSlash("/a/b/c/"));
-        assertEquals("/a/b/c", OpenList.trimTrailingSlash("/a/b/c////"));
-        assertEquals("/a/b/c", OpenList.trimTrailingSlash("\\a\\b\\c\\"));
-        assertEquals("/", OpenList.trimTrailingSlash("//"));
-        assertEquals("", OpenList.trimTrailingSlash(""));
-        assertEquals("", OpenList.trimTrailingSlash(null));
+        assertEquals("/a/b/c", OpenListPolicy.trimTrailingSlash("/a/b/c"));
+        assertEquals("/a/b/c", OpenListPolicy.trimTrailingSlash("/a/b/c/"));
+        assertEquals("/a/b/c", OpenListPolicy.trimTrailingSlash("/a/b/c////"));
+        assertEquals("/a/b/c", OpenListPolicy.trimTrailingSlash("\\a\\b\\c\\"));
+        assertEquals("/", OpenListPolicy.trimTrailingSlash("//"));
+        assertEquals("", OpenListPolicy.trimTrailingSlash(""));
+        assertEquals("", OpenListPolicy.trimTrailingSlash(null));
     }
 
     @Test
     void wash_target_excludes_current_task_dir() {
         // 含 seasonKey 的旧文件：删除
-        assertTrue(OpenList.isWashTarget("Show S01E05v2.mkv", "S01E05", "Show S01E06"));
-        assertTrue(OpenList.isWashTarget("Show S01E05v2.mkv", "S01E05", null));
+        assertTrue(OpenListPolicy.isWashTarget("Show S01E05v2.mkv", "S01E05", "Show S01E06"));
+        assertTrue(OpenListPolicy.isWashTarget("Show S01E05v2.mkv", "S01E05", null));
         // 本次任务目录（刚 mkdir）：排除，避免误删离线任务落点
-        assertFalse(OpenList.isWashTarget("Show S01E05", "S01E05", "Show S01E05"));
+        assertFalse(OpenListPolicy.isWashTarget("Show S01E05", "S01E05", "Show S01E05"));
         // 不含 seasonKey / 空 seasonKey / 空 name：不删
-        assertFalse(OpenList.isWashTarget("Show S01E01.mkv", "S01E05", null));
-        assertFalse(OpenList.isWashTarget("Show.mkv", "", null));
-        assertFalse(OpenList.isWashTarget(null, "S01E05", null));
+        assertFalse(OpenListPolicy.isWashTarget("Show S01E01.mkv", "S01E05", null));
+        assertFalse(OpenListPolicy.isWashTarget("Show.mkv", "", null));
+        assertFalse(OpenListPolicy.isWashTarget(null, "S01E05", null));
     }
 
     /**
@@ -487,15 +493,15 @@ class OpenListResidualPolicyTest {
      */
     @Test
     void wash_target_requires_exact_sxxexx_not_prefix() {
-        assertFalse(OpenList.isWashTarget("Show S01E010.mkv", "S01E01", null),
+        assertFalse(OpenListPolicy.isWashTarget("Show S01E010.mkv", "S01E01", null),
                 "S01E010 不是 S01E01");
-        assertFalse(OpenList.isWashTarget("Show S01E01.5.mkv", "S01E01", null),
+        assertFalse(OpenListPolicy.isWashTarget("Show S01E01.5.mkv", "S01E01", null),
                 ".5 集必须与整数集区分开");
-        assertTrue(OpenList.isWashTarget("Show S01E01.5.mkv", "S01E01.5", null),
+        assertTrue(OpenListPolicy.isWashTarget("Show S01E01.5.mkv", "S01E01.5", null),
                 ".5 集自身仍可被自己的集数命中");
         // 大小写不敏感：网盘/下载器回的名字大小写不保证
-        assertTrue(OpenList.isWashTarget("show s01e05.mkv", "S01E05", null));
-        assertTrue(OpenList.isWashTarget("Show.S01E05.1080p.mkv", "S01E05", null));
+        assertTrue(OpenListPolicy.isWashTarget("show s01e05.mkv", "S01E05", null));
+        assertTrue(OpenListPolicy.isWashTarget("Show.S01E05.1080p.mkv", "S01E05", null));
     }
 
     @Test
@@ -569,18 +575,18 @@ class OpenListResidualPolicyTest {
     @Test
     void pickCloudDir_config_first_then_autodiscover() {
         // 配置优先（归一化反斜杠）
-        assertEquals("/云下载", OpenList.pickCloudDir("/云下载", List.of()));
-        assertEquals("/115/云下载", OpenList.pickCloudDir("\\115\\云下载", List.of()));
+        assertEquals("/云下载", OpenListPolicy.pickCloudDir("/云下载", List.of()));
+        assertEquals("/115/云下载", OpenListPolicy.pickCloudDir("\\115\\云下载", List.of()));
         // 配置为空：自动发现根目录里含"云下载"的目录（取第一个）
-        assertEquals("/云下载", OpenList.pickCloudDir("", List.of("图片", "云下载", "文档")));
-        assertEquals("/115/云下载", OpenList.pickCloudDir(null, List.of("115/云下载", "云下载")));
+        assertEquals("/云下载", OpenListPolicy.pickCloudDir("", List.of("图片", "云下载", "文档")));
+        assertEquals("/115/云下载", OpenListPolicy.pickCloudDir(null, List.of("115/云下载", "云下载")));
         // 找不到：null（不启用兜底）
-        assertNull(OpenList.pickCloudDir(null, List.of("图片", "文档")));
-        assertNull(OpenList.pickCloudDir("  ", List.of("图片", "文档")));
-        assertNull(OpenList.pickCloudDir(null, List.of()));
-        assertNull(OpenList.pickCloudDir(null, null));
+        assertNull(OpenListPolicy.pickCloudDir(null, List.of("图片", "文档")));
+        assertNull(OpenListPolicy.pickCloudDir("  ", List.of("图片", "文档")));
+        assertNull(OpenListPolicy.pickCloudDir(null, List.of()));
+        assertNull(OpenListPolicy.pickCloudDir(null, null));
         // 包含"云下载"即视为目标目录（如"云下载2号"）
-        assertEquals("/云下载2号", OpenList.pickCloudDir(null, List.of("云下载2号")));
+        assertEquals("/云下载2号", OpenListPolicy.pickCloudDir(null, List.of("云下载2号")));
     }
 
     @Test

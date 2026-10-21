@@ -1,0 +1,49 @@
+.match-scrollbar {
+  flex: 1;
+  min-height: 0;
+}
+
+.match-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-bottom: 12px;
+}
+
+.match-tip {
+  margin-bottom: 12px;
+}
+
+.match-section {
+  padding: 12px;
+  border-radius: 8px;
+  background-color: var(--el-bg-color);
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.section-title h3 {
+  font-size: 16px;
+  line-height: 1.4;
+}
+
+.filter-limit {
+  width: 140px;
+}
+
+.match-table {
+  width: 100%;
+}
+
+@media (max-width: 900px) {
+  .filter-limit {
+    width: 120px;
+  }
+}

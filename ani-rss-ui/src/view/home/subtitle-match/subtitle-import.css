@@ -1,0 +1,115 @@
+.full-width {
+  width: 100%;
+}
+
+.mode-switch {
+  margin-bottom: 16px;
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.section-title h3 {
+  font-size: 16px;
+  line-height: 1.4;
+}
+
+.ani-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ani-meta-title {
+  flex: 1 1 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-dropzone {
+  width: 100%;
+  padding: 18px 12px;
+  border: 1px dashed var(--el-border-color);
+  border-radius: 8px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.2s, background-color 0.2s;
+}
+
+.import-dropzone:hover,
+.import-dropzone.is-dragover {
+  border-color: var(--el-color-primary);
+  background-color: var(--el-color-primary-light-9);
+}
+
+.dropzone-icon {
+  font-size: 26px;
+  color: var(--el-color-primary);
+}
+
+.dropzone-text {
+  margin-top: 6px;
+  font-size: 13px;
+}
+
+.dropzone-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.pending-list {
+  width: 100%;
+  margin-top: 10px;
+}
+
+.pending-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.pending-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.pending-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-tip {
+  margin-bottom: 12px;
+}
+
+.import-result {
+  padding: 12px;
+  border-radius: 8px;
+  background-color: var(--el-fill-color-lighter);
+}
+
+.import-result-table {
+  width: 100%;
+}
+
+.result-summary {
+  display: flex;
+  gap: 8px;
+}

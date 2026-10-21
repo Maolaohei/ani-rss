@@ -7,12 +7,14 @@ import ani.rss.commons.PinyinUtils;
 import ani.rss.download.OfflineDownloader;
 import ani.rss.download.OpenList;
 import ani.rss.download.OpenListApi;
+import ani.rss.download.openlist.runtime.OpenListDownloadPathResolver;
 import ani.rss.entity.*;
 import ani.rss.enums.EventTypeEnum;
 import ani.rss.enums.NotificationStatusEnum;
 import ani.rss.enums.StringEnum;
 import ani.rss.enums.TorrentsTags;
 import ani.rss.task.RssTask;
+import ani.rss.task.RssDownloadPort;
 import ani.rss.util.other.*;
 import cn.hutool.core.date.DateField;
 import cn.hutool.core.date.DateUtil;
@@ -43,7 +45,7 @@ import java.util.stream.Collectors;
  */
 @Slf4j
 @Service
-public class DownloadService {
+public class DownloadService implements OpenListDownloadPathResolver, RssDownloadPort {
     /** 非 OpenList 下载器推送串行；OpenList 不持此锁，避免长等待全局串行 */
     private static final Object DOWNLOAD_TOOL_LOCK = new Object();
 
@@ -64,49 +66,587 @@ public class DownloadService {
 
     /**
      * 下载动漫（调用方需已持有对应 ani 锁）
+     * <p>
+     * 编排只做三件事：准备本轮上下文 → 逐条目过闸门并提交 → 收尾落盘。
+     * 具体判定见 {@link #passGates}，提交与清理见 {@link #submitItem}。
      */
     private void downloadAniLocked(Ani ani) {
         Config config = ConfigUtil.CONFIG;
-        Boolean delete = config.getDelete();
-        Boolean autoDisabled = config.getAutoDisabled();
-        Integer downloadCount = config.getDownloadCount();
-        Integer delayedDownload = config.getDelayedDownload();
-        Boolean deleteStandbyRSSOnly = config.getDeleteStandbyRSSOnly();
+        DownloadRun run = prepareDownloadRun(ani);
+        for (Item item : run.items) {
+            if (RssTask.isCancelRequested()) {
+                log.warn("{} 检测到任务取消，停止本订阅后续下载", run.title);
+                return;
+            }
+            // false = 订阅已被移除, 整轮中止; true = 跳过/完成本条目继续下一个
+            if (!downloadItem(ani, item, run, config)) {
+                return;
+            }
+        }
+        flushRunState(ani, config, run);
+    }
 
-        String title = ani.getTitle();
-        Integer season = ani.getSeason();
-        Boolean downloadNew = ani.getDownloadNew();
-        List<Double> notDownload = ani.getNotDownload();
+    /**
+     * 处理单个条目：先过闸门，通过后再提交。
+     *
+     * @return false 表示整轮下载需要中止（订阅已被移除）
+     */
+    private boolean downloadItem(Ani ani, Item item, DownloadRun run, Config config) {
+        log.debug(JSONUtil.formatJsonStr(GsonStatic.toJson(item)));
+        ItemPlan plan = new ItemPlan();
+        if (!passGates(ani, item, run, config, plan)) {
+            return true;
+        }
+        return submitItem(ani, item, run, config, plan);
+    }
 
-        List<TorrentsInfo> torrentsInfos = TorrentUtil.getTorrentsInfos();
+    /**
+     * 逐层闸门判定：任一闸门拦下，本条目本轮跳过（返回 false）。
+     * <p>
+     * 判定顺序是语义的一部分：备用RSS占位的删除必须推迟到主RSS提交成功之后，
+     * 这里只登记待删任务（{@link ItemPlan#pendingStandbyPlaceholder}），绝不提前删除。
+     *
+     * @return true 表示通过全部闸门，可以进入提交
+     */
+    private boolean passGates(Ani ani, Item item, DownloadRun run, Config config, ItemPlan plan) {
+        prepareGateState(ani, item, run, plan);
+        if (versionGate(ani, item, run, plan).stops()) {
+            return false;
+        }
+        if (existingRecordGate(ani, item, run, config, plan).stops()) {
+            return false;
+        }
+        if (episodeDuplicateGate(run, plan).stops()) {
+            return false;
+        }
+        if (rangeDuplicateGate(item, run, plan).stops()) {
+            return false;
+        }
+        if (notDownloadGate(run, plan).stops()) {
+            return false;
+        }
+        if (latestOnlyGate(item, run, plan).stops()) {
+            return false;
+        }
+        if (delayGate(run, plan).stops()) {
+            return false;
+        }
+        if (newTorrentWaitGate(run, config, plan).stops()) {
+            return false;
+        }
+        if (standbyCleanupGate(ani, item, run, plan).stops()) {
+            return false;
+        }
+        if (existingTaskGate(run, plan).stops()) {
+            return false;
+        }
+        if (pushedHashGate(run, plan).stops()) {
+            return false;
+        }
+        if (localPresentGate(ani, item, run, plan).stops()) {
+            return false;
+        }
+        if (concurrencyGate(run).stops()) {
+            return false;
+        }
+        return true;
+    }
 
-        int currentDownloadCount = 0;
-        List<Item> items = ItemsUtil.getItems(ani);
+    private enum GateResult {
+        CONTINUE,
+        SKIP_ITEM,
+        ABORT_ITEM;
 
-        List<Integer> omitGaps = ItemsUtil.omitList(ani, items);
+        private boolean stops() {
+            return this != CONTINUE;
+        }
+    }
+
+    private void prepareGateState(Ani ani, Item item, DownloadRun run, ItemPlan plan) {
+        plan.reName = item.getReName();
+        plan.torrent = TorrentUtil.getTorrent(ani, item);
+        plan.master = item.getMaster();
+        plan.hash = FileUtil.mainName(plan.torrent)
+                .trim().toLowerCase();
+
+        plan.episode = item.getEpisode();
+        // .5 集
+        plan.is5 = ItemsUtil.is5(plan.episode);
+
+        // 「备用RSS占位」待清除任务：只在这里登记, 真正的删除推迟到确认要下载之前。
+        // 若在上面任一闸门(新种子等待/同时下载数/离线进行中/失败队列)就 continue,
+        // 占位文件会被白删 —— 该集在等待窗口内既无占位文件也没有主RSS文件。
+        plan.pendingStandbyPlaceholder = null;
+    }
+
+    /**
+     * 洗版判定只计算状态并记录日志，不拦截条目。
+     */
+    private GateResult versionGate(Ani ani, Item item, DownloadRun run, ItemPlan plan) {
+        // 高版本标记：RSS 标题里带 v2+。这是"标题声称的版本"，不是"盘上那份的版本"。
+        plan.higherVersion = run.v2 && item.getVersion() != null && item.getVersion() > 1;
+        // 洗版 = 本版<b>尚未落地</b>（没有自己的正式种子记录）且版本<b>高于</b>已落地版本（见 needsWash）。
+        // 原先只看 `version > 1`：那是无状态的，而重命名后的文件名不含版本号 ——
+        // 盘上那份是不是 v2 无处可知，于是同一 v2 每轮都被判成"待洗版"重新下载，
+        // 哪怕它自己的种子记录就摆在那里（离线正式记录只在产物落地后才提升）。
+        plan.wash = needsWash(ani, item, plan.torrent.exists());
+        if (plan.wash) {
+            log.info("检测到高版本 {} v{}, 准备洗版（本地已落地 v{}）",
+                    plan.reName, item.getVersion(), WashState.versionOf(ani, item));
+        }
+        return GateResult.CONTINUE;
+    }
+
+    /**
+     * 本地种子记录与备用RSS占位判定。
+     */
+    private GateResult existingRecordGate(
+            Ani ani, Item item, DownloadRun run, Config config, ItemPlan plan) {
+        ExistingRecordResult existing = handleExistingRecord(
+                ani, item, config, plan.torrent, plan.reName,
+                run.savePath, run.localEpisodeIndex, run.torrentsInfos);
+        if (existing.countsAsExisting()) {
+            if (plan.master && !plan.is5) {
+                run.currentDownloadCount++;
+            }
+            if (run.v2 && run.downloadedEpisodes != null) {
+                run.downloadedEpisodes.add(plan.episode);
+            }
+        }
+        if (existing.stopsCurrentItem()) {
+            return GateResult.SKIP_ITEM;
+        }
+        if (existing == ExistingRecordResult.STANDBY) {
+            plan.pendingStandbyPlaceholder = findRemovableStandbyPlaceholder(ani, item, run.torrentsInfos);
+        }
+        return GateResult.CONTINUE;
+    }
+
+    private GateResult episodeDuplicateGate(DownloadRun run, ItemPlan plan) {
+        // v2: episode 级去重，同集数已被其他种子覆盖则跳过
+        if (run.v2 && run.downloadedEpisodes != null && run.downloadedEpisodes.contains(plan.episode)) {
+            log.debug("集数已被覆盖 {} ep{}", plan.reName, plan.episode);
+            if (plan.master && !plan.is5) {
+                run.currentDownloadCount++;
+            }
+            return GateResult.SKIP_ITEM;
+        }
+        return GateResult.CONTINUE;
+    }
+
+    private GateResult rangeDuplicateGate(Item item, DownloadRun run, ItemPlan plan) {
+        // v2: 合集范围去重，范围内所有集数均已覆盖则跳过
+        if (run.v2 && item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty()) {
+            boolean allCovered = item.getEpisodeRange().stream().allMatch(run.downloadedEpisodes::contains);
+            if (allCovered) {
+                log.debug("合集范围已全部覆盖 {} {}", plan.reName, item.getEpisodeRange());
+                if (plan.master && !plan.is5) {
+                    run.currentDownloadCount++;
+                }
+                return GateResult.SKIP_ITEM;
+            }
+        }
+        return GateResult.CONTINUE;
+    }
+
+    private GateResult notDownloadGate(DownloadRun run, ItemPlan plan) {
+        if (run.notDownload.contains(plan.episode)) {
+            if (plan.master && !plan.is5) {
+                run.currentDownloadCount++;
+            }
+            log.debug("已被禁止下载: {}", plan.reName);
+            return GateResult.SKIP_ITEM;
+        }
+        return GateResult.CONTINUE;
+    }
+
+    private GateResult latestOnlyGate(Item item, DownloadRun run, ItemPlan plan) {
+        // 只下载最新集
+        if (Boolean.TRUE.equals(run.downloadNew)) {
+            Item newItem = run.items.get(run.items.size() - 1);
+
+            // 日期一致也可下载, 防止字幕组同时发多集
+            Date pubDate = item.getPubDate();
+            Date newPubDate = newItem.getPubDate();
+            if (Objects.nonNull(pubDate) && Objects.nonNull(newPubDate)) {
+                String pubDateFormat = DateUtil.format(pubDate, "yyyy-MM-dd");
+                String newPubDateFormat = DateUtil.format(newPubDate, "yyyy-MM-dd");
+                // 日期不一致则跳过
+                if (!pubDateFormat.equals(newPubDateFormat)) {
+                    if (plan.master && !plan.is5) {
+                        run.currentDownloadCount++;
+                    }
+                    return GateResult.SKIP_ITEM;
+                }
+            } else if (item != newItem) {
+                if (plan.master && !plan.is5) {
+                    run.currentDownloadCount++;
+                }
+                return GateResult.SKIP_ITEM;
+            }
+        }
+        plan.pubDate = item.getPubDate();
+        return GateResult.CONTINUE;
+    }
+
+    private GateResult delayGate(DownloadRun run, ItemPlan plan) {
+        if (Objects.nonNull(plan.pubDate) && run.delayedDownload > 0) {
+            Date now = DateUtil.offset(new Date(), DateField.MINUTE, -run.delayedDownload);
+            if (now.getTime() < plan.pubDate.getTime()) {
+                log.info("延迟下载 {}", plan.reName);
+                return GateResult.SKIP_ITEM;
+            }
+        }
+        return GateResult.CONTINUE;
+    }
+
+    private GateResult newTorrentWaitGate(DownloadRun run, Config config, ItemPlan plan) {
+        // 新种子下载等待：发布时间距今不足 N 小时的种子暂缓下载（离线场景云端无人做种，
+        // 立即提交只会超时失败并反复重提）。到期由下一轮 RSS 自然重查，无需新定时器。
+        // pubDate 为 null 放行（部分 RSS 源无该字段，不能永远卡住）；
+        // 高版本（v2+）条目不拦截——修正版通常来自已有种子的重新发布。
+        // 用 higherVersion 而不是 wash：本版记录已存在的高版本条目会在这里被拦下，
+        // 而它下一轮本来也不会重下（记录终态），拦住只是白等 2 小时。
+        Integer newTorrentWaitHours = ObjectUtil.defaultIfNull(config.getNewTorrentWaitHours(), 2);
+        if (Objects.nonNull(plan.pubDate) && newTorrentWaitHours > 0 && !plan.higherVersion) {
+            long earliest = System.currentTimeMillis() - TimeUnit.HOURS.toMillis(newTorrentWaitHours);
+            if (plan.pubDate.getTime() > earliest) {
+                // 站点时钟偏移导致 pubDate 在未来：按已过期处理，避免长期卡住
+                if (plan.pubDate.getTime() <= System.currentTimeMillis()) {
+                    long waitMinutes = Math.max(1,
+                            (plan.pubDate.getTime() - earliest) / TimeUnit.MINUTES.toMillis(1));
+                    log.info("新种子等待: {} 发布不足 {} 小时，约 {} 分钟后到期待重试",
+                            plan.reName, newTorrentWaitHours, waitMinutes);
+                    return GateResult.SKIP_ITEM;
+                }
+            }
+        }
+        return GateResult.CONTINUE;
+    }
+
+    /**
+     * 仅在主RSS更新后删除备用RSS。
+     * <p>
+     * 本轮只做两件可回退的事：登记待删任务 + 剥掉本地集数索引，真正的删除推迟到
+     * 主RSS提交成功之后。主提交失败时备用任务与文件原样保留。
+     */
+    private GateResult standbyCleanupGate(Ani ani, Item item, DownloadRun run, ItemPlan plan) {
+        plan.legacyStandbyRss = null;
+        if (run.delete && plan.master && run.deleteStandbyRSSOnly) {
+            TorrentsInfo standbyRSS = run.torrentsInfos
+                    .stream()
+                    .filter(torrentsInfo -> {
+                        if (!torrentsInfo.getDownloadDir().equals(run.savePath)) {
+                            return false;
+                        }
+                        if (!ReUtil.contains(StringEnum.SEASON_REG, torrentsInfo.getName())) {
+                            return false;
+                        }
+                        String s = ReUtil.get(StringEnum.SEASON_REG, torrentsInfo.getName(), 0);
+                        String ep = ReUtil.get(StringEnum.SEASON_REG, plan.reName, 0);
+                        if (s == null || ep == null || !s.equalsIgnoreCase(ep)) {
+                            return false;
+                        }
+                        List<String> tags = torrentsInfo.getTags();
+                        // 包含 备用RSS 标签或者 无主RSS字幕组信息
+                        return tags.contains(TorrentsTags.BACK_RSS.getValue()) ||
+                                !tags.contains(ani.getSubgroup());
+                    })
+                    // 不能命中刚提交的主RSS版本（同集数、同目录，靠名字无法区分）
+                    .filter(torrentsInfo -> !isSameHash(torrentsInfo, plan.hash))
+                    .findFirst()
+                    .orElse(null);
+            if (Objects.nonNull(standbyRSS)) {
+                List<String> tags = standbyRSS.getTags();
+                if (!tags.contains(TorrentsTags.RENAME.getValue())) {
+                    // 未完成重命名
+                    return GateResult.SKIP_ITEM;
+                }
+                // 只登记不删除：删除推迟到主RSS提交成功之后。
+                // 索引仍在本轮剥掉：否则 itemDownloaded 会因备用文件存在拦下主RSS。
+                plan.legacyStandbyRss = standbyRSS;
+                stripLocalEpisodeIndex(run.localEpisodeIndex, ani, item);
+            }
+        }
+        return GateResult.CONTINUE;
+    }
+
+    private GateResult existingTaskGate(DownloadRun run, ItemPlan plan) {
+        // 已经下载过
+        if (run.torrentsInfos
+                .stream()
+                .anyMatch(torrentsInfo ->
+                        // hash 相同（忽略大小写：下载器回的 hash 大小写不保证，本地 hash 恒小写）
+                        isSameHash(torrentsInfo, plan.hash))) {
+            log.info("已有下载任务 hash:{} name:{}", plan.hash, plan.reName);
+            RssTask.countRoundLocalState(LocalState.EXISTS);
+            if (plan.master && !plan.is5) {
+                run.currentDownloadCount++;
+            }
+            return GateResult.SKIP_ITEM;
+        }
+        return GateResult.CONTINUE;
+    }
+
+    private GateResult pushedHashGate(DownloadRun run, ItemPlan plan) {
+        // infoHash 去重：合集展开后多个 clone 共享同一 infoHash，第一个通过后后续 clone 被跳过
+        if (!run.pushedHashes.add(plan.hash)) {
+            log.debug("infoHash 已推送过，跳过 {} {}", plan.hash, plan.reName);
+            if (plan.master && !plan.is5) {
+                run.currentDownloadCount++;
+            }
+            return GateResult.SKIP_ITEM;
+        }
+        return GateResult.CONTINUE;
+    }
+
+    private GateResult localPresentGate(Ani ani, Item item, DownloadRun run, ItemPlan plan) {
+        // 未开启rename不进行检测; 洗版(高版本)不受本地已下载判断拦截
+        if (!plan.wash && itemDownloaded(ani, item, true, run.localEpisodeIndex)) {
+            // 主RSS更新时该集被"备用RSS占位": 登记待清除, 由主RSS替换(洗版)。
+            // 同样只登记不删除, 见 pendingStandbyPlaceholder 声明处。
+            TorrentsInfo standbyPlaceholder = findRemovableStandbyPlaceholder(ani, item, run.torrentsInfos);
+            if (standbyPlaceholder != null) {
+                plan.pendingStandbyPlaceholder = standbyPlaceholder;
+                log.info("备用RSS占位待清除, 由主RSS替换下载 {}", plan.reName);
+            } else {
+                log.info("本地文件已存在 {}", plan.reName);
+                RssTask.countRoundLocalState(LocalState.EXISTS);
+                if (plan.master && !plan.is5) {
+                    run.currentDownloadCount++;
+                }
+                return GateResult.SKIP_ITEM;
+            }
+        }
+        return GateResult.CONTINUE;
+    }
+
+    private GateResult concurrencyGate(DownloadRun run) {
+        // 同时下载数量限制
+        if (run.downloadCount > 0) {
+            if (run.activeDownloadCount >= run.downloadCount) {
+                log.debug("达到同时下载数量限制 {}", run.downloadCount);
+                return GateResult.SKIP_ITEM;
+            }
+        }
+        return GateResult.CONTINUE;
+    }
+
+    /**
+     * 提交下载；成功后清理备用RSS占位与旧任务，并更新本轮计数。
+     *
+     * @return false 表示整轮中止（订阅已被移除）
+     */
+    private boolean submitItem(Ani ani, Item item, DownloadRun run, Config config, ItemPlan plan) {
+        // OpenList 提交 != 完成：先写待完成标记，离线完成后才提升为正式种子记录
+        // 其余下载方式保持原行为：提交即写正式记录（预览视为已下载）
+        boolean openListTool = isOpenListTool();
+        // OpenList: pending 标记存在表示离线进行中, 本轮跳过, 避免重复提交与通知轰炸
+        if (openListTool && TorrentUtil.getPendingTorrent(ani, item).exists()) {
+            if (!TorrentUtil.isPendingExpired(ani, item)) {
+                log.debug("离线任务进行中, 跳过本轮 {}", plan.reName);
+                RssTask.countRoundLocalState(LocalState.UNKNOWN);
+                return true;
+            }
+            // §6.3 在途有效期：超过 alistDownloadTimeout × 2（默认 60 分钟）后不再"只等"，
+            // 放行进入归位/判定链路。
+            // 注意「过期 ≠ 重下」：下面的提交会被 OpenList.adoptOrCleanResidualTasks 复用远端
+            // 进行中的任务（10008 也兜底），这里只是把"重做归位 + 1 次单层确认"这条恢复路径打开，
+            // 让存疑条目有机会自动收敛为成功。没有这一步，"存疑保留 pending"会让该集永远卡住。
+            log.info("离线 pending 已超过在途有效期（{} 分钟），放行重做归位与确认 {}",
+                    TorrentUtil.pendingTtlMs(ConfigUtil.CONFIG) / 60_000L, plan.reName);
+        }
+        // (E9) 失败队列闸门: 仅非 OpenList 路径(qB/TR/Aria2)。近 24h 内失败过的本集
+        // 不再每轮自动重推, 避免坏种/下载器故障时无限重试风暴; 条目保留在失败队列,
+        // 由用户手动重试。OpenList 路径不加此闸门(其内部已有 10008/adopt 去重)。
+        if (!openListTool) {
+            String failKey = FailedDownloadQueue.keyOf(ani.getId(), item.getInfoHash(), plan.reName);
+            boolean recentFailed = FailedDownloadQueue.list().stream()
+                    .anyMatch(f -> Objects.equals(f.getId(), failKey)
+                            && f.getFailedAt() != null
+                            && System.currentTimeMillis() - f.getFailedAt() < TimeUnit.HOURS.toMillis(24));
+            if (recentFailed) {
+                log.warn("本集 24h 内下载失败(已保留在失败队列), 跳过本轮推送 {} hash={}", plan.reName, plan.hash);
+                RssTask.countRoundLocalState(LocalState.UNKNOWN);
+                return true;
+            }
+        }
+        File saveTorrent = openListTool
+                ? TorrentUtil.saveTorrentPending(ani, item)
+                : TorrentUtil.saveTorrent(ani, item);
+
+        if (!saveTorrent.exists()) {
+            // 种子下载失败
+            return true;
+        }
+
+        // 洗版清扫必须按"提交前目录里本来有什么"来清：主/备用同一模板重命名后可能完全同名，
+        // 提交之后就再也分不出"刚下好的主版本"与"待清理的备版本"，只能按快照清理。
+        Set<String> preExistingFiles = needsStandbySweep(item)
+                ? snapshotExistingFiles(run.savePath)
+                : null;
+
+        // 占位清除推迟到主RSS提交成功之后: 上面任一闸门 continue / 提交失败都不删占位, 主失败时备用文件得以保留。
+        if (!AniUtil.getAniList().contains(ani)) {
+            return false;
+        }
+
+        // 结构化事件: 开始下载(与 DOWNLOAD_END 成对, 便于外部程序对账)
+        Map<String, Object> startEvent = new LinkedHashMap<>();
+        startEvent.put("reName", plan.reName);
+        startEvent.put("infoHash", plan.hash);
+        startEvent.put("episode", plan.episode);
+        startEvent.put("size", item.getLength());
+        startEvent.put("source", config.getDownloadToolType());
+        startEvent.put("subgroup", item.getSubgroup());
+        startEvent.put("master", plan.master);
+        EventWebhookUtil.emit(EventTypeEnum.DOWNLOAD_START, ani, startEvent);
+
+        boolean downloadAccepted = download(ani, item, run.savePath, saveTorrent);
+        if (!downloadAccepted) {
+            // 提交/离线失败：本轮不算下载成功——不占并发配额、不记已下载集数、
+            // 不推进 lastDownloadTime、也绝不清理备用。失败信息与 DOWNLOAD_FAILED
+            // 事件已由 download() 内部落库，这里只把本地状态记成"存疑"。
+            log.warn("下载未提交成功, 本轮保留备用RSS与种子记录, 不做洗版清理 {}", plan.reName);
+            RssTask.countRoundLocalState(LocalState.UNKNOWN);
+            return true;
+        }
+
+        // 主RSS已提交成功, 此时清理备用才是安全的; 清理异常不得中断本轮剩余条目
+        try {
+            if (plan.pendingStandbyPlaceholder != null) {
+                removeStandbyPlaceholderTorrent(ani, item, run.torrentsInfos, run.localEpisodeIndex, plan.pendingStandbyPlaceholder);
+            }
+        } catch (Exception e) {
+            log.warn("清除备用RSS占位失败(不影响主RSS下载) {}: {}", plan.reName, ExceptionUtils.getMessage(e));
+        }
+        try {
+            // 同一任务可能已被上面的占位清除删掉：避免重复下发删除（第二次必然失败并刷日志）
+            if (plan.legacyStandbyRss != null && plan.legacyStandbyRss != plan.pendingStandbyPlaceholder
+                    && TorrentUtil.delete(plan.legacyStandbyRss, false, true)) {
+                run.torrentsInfos.remove(plan.legacyStandbyRss);
+            }
+        } catch (Exception e) {
+            log.warn("删除备用RSS任务失败(不影响主RSS下载) {}: {}", plan.reName, ExceptionUtils.getMessage(e));
+        }
+        try {
+            deleteStandbyRss(ani, item, plan.hash, preExistingFiles);
+        } catch (Exception e) {
+            log.warn("备用RSS洗版清理失败(不影响主RSS下载) {}: {}", plan.reName, ExceptionUtils.getMessage(e));
+        }
+
+        run.sync = true;
+
+        RssTask.countRoundLocalState(LocalState.ABSENT);
+
+        if (plan.master && !plan.is5) {
+            run.currentDownloadCount++;
+        }
+        // v2: 记录已下载集数（合集记录所有范围内的集数）
+        if (run.v2 && run.downloadedEpisodes != null) {
+            if (item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty()) {
+                run.downloadedEpisodes.addAll(item.getEpisodeRange());
+            } else {
+                run.downloadedEpisodes.add(plan.episode);
+            }
+        }
+        run.activeDownloadCount++;
+        return true;
+    }
+
+    /**
+     * 一轮结束后的收尾：有新下载或漏集变化才落盘（避免每轮无意义写 ani.v2.json），
+     * 自动停用判定同样在这里收敛。
+     */
+    private void flushRunState(Ani ani, Config config, DownloadRun run) {
+        // 有新下载，或漏集数量变化时落盘（避免每轮无意义写 ani.v2.json）
+        // 走 syncStateOnly：只回写运行时状态，不该顺带清空下载路径索引与本地状态快照——
+        // 那是"订阅增删改"才需要的动作，而这里每下完一集都会触发。
+        //
+        // F6-3：每轮每订阅最多落盘一次。原先"进度回写"与"自动停用"各写一次，
+        // 下完最后一集的那一轮会连写两次 ani.v2.json（整表序列化 + fsync）。
+        // 改为打标记、方法末尾统一 flush，语义不变而写盘次数收敛为 1。
+        boolean stateDirty = false;
+        if (run.sync || run.omitChanged) {
+            if (run.sync) {
+                int size = ItemsUtil.currentEpisodeNumber(ani, run.items);
+                ani.setCurrentEpisodeNumber(size);
+                ani.setLastDownloadTime(System.currentTimeMillis());
+            }
+            stateDirty = true;
+        }
+
+        if (run.autoDisabled) {
+            Integer totalEpisodeNumber = ani.getTotalEpisodeNumber();
+            if (totalEpisodeNumber != null && totalEpisodeNumber >= 1
+                    && run.currentDownloadCount >= totalEpisodeNumber) {
+                log.info("{} 第 {} 季 共 {} 集 已全部下载完成, 自动停止订阅", run.title, run.season, totalEpisodeNumber);
+                NotificationUtil.send(config, ani, StrFormatter.format("{} 订阅已完结", run.title), NotificationStatusEnum.COMPLETED);
+                ani.setEnable(false);
+                stateDirty = true;
+            }
+        }
+
+        if (stateDirty) {
+            AniUtil.syncStateOnly();
+        }
+    }
+
+    /**
+     * 单个条目的下载计划：闸门阶段写入，提交阶段复用。
+     */
+    private static final class ItemPlan {
+        private String reName;
+        private File torrent;
+        private String hash;
+        private Double episode;
+        private boolean is5;
+        private Boolean master;
+        private Date pubDate;
+        private boolean higherVersion;
+        private boolean wash;
+        private TorrentsInfo pendingStandbyPlaceholder;
+        private TorrentsInfo legacyStandbyRss;
+    }
+
+    /**
+     * 准备一轮订阅下载所需的配置与运行上下文。
+     */
+    private DownloadRun prepareDownloadRun(Ani ani) {
+        DownloadRun run = new DownloadRun();
+        Config config = ConfigUtil.CONFIG;
+        run.delete = config.getDelete();
+        run.autoDisabled = config.getAutoDisabled();
+        run.downloadCount = config.getDownloadCount();
+        run.delayedDownload = config.getDelayedDownload();
+        run.deleteStandbyRSSOnly = config.getDeleteStandbyRSSOnly();
+        run.title = ani.getTitle();
+        run.season = ani.getSeason();
+        run.downloadNew = ani.getDownloadNew();
+        run.notDownload = ani.getNotDownload();
+        run.torrentsInfos = TorrentUtil.getTorrentsInfos();
+        run.items = ItemsUtil.getItems(ani);
+
+        List<Integer> omitGaps = ItemsUtil.omitList(ani, run.items);
         int omitN = omitGaps == null ? 0 : omitGaps.size();
         Integer prevOmit = ani.getOmitCount();
-        boolean omitChanged = prevOmit == null || prevOmit != omitN;
-        // 结构化事件: 漏集数量发生变化且确实存在漏集时推送一次。
-        // 加 omitChanged 是为了避免每轮 RSS 扫描都重复推送同一批漏集。
-        if (omitN > 0 && omitChanged) {
+        run.omitChanged = prevOmit == null || prevOmit != omitN;
+        if (omitN > 0 && run.omitChanged) {
             Map<String, Object> omitEvent = new LinkedHashMap<>();
             omitEvent.put("omitCount", omitN);
             omitEvent.put("omitList", omitGaps);
             EventWebhookUtil.emit(EventTypeEnum.OMIT_DETECTED, ani, omitEvent);
         }
         SubscriptionHealth.rememberOmit(ani, omitN, System.currentTimeMillis());
-        ItemsUtil.omit(ani, items);
-        log.debug("{} 共 {} 个", title, items.size());
+        ItemsUtil.omit(ani, run.items);
+        log.debug("{} 共 {} 个", run.title, run.items.size());
 
-        long count = torrentsInfos
-                .stream()
+        run.activeDownloadCount = run.torrentsInfos.stream()
                 .filter(it -> {
                     TorrentsInfo.State state = it.getState();
                     if (Objects.isNull(state)) {
                         return true;
                     }
-                    // 未下载完成
                     return !List.of(
                             TorrentsInfo.State.queuedUP.name(),
                             TorrentsInfo.State.uploading.name(),
@@ -116,462 +656,118 @@ public class DownloadService {
                     ).contains(state.name());
                 })
                 .count();
-
-        String savePath = getDownloadPath(ani);
-
-        ItemsUtil.procrastinating(ani, items);
-
-        // 实时保存文件
-        boolean sync = false;
-
-        // v2: episode 级去重，跟踪已下载集数（含合集范围内所有集数）
-        boolean v2 = RenameUtil.isNamingV2(ani);
-        Set<Double> downloadedEpisodes = v2 ? new HashSet<>() : null;
-
-        // 本地 infoHash 去重：合集展开后的 clone 仍会进入循环，但同 infoHash 的第二个及后续 clone 会被此 Set 过滤跳过
-        Set<String> pushedHashes = new HashSet<>();
-
-        // 每个订阅只扫一次本地下载目录; OpenList 为网盘虚拟路径, 不预构建
-        // (151 行信任记录, itemDownloaded 内部按需用 OpenList API 检查, 避免每轮 API 调用)
-        Set<String> localEpisodeIndex = isOpenListTool()
+        run.savePath = getDownloadPath(ani);
+        ItemsUtil.procrastinating(ani, run.items);
+        run.sync = false;
+        run.v2 = RenameUtil.isNamingV2(ani);
+        run.downloadedEpisodes = run.v2 ? new HashSet<>() : null;
+        run.pushedHashes = new HashSet<>();
+        run.localEpisodeIndex = isOpenListTool()
                 ? null
-                : buildLocalEpisodeIndex(ani, savePath);
+                : buildLocalEpisodeIndex(ani, run.savePath);
+        return run;
+    }
 
-        for (Item item : items) {
-            if (RssTask.isCancelRequested()) {
-                log.warn("{} 检测到任务取消，停止本订阅后续下载", title);
-                return;
-            }
-            log.debug(JSONUtil.formatJsonStr(GsonStatic.toJson(item)));
-            String reName = item.getReName();
-            File torrent = TorrentUtil.getTorrent(ani, item);
-            Boolean master = item.getMaster();
-            String hash = FileUtil.mainName(torrent)
-                    .trim().toLowerCase();
+    enum ExistingRecordResult {
+        CONTINUE,
+        EXISTS,
+        SKIP,
+        STANDBY;
 
-            Double episode = item.getEpisode();
-            // .5 集
-            boolean is5 = ItemsUtil.is5(episode);
+        /**
+         * 是否应计入本轮「已存在」统计。
+         * <p>
+         * SKIP 包含 UNVERIFIABLE / RETRY_EXHAUSTED，不能当作已下载计数；
+         * STANDBY 仍要继续走下载流程。
+         */
+        boolean countsAsExisting() {
+            return this == EXISTS;
+        }
 
-            // 「备用RSS占位」待清除任务：只在这里登记, 真正的删除推迟到确认要下载之前。
-            // 若在上面任一闸门(新种子等待/同时下载数/离线进行中/失败队列)就 continue,
-            // 占位文件会被白删 —— 该集在等待窗口内既无占位文件也没有主RSS文件。
-            TorrentsInfo pendingStandbyPlaceholder = null;
+        boolean stopsCurrentItem() {
+            return this == EXISTS || this == SKIP;
+        }
+    }
 
-            // 高版本标记：RSS 标题里带 v2+。这是"标题声称的版本"，不是"盘上那份的版本"。
-            boolean higherVersion = v2 && item.getVersion() != null && item.getVersion() > 1;
-            // 洗版 = 本版<b>尚未落地</b>（没有自己的正式种子记录）且版本<b>高于</b>已落地版本（见 needsWash）。
-            // 原先只看 `version > 1`：那是无状态的，而重命名后的文件名不含版本号 ——
-            // 盘上那份是不是 v2 无处可知，于是同一 v2 每轮都被判成"待洗版"重新下载，
-            // 哪怕它自己的种子记录就摆在那里（离线正式记录只在产物落地后才提升）。
-            boolean wash = needsWash(ani, item, torrent.exists());
-            if (wash) {
-                log.info("检测到高版本 {} v{}, 准备洗版（本地已落地 v{}）",
-                        reName, item.getVersion(), WashState.versionOf(ani, item));
-            }
-
-            // 已经下载过
-            if (torrent.exists()) {
-                // 记录有效性校验: 下载器有对应任务 或 本地有对应文件 才视为已下载;
-                // OpenList/Alist: 下载目录是网盘虚拟路径, 本地文件不可见且任务列表恒空,
-                // 先归位对账, 对账未确认再兜底检查, 兜底也没找到才清理记录触发重新下载
-                //
-                // 判定必须是三态：VALID / ABSENT(确认没有) / UNVERIFIABLE(查不到)。
-                // 只有 ABSENT 才允许删记录重下——把"查不到"读成"确认没有"，
-                // 会让一次网盘抖动直接演变成"删记录 + 整季重新下单"。
-                Presence presence;
-                UnknownReason unknownReason = UnknownReason.NONE;
-                if (!Boolean.TRUE.equals(config.getRename())) {
-                    presence = Presence.VALID;
-                } else if (isOpenListTool() && TorrentUtil.DOWNLOAD instanceof OfflineDownloader offline) {
-                    PresenceDecision decision = resolveOpenListPresence(ani, item, reName, savePath, offline, localEpisodeIndex);
-                    presence = decision.presence();
-                    unknownReason = decision.reason();
-                } else {
-                    // 本地型下载器：索引已在订阅级预构建，失败路径极少；保持原有布尔语义
-                    presence = itemDownloaded(ani, item, true, localEpisodeIndex)
-                            ? Presence.VALID : Presence.ABSENT;
-                }
-                if (presence == Presence.UNVERIFIABLE) {
-                    // 既不能断言"有"也不能断言"没有"：保留记录、本轮不重下，网盘恢复后自会发现文件本来就在。
-                    // 但必须带出<b>成因</b>——统称"网盘不可用"会把"等 60s 冷却"和"下载路径配错了"
-                    // 说成同一件事，用户除了猜没有别的办法（2026-09-20 的排查正是卡在这里）。
-                    log.info("本地状态无法确认（{}），本轮保留记录不重下 {}{}",
-                            unknownReasonText(unknownReason), reName, cooldownRemainText(unknownReason));
-                    RssTask.countRoundLocalState(LocalState.UNKNOWN);
-                    RssTask.countRoundUnknownReason(unknownReason);
-                    continue;
-                }
-                if (presence == Presence.RETRY_EXHAUSTED) {
-                    // 连续失败已达上限：保留种子记录以"停推"，等用户在失败列表手动重试
-                    log.warn("本集连续下载失败已达 {} 次，停止自动重推（条目保留在失败队列，可手动重试） {}",
-                            MAX_OPENLIST_AUTO_RETRY_ATTEMPTS, reName);
-                    RssTask.countRoundLocalState(LocalState.UNKNOWN);
-                    continue;
-                }
-                if (presence.valid()) {
-                    // 主RSS记录被"备用RSS占位"证据命中: 登记待清除, 按未下载继续走流程,
-                    // 实现主RSS替换。否则备用RSS先下载过的集会被"种子记录已存在/本地文件已存在"永久锁死。
-                    // 注意这里只登记不删除(见 pendingStandbyPlaceholder 声明处)。
-                    TorrentsInfo standbyPlaceholder = findRemovableStandbyPlaceholder(ani, item, torrentsInfos);
-                    if (standbyPlaceholder != null) {
-                        pendingStandbyPlaceholder = standbyPlaceholder;
-                        // fall through 继续正常下载流程(主RSS自己的种子记录保留, 下载时幂等重写)
-                    } else {
-                        log.debug("种子记录已存在 {}", reName);
-                        // 记录有效 = 这一版的产物确实在盘上（离线正式记录只在确认成功后才提升）：
-                        // 补记「已落地版本」，让升级前没有 wash-state 记录的存量数据当轮收敛，
-                        // 而不是把"没有记录"一直读成"本地是 v0"。
-                        backfillWashState(ani, item);
-                        if (master && !is5) {
-                            currentDownloadCount++;
-                        }
-                        if (v2 && downloadedEpisodes != null) {
-                            downloadedEpisodes.add(episode);
-                        }
-                        continue;
-                    }
-                } else {
-                    // D1：正式种子记录只增不删——删除只允许用户显式操作（强制下载 / 精确重下 / 删除记录）。
-                    // 对 OpenList 路径，ABSENT 已不可能由"读失败"产生（读失败一律是 UNVERIFIABLE），
-                    // 所以"删记录重下"这条路径没有存在意义，直接删掉：保留记录、不重下，
-                    // 用户若确认文件已不在，可用「强制下载」显式重下。
-                    // 本地型下载器（qB/TR/Aria2）保留原语义：它的 ABSENT 来自下载器自身的确切答复，
-                    // 且"删记录重下"是既有行为，改动风险大于收益。
-                    if (isOpenListTool()) {
-                        log.warn("种子记录存在但未确认网盘产物，按 v3 保留记录（不删、不重下），"
-                                + "等下一轮复核 {}", reName);
-                        RssTask.countRoundLocalState(LocalState.UNKNOWN);
-                        continue;
-                    }
-                    log.warn("清理过期种子记录(无对应任务/文件) {}", reName);
-                    FileUtil.del(torrent);
-                }
-            }
-
-            // v2: episode 级去重，同集数已被其他种子覆盖则跳过
-            if (v2 && downloadedEpisodes != null && downloadedEpisodes.contains(episode)) {
-                log.debug("集数已被覆盖 {} ep{}", reName, episode);
-                if (master && !is5) {
-                    currentDownloadCount++;
-                }
-                continue;
-            }
-
-            // v2: 合集范围去重，范围内所有集数均已覆盖则跳过
-            if (v2 && item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty()) {
-                boolean allCovered = item.getEpisodeRange().stream().allMatch(downloadedEpisodes::contains);
-                if (allCovered) {
-                    log.debug("合集范围已全部覆盖 {} {}", reName, item.getEpisodeRange());
-                    if (master && !is5) {
-                        currentDownloadCount++;
-                    }
-                    continue;
-                }
-            }
-
-            if (notDownload.contains(episode)) {
-                if (master && !is5) {
-                    currentDownloadCount++;
-                }
-                log.debug("已被禁止下载: {}", reName);
-                continue;
-            }
-
-            // 只下载最新集
-            if (Boolean.TRUE.equals(downloadNew)) {
-                Item newItem = items.get(items.size() - 1);
-
-                // 日期一致也可下载, 防止字幕组同时发多集
-                Date pubDate = item.getPubDate();
-                Date newPubDate = newItem.getPubDate();
-                if (Objects.nonNull(pubDate) && Objects.nonNull(newPubDate)) {
-                    String pubDateFormat = DateUtil.format(pubDate, "yyyy-MM-dd");
-                    String newPubDateFormat = DateUtil.format(newPubDate, "yyyy-MM-dd");
-                    // 日期不一致则跳过
-                    if (!pubDateFormat.equals(newPubDateFormat)) {
-                        if (master && !is5) {
-                            currentDownloadCount++;
-                        }
-                        continue;
-                    }
-                } else if (item != newItem) {
-                    if (master && !is5) {
-                        currentDownloadCount++;
-                    }
-                    continue;
-                }
-            }
-
-            Date pubDate = item.getPubDate();
-            if (Objects.nonNull(pubDate) && delayedDownload > 0) {
-                Date now = DateUtil.offset(new Date(), DateField.MINUTE, -delayedDownload);
-                if (now.getTime() < pubDate.getTime()) {
-                    log.info("延迟下载 {}", reName);
-                    continue;
-                }
-            }
-
-            // 新种子下载等待：发布时间距今不足 N 小时的种子暂缓下载（离线场景云端无人做种，
-            // 立即提交只会超时失败并反复重提）。到期由下一轮 RSS 自然重查，无需新定时器。
-            // pubDate 为 null 放行（部分 RSS 源无该字段，不能永远卡住）；
-            // 高版本（v2+）条目不拦截——修正版通常来自已有种子的重新发布。
-            // 用 higherVersion 而不是 wash：本版记录已存在的高版本条目会在这里被拦下，
-            // 而它下一轮本来也不会重下（记录终态），拦住只是白等 2 小时。
-            Integer newTorrentWaitHours = ObjectUtil.defaultIfNull(config.getNewTorrentWaitHours(), 2);
-            if (Objects.nonNull(pubDate) && newTorrentWaitHours > 0 && !higherVersion) {
-                long earliest = System.currentTimeMillis() - TimeUnit.HOURS.toMillis(newTorrentWaitHours);
-                if (pubDate.getTime() > earliest) {
-                    // 站点时钟偏移导致 pubDate 在未来：按已过期处理，避免长期卡住
-                    if (pubDate.getTime() <= System.currentTimeMillis()) {
-                        long waitMinutes = Math.max(1,
-                                (pubDate.getTime() - earliest) / TimeUnit.MINUTES.toMillis(1));
-                        log.info("新种子等待: {} 发布不足 {} 小时，约 {} 分钟后到期待重试",
-                                reName, newTorrentWaitHours, waitMinutes);
-                        continue;
-                    }
-                }
-            }
-
-            // 仅在主RSS更新后删除备用RSS
-            // 本轮只做两件可回退的事：登记待删任务 + 剥掉本地集数索引（否则下方
-            // itemDownloaded 会因备用文件仍在而拦下主RSS，替换永远无法发生）。
-            // 真正的删除推迟到主RSS提交成功之后（见下方 downloadAccepted 分支）：
-            // 主提交失败时备用任务与文件原样保留，不再出现"备已删、主未到"的空窗。
-            TorrentsInfo legacyStandbyRss = null;
-            if (delete && master && deleteStandbyRSSOnly) {
-                TorrentsInfo standbyRSS = torrentsInfos
-                        .stream()
-                        .filter(torrentsInfo -> {
-                            if (!torrentsInfo.getDownloadDir().equals(savePath)) {
-                                return false;
-                            }
-                            if (!ReUtil.contains(StringEnum.SEASON_REG, torrentsInfo.getName())) {
-                                return false;
-                            }
-                            String s = ReUtil.get(StringEnum.SEASON_REG, torrentsInfo.getName(), 0);
-                            String ep = ReUtil.get(StringEnum.SEASON_REG, reName, 0);
-                            if (s == null || ep == null || !s.equalsIgnoreCase(ep)) {
-                                return false;
-                            }
-                            List<String> tags = torrentsInfo.getTags();
-                            // 包含 备用RSS 标签或者 无主RSS字幕组信息
-                            return tags.contains(TorrentsTags.BACK_RSS.getValue()) ||
-                                    !tags.contains(ani.getSubgroup());
-                        })
-                        // 不能命中刚提交的主RSS版本（同集数、同目录，靠名字无法区分）
-                        .filter(torrentsInfo -> !isSameHash(torrentsInfo, hash))
-                        .findFirst()
-                        .orElse(null);
-
-                if (Objects.nonNull(standbyRSS)) {
-                    List<String> tags = standbyRSS.getTags();
-                    if (!tags.contains(TorrentsTags.RENAME.getValue())) {
-                        // 未完成重命名
-                        continue;
-                    }
-                    // 只登记不删除：删除推迟到主RSS提交成功之后。
-                    // 索引仍在本轮剥掉：否则 itemDownloaded 会因备用文件存在拦下主RSS。
-                    legacyStandbyRss = standbyRSS;
-                    stripLocalEpisodeIndex(localEpisodeIndex, ani, item);
-                }
-            }
-
-            // 已经下载过
-            if (torrentsInfos
-                    .stream()
-                    .anyMatch(torrentsInfo ->
-                            // hash 相同（忽略大小写：下载器回的 hash 大小写不保证，本地 hash 恒小写）
-                            isSameHash(torrentsInfo, hash))) {
-                log.info("已有下载任务 hash:{} name:{}", hash, reName);
-                RssTask.countRoundLocalState(LocalState.EXISTS);
-                if (master && !is5) {
-                    currentDownloadCount++;
-                }
-                continue;
-            }
-
-            // infoHash 去重：合集展开后多个 clone 共享同一 infoHash，第一个通过后后续 clone 被跳过
-            if (!pushedHashes.add(hash)) {
-                log.debug("infoHash 已推送过，跳过 {} {}", hash, reName);
-                if (master && !is5) {
-                    currentDownloadCount++;
-                }
-                continue;
-            }
-
-            // 未开启rename不进行检测; 洗版(高版本)不受本地已下载判断拦截
-            if (!wash && itemDownloaded(ani, item, true, localEpisodeIndex)) {
-                // 主RSS更新时该集被"备用RSS占位": 登记待清除, 由主RSS替换(洗版)。
-                // 同样只登记不删除, 见 pendingStandbyPlaceholder 声明处。
-                TorrentsInfo standbyPlaceholder = findRemovableStandbyPlaceholder(ani, item, torrentsInfos);
-                if (standbyPlaceholder != null) {
-                    pendingStandbyPlaceholder = standbyPlaceholder;
-                    log.info("备用RSS占位待清除, 由主RSS替换下载 {}", reName);
-                } else {
-                    log.info("本地文件已存在 {}", reName);
-                    RssTask.countRoundLocalState(LocalState.EXISTS);
-                    if (master && !is5) {
-                        currentDownloadCount++;
-                    }
-                    continue;
-                }
-            }
-
-            // 同时下载数量限制
-            if (downloadCount > 0) {
-                if (count >= downloadCount) {
-                    log.debug("达到同时下载数量限制 {}", downloadCount);
-                    continue;
-                }
-            }
-
-            // OpenList 提交 != 完成：先写待完成标记，离线完成后才提升为正式种子记录
-            // 其余下载方式保持原行为：提交即写正式记录（预览视为已下载）
-            boolean openListTool = isOpenListTool();
-            // OpenList: pending 标记存在表示离线进行中, 本轮跳过, 避免重复提交与通知轰炸
-            if (openListTool && TorrentUtil.getPendingTorrent(ani, item).exists()) {
-                if (!TorrentUtil.isPendingExpired(ani, item)) {
-                    log.debug("离线任务进行中, 跳过本轮 {}", reName);
-                    RssTask.countRoundLocalState(LocalState.UNKNOWN);
-                    continue;
-                }
-                // §6.3 在途有效期：超过 alistDownloadTimeout × 2（默认 60 分钟）后不再"只等"，
-                // 放行进入归位/判定链路。
-                // 注意「过期 ≠ 重下」：下面的提交会被 OpenList.adoptOrCleanResidualTasks 复用远端
-                // 进行中的任务（10008 也兜底），这里只是把"重做归位 + 1 次单层确认"这条恢复路径打开，
-                // 让存疑条目有机会自动收敛为成功。没有这一步，"存疑保留 pending"会让该集永远卡住。
-                log.info("离线 pending 已超过在途有效期（{} 分钟），放行重做归位与确认 {}",
-                        TorrentUtil.pendingTtlMs(ConfigUtil.CONFIG) / 60_000L, reName);
-            }
-            // (E9) 失败队列闸门: 仅非 OpenList 路径(qB/TR/Aria2)。近 24h 内失败过的本集
-            // 不再每轮自动重推, 避免坏种/下载器故障时无限重试风暴; 条目保留在失败队列,
-            // 由用户手动重试。OpenList 路径不加此闸门(其内部已有 10008/adopt 去重)。
-            if (!openListTool) {
-                String failKey = FailedDownloadQueue.keyOf(ani.getId(), item.getInfoHash(), reName);
-                boolean recentFailed = FailedDownloadQueue.list().stream()
-                        .anyMatch(f -> Objects.equals(f.getId(), failKey)
-                                && f.getFailedAt() != null
-                                && System.currentTimeMillis() - f.getFailedAt() < TimeUnit.HOURS.toMillis(24));
-                if (recentFailed) {
-                    log.warn("本集 24h 内下载失败(已保留在失败队列), 跳过本轮推送 {} hash={}", reName, hash);
-                    RssTask.countRoundLocalState(LocalState.UNKNOWN);
-                    continue;
-                }
-            }
-            File saveTorrent = openListTool
-                    ? TorrentUtil.saveTorrentPending(ani, item)
-                    : TorrentUtil.saveTorrent(ani, item);
-
-            if (!saveTorrent.exists()) {
-                // 种子下载失败
-                continue;
-            }
-
-            // 洗版清扫必须按"提交前目录里本来有什么"来清：主/备用同一模板重命名后可能完全同名，
-            // 提交之后就再也分不出"刚下好的主版本"与"待清理的备版本"，只能按快照清理。
-            Set<String> preExistingFiles = needsStandbySweep(item)
-                    ? snapshotExistingFiles(savePath)
-                    : null;
-
-            // 占位清除推迟到主RSS提交成功之后: 上面任一闸门 continue / 提交失败都不删占位, 主失败时备用文件得以保留。
-            if (!AniUtil.getAniList().contains(ani)) {
-                return;
-            }
-
-            // 结构化事件: 开始下载(与 DOWNLOAD_END 成对, 便于外部程序对账)
-            Map<String, Object> startEvent = new LinkedHashMap<>();
-            startEvent.put("reName", reName);
-            startEvent.put("infoHash", hash);
-            startEvent.put("episode", episode);
-            startEvent.put("size", item.getLength());
-            startEvent.put("source", config.getDownloadToolType());
-            startEvent.put("subgroup", item.getSubgroup());
-            startEvent.put("master", master);
-            EventWebhookUtil.emit(EventTypeEnum.DOWNLOAD_START, ani, startEvent);
-
-            boolean downloadAccepted = download(ani, item, savePath, saveTorrent);
-            if (!downloadAccepted) {
-                // 提交/离线失败：本轮不算下载成功——不占并发配额、不记已下载集数、
-                // 不推进 lastDownloadTime、也绝不清理备用。失败信息与 DOWNLOAD_FAILED
-                // 事件已由 download() 内部落库，这里只把本地状态记成"存疑"。
-                log.warn("下载未提交成功, 本轮保留备用RSS与种子记录, 不做洗版清理 {}", reName);
+    /**
+     * 校验已有种子记录。
+     * <p>
+     * 三态语义保持不变：只有明确 ABSENT 才允许进入重下流程；OpenList 的
+     * UNVERIFIABLE 一律保留记录。
+     */
+    private ExistingRecordResult handleExistingRecord(
+            Ani ani, Item item, Config config, File torrent, String reName,
+            String savePath, Set<String> localEpisodeIndex, List<TorrentsInfo> torrentsInfos) {
+        if (!torrent.exists()) {
+            return ExistingRecordResult.CONTINUE;
+        }
+        Presence presence;
+        UnknownReason unknownReason = UnknownReason.NONE;
+        if (!Boolean.TRUE.equals(config.getRename())) {
+            presence = Presence.VALID;
+        } else if (isOpenListTool() && TorrentUtil.DOWNLOAD instanceof OfflineDownloader offline) {
+            PresenceDecision decision = resolveOpenListPresence(
+                    ani, item, reName, savePath, offline, localEpisodeIndex);
+            presence = decision.presence();
+            unknownReason = decision.reason();
+        } else {
+            presence = itemDownloaded(ani, item, true, localEpisodeIndex)
+                    ? Presence.VALID : Presence.ABSENT;
+        }
+        if (presence == Presence.UNVERIFIABLE) {
+            log.info("本地状态无法确认（{}），本轮保留记录不重下 {}{}",
+                    unknownReasonText(unknownReason), reName, cooldownRemainText(unknownReason));
+            RssTask.countRoundLocalState(LocalState.UNKNOWN);
+            RssTask.countRoundUnknownReason(unknownReason);
+            return ExistingRecordResult.SKIP;
+        }
+        if (presence == Presence.RETRY_EXHAUSTED) {
+            log.warn("本集连续下载失败已达 {} 次，停止自动重推（条目保留在失败队列，可手动重试） {}",
+                    MAX_OPENLIST_AUTO_RETRY_ATTEMPTS, reName);
+            RssTask.countRoundLocalState(LocalState.UNKNOWN);
+            return ExistingRecordResult.SKIP;
+        }
+        if (!presence.valid()) {
+            if (isOpenListTool()) {
+                log.warn("种子记录存在但未确认网盘产物，按 v3 保留记录（不删、不重下），"
+                        + "等下一轮复核 {}", reName);
                 RssTask.countRoundLocalState(LocalState.UNKNOWN);
-                continue;
+                return ExistingRecordResult.SKIP;
             }
-
-            // 主RSS已提交成功, 此时清理备用才是安全的; 清理异常不得中断本轮剩余条目
-            try {
-                if (pendingStandbyPlaceholder != null) {
-                    removeStandbyPlaceholderTorrent(ani, item, torrentsInfos, localEpisodeIndex, pendingStandbyPlaceholder);
-                }
-            } catch (Exception e) {
-                log.warn("清除备用RSS占位失败(不影响主RSS下载) {}: {}", reName, ExceptionUtils.getMessage(e));
-            }
-            try {
-                // 同一任务可能已被上面的占位清除删掉：避免重复下发删除（第二次必然失败并刷日志）
-                if (legacyStandbyRss != null && legacyStandbyRss != pendingStandbyPlaceholder
-                        && TorrentUtil.delete(legacyStandbyRss, false, true)) {
-                    torrentsInfos.remove(legacyStandbyRss);
-                }
-            } catch (Exception e) {
-                log.warn("删除备用RSS任务失败(不影响主RSS下载) {}: {}", reName, ExceptionUtils.getMessage(e));
-            }
-            try {
-                deleteStandbyRss(ani, item, hash, preExistingFiles);
-            } catch (Exception e) {
-                log.warn("备用RSS洗版清理失败(不影响主RSS下载) {}: {}", reName, ExceptionUtils.getMessage(e));
-            }
-
-            sync = true;
-
-            RssTask.countRoundLocalState(LocalState.ABSENT);
-
-            if (master && !is5) {
-                currentDownloadCount++;
-            }
-            // v2: 记录已下载集数（合集记录所有范围内的集数）
-            if (v2 && downloadedEpisodes != null) {
-                if (item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty()) {
-                    downloadedEpisodes.addAll(item.getEpisodeRange());
-                } else {
-                    downloadedEpisodes.add(episode);
-                }
-            }
-            count++;
+            log.warn("清理过期种子记录(无对应任务/文件) {}", reName);
+            FileUtil.del(torrent);
+            return ExistingRecordResult.CONTINUE;
         }
-
-        // 有新下载，或漏集数量变化时落盘（避免每轮无意义写 ani.v2.json）
-        // 走 syncStateOnly：只回写运行时状态，不该顺带清空下载路径索引与本地状态快照——
-        // 那是"订阅增删改"才需要的动作，而这里每下完一集都会触发。
-        //
-        // F6-3：每轮每订阅最多落盘一次。原先"进度回写"与"自动停用"各写一次，
-        // 下完最后一集的那一轮会连写两次 ani.v2.json（整表序列化 + fsync）。
-        // 改为打标记、方法末尾统一 flush，语义不变而写盘次数收敛为 1。
-        boolean stateDirty = false;
-        if (sync || omitChanged) {
-            if (sync) {
-                int size = ItemsUtil.currentEpisodeNumber(ani, items);
-                ani.setCurrentEpisodeNumber(size);
-                ani.setLastDownloadTime(System.currentTimeMillis());
-            }
-            stateDirty = true;
+        TorrentsInfo standbyPlaceholder = findRemovableStandbyPlaceholder(ani, item, torrentsInfos);
+        if (standbyPlaceholder != null) {
+            return ExistingRecordResult.STANDBY;
         }
+        log.debug("种子记录已存在 {}", reName);
+        backfillWashState(ani, item);
+        return ExistingRecordResult.EXISTS;
+    }
 
-        if (autoDisabled) {
-            Integer totalEpisodeNumber = ani.getTotalEpisodeNumber();
-            if (totalEpisodeNumber != null && totalEpisodeNumber >= 1
-                    && currentDownloadCount >= totalEpisodeNumber) {
-                log.info("{} 第 {} 季 共 {} 集 已全部下载完成, 自动停止订阅", title, season, totalEpisodeNumber);
-                NotificationUtil.send(config, ani, StrFormatter.format("{} 订阅已完结", title), NotificationStatusEnum.COMPLETED);
-                ani.setEnable(false);
-                stateDirty = true;
-            }
-        }
-
-        if (stateDirty) {
-            AniUtil.syncStateOnly();
-        }
+    private static final class DownloadRun {
+        private Boolean delete;
+        private Boolean autoDisabled;
+        private Integer downloadCount;
+        private Integer delayedDownload;
+        private Boolean deleteStandbyRSSOnly;
+        private String title;
+        private Integer season;
+        private Boolean downloadNew;
+        private List<Double> notDownload;
+        private List<TorrentsInfo> torrentsInfos;
+        private List<Item> items;
+        private boolean omitChanged;
+        private long activeDownloadCount;
+        private String savePath;
+        private boolean sync;
+        private boolean v2;
+        private Set<Double> downloadedEpisodes;
+        private Set<String> pushedHashes;
+        private Set<String> localEpisodeIndex;
+        private int currentDownloadCount;
     }
 
     /**
@@ -1393,25 +1589,11 @@ public class DownloadService {
         TorrentsInfo.State state = torrentsInfo.getState();
         String name = torrentsInfo.getName();
 
-        if (Objects.isNull(state)) {
+        if (!isDownloadCompleteState(state)) {
             return;
         }
-        if (!List.of(
-                TorrentsInfo.State.queuedUP.name(),
-                TorrentsInfo.State.uploading.name(),
-                TorrentsInfo.State.stalledUP.name(),
-                TorrentsInfo.State.pausedUP.name(),
-                TorrentsInfo.State.stoppedUP.name()
-        ).contains(state.name())) {
-            return;
-        }
-        // 添加下载完成标签，防止重复通知
         List<String> tags = torrentsInfo.getTags();
-        if (tags.contains(TorrentsTags.DOWNLOAD_COMPLETE.getValue())) {
-            return;
-        }
-        Boolean b = TorrentUtil.addTags(torrentsInfo, TorrentsTags.DOWNLOAD_COMPLETE.getValue());
-        if (!b) {
+        if (!claimDownloadCompleteTag(torrentsInfo, tags)) {
             return;
         }
         Optional<Ani> aniOpt = findAniByDownloadPath(torrentsInfo);
@@ -1422,8 +1604,44 @@ public class DownloadService {
         }
 
         Ani ani = aniOpt.get();
+        String subgroup = resolveNotificationSubgroup(ani, tags);
 
-        // 根据标签反向判断出字幕组
+        Config config = ConfigUtil.CONFIG;
+        scrapeCompletedAni(ani, config);
+        boolean standby = notifyDownloadComplete(ani, name, tags);
+        recordDownloadCompletion(ani, torrentsInfo, name, subgroup, standby);
+        completeAniQuietly(ani);
+    }
+
+    private static boolean isDownloadCompleteState(TorrentsInfo.State state) {
+        if (Objects.isNull(state)) {
+            return false;
+        }
+        return List.of(
+                TorrentsInfo.State.queuedUP.name(),
+                TorrentsInfo.State.uploading.name(),
+                TorrentsInfo.State.stalledUP.name(),
+                TorrentsInfo.State.pausedUP.name(),
+                TorrentsInfo.State.stoppedUP.name()
+        ).contains(state.name());
+    }
+
+    private static boolean claimDownloadCompleteTag(TorrentsInfo torrentsInfo, List<String> tags) {
+        // 添加下载完成标签，防止重复通知
+        if (tags.contains(TorrentsTags.DOWNLOAD_COMPLETE.getValue())) {
+            return false;
+        }
+        Boolean b = TorrentUtil.addTags(torrentsInfo, TorrentsTags.DOWNLOAD_COMPLETE.getValue());
+        if (!b) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * 根据标签反向判断出字幕组，并同步到番剧对象。
+     */
+    private static String resolveNotificationSubgroup(Ani ani, List<String> tags) {
         String subgroup = ani.getSubgroup();
         Set<String> collect = ani.getStandbyRssList()
                 .stream()
@@ -1437,8 +1655,10 @@ public class DownloadService {
                 .orElse(subgroup);
         subgroup = StrUtil.blankToDefault(subgroup, "未知字幕组");
         ani.setSubgroup(subgroup);
+        return subgroup;
+    }
 
-        Config config = ConfigUtil.CONFIG;
+    private void scrapeCompletedAni(Ani ani, Config config) {
         Boolean scrape = config.getScrape();
         if (scrape) {
             try {
@@ -1449,14 +1669,26 @@ public class DownloadService {
                 log.error(e.getMessage(), e);
             }
         }
+    }
+
+    /**
+     * 发送下载完成通知，返回是否来自备用RSS。
+     */
+    private static boolean notifyDownloadComplete(Ani ani, String name, List<String> tags) {
         String text = StrFormatter.format("{} 下载完成", name);
         boolean standby = tags.contains(TorrentsTags.BACK_RSS.getValue());
         if (standby) {
             text = StrFormatter.format("(备用RSS) {}", text);
         }
         NotificationUtil.send(ConfigUtil.CONFIG, ani, text, NotificationStatusEnum.DOWNLOAD_END);
+        return standby;
+    }
 
-        // 下载历史（成功侧）：失败侧已由 FailedDownloadQueue 记录，这里补齐成功记录
+    /**
+     * 下载历史（成功侧）：失败侧已由 FailedDownloadQueue 记录，这里补齐成功记录。
+     */
+    private void recordDownloadCompletion(
+            Ani ani, TorrentsInfo torrentsInfo, String name, String subgroup, boolean standby) {
         try {
             DownloadHistory.record(ani.getId(), ani.getTitle(), name, torrentsInfo.getHash(),
                     episodeOf(name),
@@ -1478,7 +1710,9 @@ public class DownloadService {
         } catch (Exception e) {
             log.debug("记录下载历史失败: {}", e.getMessage());
         }
+    }
 
+    private void completeAniQuietly(Ani ani) {
         String title = ani.getTitle();
 
         try {
@@ -1516,6 +1750,11 @@ public class DownloadService {
      */
     public String getDownloadPath(Ani ani) {
         return getDownloadPath(ani, ConfigUtil.CONFIG);
+    }
+
+    @Override
+    public String resolve(Ani ani) {
+        return getDownloadPath(ani);
     }
 
     /**
