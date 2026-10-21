@@ -711,6 +711,13 @@ public class ItemsUtil {
                     .toList();
         }
 
+        Integer totalEpisodeNumber = ani.getTotalEpisodeNumber();
+        int currentEpisodeNumber = currentEpisodeNumber(ani, items);
+        if (totalEpisodeNumber != null && totalEpisodeNumber > 0 && currentEpisodeNumber >= totalEpisodeNumber) {
+            // 已完结 不再检测摸鱼
+            return;
+        }
+
         items.stream()
                 .map(Item::getPubDate)
                 .filter(Objects::nonNull)

@@ -576,6 +576,10 @@ public class DownloadService implements OpenListDownloadPathResolver, RssDownloa
             stateDirty = true;
         }
 
+        // 摸鱼检测放在集数回写之后：此时 currentEpisodeNumber 才是本轮最新值，
+        // 已完结（当前集数 >= 总集数）的订阅不再提醒摸鱼。
+        ItemsUtil.procrastinating(ani, run.items);
+
         if (run.autoDisabled) {
             Integer totalEpisodeNumber = ani.getTotalEpisodeNumber();
             if (totalEpisodeNumber != null && totalEpisodeNumber >= 1
@@ -657,7 +661,6 @@ public class DownloadService implements OpenListDownloadPathResolver, RssDownloa
                 })
                 .count();
         run.savePath = getDownloadPath(ani);
-        ItemsUtil.procrastinating(ani, run.items);
         run.sync = false;
         run.v2 = RenameUtil.isNamingV2(ani);
         run.downloadedEpisodes = run.v2 ? new HashSet<>() : null;
