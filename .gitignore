@@ -40,9 +40,10 @@ build/
 
 config.json
 ani.json
-files
-target
-logs
+# 运行时产物只落在仓库根：必须用 / 锚定，裸模式会连同同名源码包一起吞掉
+# （曾把 src/main/java/ani/rss/download/openlist/files 整包吞掉：本地编译通过、干净检出的 CI 编译失败）
+/files
+/logs
 *.log
 /config
 .git
