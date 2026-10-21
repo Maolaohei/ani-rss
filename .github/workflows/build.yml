@@ -58,6 +58,16 @@ jobs:
 
           echo "--- release body 预览（前 20 行）---"
           head -20 release_body.md
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ani-rss-${{ env.version }}
+          path: |
+            ./ani-rss-application/target/ani-rss.jar
+            ./ani-rss-application/target/ani-rss.exe
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
       - name: Release
         uses: softprops/action-gh-release@v3
         with:

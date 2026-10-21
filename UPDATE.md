@@ -13,12 +13,65 @@
 | 可观测与干预 | 首页「任务管理器」：多槽位状态、取消、排队/抢先、残留扫描清理、遗留问题修复 |
 | 调度一致性 | 手动刷新 / 添加订阅统一走可观察入口，避免 UI 空闲却只剩 Hash |
 | 下载去重与洗版 | hash 忽略大小写去重（下载器回的 hash 大小写不保证）+ 备用RSS洗版改为「主RSS提交成功后才清理备用」+ 洗版清扫排除刚提交的主RSS任务、文件按提交前快照清理 + **洗版以「本版种子记录」为终态（同一版本永不重复洗，状态丢失也能自愈）** |
-| 通知与体验 | Bark 通知（含 Level/Volume）；默认禁用自动检查更新；通知反压不阻塞下载 |
+| 通知与体验 | Bark 通知（含 Level/Volume）；邮箱通知支持多个收件人；默认禁用自动检查更新；通知反压不阻塞下载 |
 | 运维 UX | 失败人话化/失败队列原子写+精确重下、列表健康分（含缓存漏集）、临时目录残留扫描优化 |
 | TMDB 匹配 | 中文标题误匹配防御 + 日文原名兜底 + 候选列表手动选择弹窗 |
 | 本地状态与缓存 | 「本地存在」三态判定（是 / 存疑 / 否，存疑不降级成"没有"）+ 订阅级快照缓存（分级 TTL / 单飞 / 版本化失效 / **成功即增量追加，不整份重列**）+ 订阅级读写锁（读不阻塞在下载上） |
 | 网盘限流规避 | 令牌桶 + 请求合并 + 熔断指数冷却 + 分级 TTL + 每轮 API 预算（只计目录列举次数，大库不再被硬顶 200 卡成「存疑」）+ 列举缓存按目录树定向失效，预算耗尽显示「未确认」而非 0 集 |
 | 稳定性与性能 | 任务代际化（停止超时后旧线程不再复活重复跑轮次）+ 可中断周期等待（停止响应 ≤500ms）+ JVM 参数修正（恢复 C2 JIT、堆转储、栈与 Metaspace）+ 网盘 API 去实例锁（一次慢列举不再阻塞整条链路）+ 外部接口成本治理（BGM 限流移到出网点、TMDB/Mikan 进程内缓存、字幕合集包不再重复整包下载）+ 落盘写放大治理（内容未变跳过 / 状态回写 500ms 合并 / 预览按实质变化落盘）+ 长阻塞出锁（更新下载、合集后处理、订阅项解析）+ 列表接口不再改写共享订阅对象 + 单订阅超时隔离（卡死只记失败不拖整轮）+ 下载器/网盘查询失败语义收紧（失败抛而非空，避免误判重推）+ 下载历史与失败队列落盘节流 |
+
+---
+
+## 3.4.35 增量（2026-10）
+
+### 石山拆分第一批落地（纯结构重构，行为不变）
+
+`OpenList` / `DownloadService` / `RssTask` 这三个「什么都往里塞」的类开始分层：残留、文件、策略、运行时状态各自独立，宿主只留编排。边界与体积由结构守卫测试锁住，其中 `CorePathBoundaryTest` 还禁止核心路径再反向查容器（`SpringUtil.getBean`）。
+
+| 位置 | 之前 | 现在 |
+| --- | --- | --- |
+| `download/OpenList.java` | 5610 行 | 4145 行（另拆出 `residual/`、`files/`、`policy/`、`runtime/` 四个包） |
+| `service/DownloadService.java` | 2769 行 | 3008 行（**变长了**：闸门链从内联改为 `passGates`(43 行) + 13 个具名 `*Gate`，用行数换可读性与可测性） |
+| `service/DownloadService#notification` | 99 行 | 27 行 |
+| `task/RssTask.java` | 2405 行 | 2402 行（状态投影 / 调度策略 / 下载端口独立） |
+| `view/home/TaskManagerView.vue` | 1280 行 | 459 行 |
+| `view/home/SubtitleMatchView.vue` | 821 行 | 57 行 |
+| `view/home/DashboardView.vue` | 694 行 | 89 行 |
+
+行数口径与后续批次清单见 `docs/refactor-plan.md`、`docs/refactor-openlist-plan.md`。
+
+### 上游移植
+
+- 首页编辑 / 删除 / 导入订阅弹窗报错修复（上游 `247eea13`，原样 cherry-pick）；
+- 邮箱通知支持配置多个收件人（上游 `2066edc2`：不再把收件人包成单元素列表，地址交给 hutool 解析）；
+- 多音字词库补录「重庆 / 重启 / 重回 / 重生 / 重来 / 调教」（上游 `239da774`，接入 TinyPinyin 引擎）；
+- 摸鱼检测：订阅已完结（`currentEpisodeNumber >= totalEpisodeNumber`）不再提醒（上游 `e4b4fcf0`，Close #741），判定挪到集数回写之后，每轮仍只跑一次；
+- 下载列表：删掉已被原生 `:title` 取代的 `el-tooltip`（上游 `36230b4b`）。
+
+### 构建与发版链路
+
+- 前端 `mvn clean` 不再依赖 `rm`（移植上游 `d59e52db` 的 ui/pom 部分）：Windows 上 `mvn -o -pl ani-rss-ui clean` 会一并删掉 `target` 与 `dist`；
+- markdown-it 对齐 `^15.0.3`（上游 `8b59427d`），lock 只动 markdown-it 依赖链；
+- `build.yml` 增加 `actions/upload-artifact`：jar / exe 除了发 Release，也能在 Actions 运行页直接下载（保留 7 天、关闭二次压缩）。
+
+### 修掉一处发版级事故：`.gitignore` 吞掉整个源码包
+
+上一版拆包时，`.gitignore` 里一条裸模式 `files` 把新拆出的 `src/main/java/ani/rss/download/openlist/files` 整包吞掉（3 个文件从未进入版本库）。文件只活在本地磁盘上，于是本地编译全绿、干净检出的 CI 必然失败：
+
+```
+OpenList.java:[6,39] package ani.rss.download.openlist.files does not exist
+OpenList.java:[86,19] cannot find symbol: class OpenListFileService
+…（共 9 个错误；CI 编译 242 个源文件，本地是 245）
+```
+
+- `.gitignore` 的 `files` / `logs` 收窄为 `/files` / `/logs`（只忽略仓库根下的运行时产物）；冗余的裸 `target` 删除（第 1 行 `target/` 已覆盖任意层级）；
+- 新增 `SourceTrackingGateTest`：源码 / 资源根下出现「被忽略且未纳管」的文件即失败，失败信息附 `git check-ignore -v` 的命中行与规则，并明确不靠 `git add -f` 掩盖。
+
+### 验证
+
+- 全量单测 `Tests run: 1023, Failures: 0, Errors: 0, Skipped: 1`；端到端 `Tests run: 6, Failures: 0`；reactor `BUILD SUCCESS`（8:16）。E2E 工件：`ani-rss-application/target/e2e-artifact/`；
+- 干净检出验证：`git worktree` 到发布提交后 `mvn -B -DskipTests package -P windows,macos` 编译 **245** 个源文件通过，产出 `ani-rss.jar` + `ani-rss.exe`（修复前的干净检出只有 242 个源文件）；
+- 纳管闸门的反向验证：故意放一个被忽略的源码文件，闸门失败并打印命中规则；删掉后恢复通过。
 
 ---
 
