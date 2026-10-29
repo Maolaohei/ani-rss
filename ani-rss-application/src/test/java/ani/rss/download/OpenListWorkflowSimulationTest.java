@@ -631,6 +631,13 @@ class OpenListWorkflowSimulationTest {
 
         /** true: 提交后 115 在目标目录建任务目录并放文件；false: 目标目录不放文件（文件预放在云下载） */
         volatile boolean placeTaskDirInTarget = true;
+        /** 前 N 次 fs/remove 直接失败（模拟删除未落地），用来验证清理债务与重试 */
+        volatile int failRemoveTimesLeft = 0;
+        /** 只让「路径里含这段」的 fs/remove 失败；为 null 时不限制，避免误伤清理空壳等其它删除 */
+        volatile String failRemovePathContains = null;
+        /** fs/remove 被真正尝试的次数（含失败的） */
+        final java.util.concurrent.atomic.AtomicInteger removeAttempts =
+                new java.util.concurrent.atomic.AtomicInteger();
         /** true: 种子含 2 个文件（合集） */
         volatile boolean multiFileSeed = false;
         /** true: add_offline_download 返回 10008（任务已存在，模拟 115 云端去重残留） */
@@ -888,7 +895,22 @@ class OpenListWorkflowSimulationTest {
                         });
                     }
                     case "fs/remove": {
-                        String dir = str(req, "dir");
+                        removeAttempts.incrementAndGet();
+                        String removeDir = str(req, "dir");
+                        // 模拟"删除没落地"：115 对非空目录是异步删除，返回成功不等于删掉了；
+                        // 这里更进一步，直接让指定的删除请求失败，用来钉住"删除失败不许改判下载结果"。
+                        // 判定要带上被删的名字：删临时目录是 fs/remove(dir=savePath, names=[tempDirName])
+                        boolean hitsTarget = failRemovePathContains == null
+                                || removeDir.contains(failRemovePathContains)
+                                || targetNamesOf(req).stream().anyMatch(n -> n.contains(failRemovePathContains));
+                        if (failRemoveTimesLeft > 0 && hitsTarget) {
+                            failRemoveTimesLeft--;
+                            JsonObject err = new JsonObject();
+                            err.addProperty("code", 500);
+                            err.addProperty("message", "mock: fs/remove 未落地");
+                            return err;
+                        }
+                        String dir = removeDir;
                         for (JsonElement el : req.getAsJsonArray("names")) {
                             removeRecursive(dir + "/" + el.getAsString());
                         }
@@ -964,7 +986,17 @@ class OpenListWorkflowSimulationTest {
             }
         }
 
-        private static String str(JsonObject obj, String key) {
+        private static List<String> targetNamesOf(JsonObject req) {
+        List<String> names = new ArrayList<>();
+        if (req.has("names") && req.get("names").isJsonArray()) {
+            for (JsonElement el : req.getAsJsonArray("names")) {
+                names.add(el.getAsString());
+            }
+        }
+        return names;
+    }
+
+    private static String str(JsonObject obj, String key) {
             return obj.has(key) ? obj.get(key).getAsString() : "";
         }
 

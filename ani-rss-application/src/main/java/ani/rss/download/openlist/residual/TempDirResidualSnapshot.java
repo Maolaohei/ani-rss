@@ -9,6 +9,14 @@ public class TempDirResidualSnapshot implements java.io.Serializable {
     private int cleanableCount;
     private int protectedCount;
     private int keepCount;
+    /**
+     * 已登记、等后台重试的清理债务条数（{@code DELETE_PENDING}）。
+     */
+    private int debtPendingCount;
+    /**
+     * 现场不符、停止自动重试、等人工处理的条数。
+     */
+    private int debtNeedsHumanCount;
     private Long scannedAt;
     private Boolean cleaning;
     private String message;
@@ -21,6 +29,8 @@ public class TempDirResidualSnapshot implements java.io.Serializable {
                 .setCleanableCount(0)
                 .setProtectedCount(0)
                 .setKeepCount(0)
+                .setDebtPendingCount(0)
+                .setDebtNeedsHumanCount(0)
                 .setCleaning(false)
                 .setSamples(List.of())
                 .setItems(List.of());

@@ -7,6 +7,8 @@ import ani.rss.entity.Ani;
 import ani.rss.entity.OpenListFileInfo;
 import ani.rss.entity.OpenListTaskInfo;
 import ani.rss.enums.StringEnum;
+import ani.rss.entity.TempDirCleanupRecord;
+import ani.rss.util.other.TempDirCleanupStore;
 import ani.rss.util.other.TempDirResidualPolicy;
 import cn.hutool.core.text.StrFormatter;
 import cn.hutool.core.thread.ThreadUtil;
@@ -298,6 +300,13 @@ public class OpenListResidualService {
             throw new IllegalStateException("OpenList 未登录");
         }
         Set<String> activeTempDirs = collectActiveTempDirs();
+        // 清理债务：按临时目录完整路径索引，供预览里标出"这条还欠着一次删除"
+        Map<String, TempDirCleanupRecord> debtByPath = new HashMap<>();
+        for (TempDirCleanupRecord record : TempDirCleanupStore.all()) {
+            if (StrUtil.isNotBlank(record.getTempPath())) {
+                debtByPath.put(record.getTempPath(), record);
+            }
+        }
 
         List<TempDirResidualItem> items = new ArrayList<>();
         List<String> samples = new ArrayList<>();
@@ -365,17 +374,7 @@ public class OpenListResidualService {
                     keep++;
                 }
                 if (items.size() < TEMP_DIR_PREVIEW_LIMIT) {
-                    items.add(new TempDirResidualItem()
-                            .setId(savePath + "/" + dirName)
-                            .setName(StrUtil.maxLength(dirName, 160))
-                            .setSavePath(savePath)
-                            .setState(decision.action().name())
-                            .setKind("TEMP_DIR")
-                            .setAction(action)
-                            .setError(decision.reason())
-                            .setProtectedCurrent(decision.action() == TempDirResidualPolicy.Action.PROTECT_ACTIVE)
-                            .setCleanable(decision.action() == TempDirResidualPolicy.Action.FORCE_CLEAN
-                                    || decision.action() == TempDirResidualPolicy.Action.JUNK_CLEAN));
+                    items.add(previewItem(savePath, dirName, decision, action, debtByPath));
                 }
                 if (samples.size() < 5) {
                     samples.add(StrUtil.maxLength(dirName, 80));
@@ -399,6 +398,8 @@ public class OpenListResidualService {
                 .setCleanableCount(cleanable)
                 .setProtectedCount(protectedCount)
                 .setKeepCount(keep)
+                .setDebtPendingCount(TempDirCleanupStore.pendingCount())
+                .setDebtNeedsHumanCount(TempDirCleanupStore.needsHumanCount())
                 .setScannedAt(System.currentTimeMillis())
                 .setCleaning(tempDirResidualCleaning.get())
                 .setMessage(message)
@@ -516,6 +517,30 @@ public class OpenListResidualService {
      * <p>
      * 只读不写：真正的删除动作由 {@link #cleanTempDirResiduals} 执行。
      */
+    /**
+     * 预览条目：把策略判定 + 清理债务（这条是否还欠一次删除）投影成一行。
+     */
+    private TempDirResidualItem previewItem(String savePath, String dirName,
+                                            TempDirResidualPolicy.Decision decision, String action,
+                                            Map<String, TempDirCleanupRecord> debtByPath) {
+        TempDirCleanupRecord debt = debtByPath.get(StrUtil.removeSuffix(savePath, "/") + "/" + dirName);
+        return new TempDirResidualItem()
+                .setId(savePath + "/" + dirName)
+                .setName(StrUtil.maxLength(dirName, 160))
+                .setSavePath(savePath)
+                .setState(decision.action().name())
+                .setKind("TEMP_DIR")
+                .setAction(action)
+                .setError(decision.reason())
+                .setProtectedCurrent(decision.action() == TempDirResidualPolicy.Action.PROTECT_ACTIVE)
+                .setCleanable(decision.action() == TempDirResidualPolicy.Action.FORCE_CLEAN
+                        || decision.action() == TempDirResidualPolicy.Action.JUNK_CLEAN)
+                .setDebt(debt != null)
+                .setAttempts(debt == null ? 0 : debt.getAttempts())
+                .setNextAttemptAt(debt == null ? 0L : debt.getNextAttemptAt())
+                .setDebtError(debt == null ? null : debt.getLastError());
+    }
+
     private TempDirCandidateProbe probeTempDirCandidate(String savePath, String dirName,
                                                         Set<String> topVideoEpisodeKeys, Set<String> topVideoNames,
                                                         Set<String> activeTempDirs) {
@@ -609,6 +634,11 @@ public class OpenListResidualService {
 
     /**
      * 仅清理 FORCE_CLEAN / JUNK_CLEAN 临时目录；保护 PROTECT_ACTIVE；KEEP 不自动删。
+     * <p>
+     * <b>计数口径</b>：只有回读确认过的不存在（DELETED / ALREADY_ABSENT）才计入 {@code cleaned}。
+     * 限流/冷却导致的"没删成"计入 {@code deferred} 并登记成清理债务，交给巡检按退避重试——
+     * 旧实现因为 {@code deleteTempDir} 从不抛异常，把未删除也计成 cleaned，
+     * 面板于是显示"已清理"而盘上原样还在。
      */
     public CleanResult cleanTempDirResiduals() {
         if (!host.loggedIn()) {
@@ -622,28 +652,57 @@ public class OpenListResidualService {
             int cleaned = 0;
             int skipped = 0;
             int failed = 0;
+            int deferred = 0;
             if (before.getItems() != null) {
                 for (TempDirResidualItem item : before.getItems()) {
                     if (item == null || !Boolean.TRUE.equals(item.getCleanable())) {
                         skipped++;
                         continue;
                     }
+                    String savePath = item.getSavePath();
+                    String tempDirName = item.getName();
+                    // 先记账：即使这次删不掉，也要在账上留一条，交给巡检继续
+                    TempDirCleanupStore.requestOperator(savePath, tempDirName, item.getAction());
+                    String id = TempDirCleanupStore.idOf(savePath, tempDirName);
+                    TempDirDeleteResult result;
                     try {
-                        host.deleteTempDir(item.getSavePath(), item.getName());
-                        cleaned++;
+                        result = host.deleteTempDir(savePath, tempDirName);
                     } catch (Exception e) {
                         failed++;
-                        log.warn("清理临时目录失败 {}/{}: {}", item.getSavePath(), item.getName(), e.getMessage());
+                        TempDirCleanupStore.defer(id, "删除异常: " + e.getMessage());
+                        log.warn("清理临时目录失败 {}/{}: {}", savePath, tempDirName, e.getMessage());
+                        continue;
+                    }
+                    if (result == null) {
+                        result = TempDirDeleteResult.FAILED_RETRYABLE;
+                    }
+                    switch (result) {
+                        case DELETED, ALREADY_ABSENT -> {
+                            TempDirCleanupStore.confirm(id);
+                            cleaned++;
+                        }
+                        case MISMATCH_HUMAN -> {
+                            failed++;
+                            TempDirCleanupStore.needsHuman(id, "现场与预期不符，已停止自动清理");
+                            log.warn("临时目录现场与预期不符，转人工 {}/{}", savePath, tempDirName);
+                        }
+                        default -> {
+                            deferred++;
+                            TempDirCleanupStore.defer(id, "删除未确认（限流/冷却/异步未落地）");
+                            log.info("临时目录未确认删除，已登记重试 {}/{}", savePath, tempDirName);
+                        }
                     }
                 }
             }
             TempDirResidualSnapshot after = scanTempDirResiduals(true);
-            String msg = StrFormatter.format("临时目录清理完成 cleaned={} skipped={} failed={} remain={}",
-                    cleaned, skipped, failed, after.getTotalCount());
+            String msg = StrFormatter.format(
+                    "临时目录清理完成 cleaned={} deferred={} skipped={} failed={} remain={}",
+                    cleaned, deferred, skipped, failed, after.getTotalCount());
             log.info("OpenList {}", msg);
             return new CleanResult()
                     .setOk(failed == 0)
                     .setCleaned(cleaned)
+                    .setDeferred(deferred)
                     .setSkipped(skipped)
                     .setFailed(failed)
                     .setMessage(msg);

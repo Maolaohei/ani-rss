@@ -15,6 +15,8 @@ import ani.rss.download.openlist.residual.CleanResult;
 import ani.rss.download.openlist.residual.OpenListResidualPort;
 import ani.rss.download.openlist.residual.OpenListResidualService;
 import ani.rss.download.openlist.residual.ResidualSnapshot;
+import ani.rss.download.openlist.residual.TempDirCleanupSweeper;
+import ani.rss.download.openlist.residual.TempDirDeleteResult;
 import ani.rss.download.openlist.residual.TempDirResidualSnapshot;
 import ani.rss.entity.*;
 import ani.rss.enums.NotificationStatusEnum;
@@ -28,6 +30,7 @@ import ani.rss.util.other.NotificationUtil;
 import ani.rss.util.other.OfflinePlanStore;
 import ani.rss.util.other.RenameUtil;
 import ani.rss.util.other.TaskFailureHumanizer;
+import ani.rss.util.other.TempDirCleanupStore;
 import ani.rss.util.other.TempDirResidualPolicy;
 import ani.rss.util.other.MagnetTorrentUtil;
 import ani.rss.util.other.TorrentPlanMatcher;
@@ -84,6 +87,10 @@ public class OpenList implements BaseDownload, OfflineDownloader, OpenListRuntim
     private final OpenListResidualService residualService;
     private final OpenListRuntimeState runtimeState = OpenListRuntimeState.INSTANCE;
     private final OpenListFileService fileService;
+    /**
+     * 临时目录清理债务巡检：负责把「移动成功但删除失败」的残留补做完。
+     */
+    private final TempDirCleanupSweeper tempDirCleanupSweeper;
 
     @Autowired
     public OpenList(OpenListCancellationSignal cancellationSignal,
@@ -96,6 +103,7 @@ public class OpenList implements BaseDownload, OfflineDownloader, OpenListRuntim
                 : downloadPathResolver;
         this.residualService = new OpenListResidualService(new ResidualHost());
         this.fileService = new OpenListFileService(new FileHost());
+        this.tempDirCleanupSweeper = new TempDirCleanupSweeper(new ResidualHost());
     }
 
     /**
@@ -217,8 +225,13 @@ public class OpenList implements BaseDownload, OfflineDownloader, OpenListRuntim
         }
 
         @Override
-        public void deleteTempDir(String savePath, String tempDirName) {
-            cleanupTempDownloadDir(savePath, tempDirName, true);
+        public TempDirDeleteResult deleteTempDir(String savePath, String tempDirName) {
+            return cleanupTempDownloadDir(savePath, tempDirName, true);
+        }
+
+        @Override
+        public long listingCooldownRemainingMs() {
+            return OpenListApi.listingCooldownRemainingMs();
         }
 
         @Override
@@ -377,8 +390,8 @@ public class OpenList implements BaseDownload, OfflineDownloader, OpenListRuntim
         }
 
         @Override
-        public void cleanupTempDownloadDir(String savePath, String tempDirName) {
-            OpenList.this.cleanupTempDownloadDir(savePath, tempDirName, true);
+        public TempDirDeleteResult cleanupTempDownloadDir(String savePath, String tempDirName) {
+            return OpenList.this.cleanupTempDownloadDir(savePath, tempDirName, true);
         }
 
         @Override
@@ -591,6 +604,13 @@ public class OpenList implements BaseDownload, OfflineDownloader, OpenListRuntim
      */
     private static final int MOVE_VERIFY_MAX_ATTEMPTS = 3;
     private static final long MOVE_VERIFY_RETRY_DELAY_MS = TimeUnit.SECONDS.toMillis(5);
+    /**
+     * 异步删除（115 的 990009=已受理）落地所需的最短观察窗：回读确认失败后短等这么久再读一次。
+     * <p>
+     * 取 500ms 的理由：正常异步删除通常瞬间落地，等一次就能把绝大多数收尾判成"已确认"；
+     * 而收尾线程不宜长睡（离线槽位紧张正是限流主因），更长的重试属于清理巡检。
+     */
+    private static final long ASYNC_REMOVE_VERIFY_DELAY_MS = 500L;
 
     /**
      * 115/OpenList 返回「任务已存在(10008)」后，短时间内禁止对同一 magnet 再 add。
@@ -690,6 +710,9 @@ public class OpenList implements BaseDownload, OfflineDownloader, OpenListRuntim
                         // 非测试登录：异步启动回扫。失败不影响登录成功。
                         if (!Boolean.TRUE.equals(test)) {
                             residualService.scheduleStartupResidualScan();
+                            // 重启接管：把上一进程遗留的"删除临时目录"债务补做完。
+                            // 冷却期/未登录由巡检自己判断，这里只负责尽快跑一次。
+                            ThreadUtil.execAsync(OpenList.this::sweepTempDirCleanup);
                         }
                         return true;
                     });
@@ -1270,6 +1293,11 @@ public class OpenList implements BaseDownload, OfflineDownloader, OpenListRuntim
                     System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(waitMinutesInit));
 
             mkdir(path);
+            // 写前落账：临时目录一创建就登记"我欠一次删除"。
+            // 旧实现只在收尾时顺手删一次，删失败只留一条 warn —— 之后既没有落盘线索，
+            // 也没有任何后台重试，于是 S1/S1E01/ 这类残留会一直留在盘上，被媒体管理器扫成重复集。
+            TempDirCleanupStore.lease(savePath, tempDirName, reName, infoHash,
+                    ani == null ? null : ani.getId(), finalRenameBase);
 
             // P0: 只清理失败/取消/成功残留；Running/Pending 复用 tid，不重提
             String existingTid = adoptOrCleanResidualTasks(infoHash);
@@ -2010,7 +2038,7 @@ public class OpenList implements BaseDownload, OfflineDownloader, OpenListRuntim
                 // 视频/字幕已确认落盘，强制清掉临时目录（含嵌套残留）
                 log.info("本集文件已在最终目录，视为下载完成 {}", ctx.reName);
                 if (ctx.tempDownloadDir != null) {
-                    cleanupTempDownloadDir(savePath, ctx.tempDirName, true);
+                    settleTempDirCleanup(savePath, ctx.tempDirName, List.of());
                 }
                 clearDuplicateMagnet(ctx.infoHash);
                 NotificationUtil.send(config, ani,
@@ -3020,11 +3048,17 @@ public class OpenList implements BaseDownload, OfflineDownloader, OpenListRuntim
      * 此时临时目录内无论还有嵌套媒体、垃圾还是空壳，一律删除（115 对非空目录
      * 的 fs/remove 可整树删除）。force=false 仅用于谨慎场景，仍要求无受保护媒体。
      */
-    void cleanupTempDownloadDir(String savePath, String tempDirName, boolean force) {
+    TempDirDeleteResult cleanupTempDownloadDir(String savePath, String tempDirName, boolean force) {
         if (StrUtil.isBlank(savePath) || StrUtil.isBlank(tempDirName)) {
-            return;
+            return TempDirDeleteResult.MISMATCH_HUMAN;
         }
         String tempPath = savePath + "/" + tempDirName;
+        if (sameNameIsFile(savePath, tempDirName)) {
+            // 删除前安全门：同名项是文件说明现场不对（可能是用户自己的同名文件），
+            // 整树删除会连它一起删掉 —— 这种只能转人工，不做任何自动动作。
+            log.warn("临时目录位置被同名文件占用（拒绝整树删除，转人工） {}/{}", savePath, tempDirName);
+            return TempDirDeleteResult.MISMATCH_HUMAN;
+        }
         try {
             if (!force) {
                 // 谨慎模式：必须先列举确认没有受保护媒体，否则宁可不清。
@@ -3036,7 +3070,7 @@ public class OpenList implements BaseDownload, OfflineDownloader, OpenListRuntim
                 } catch (Exception e) {
                     log.warn("未强制清理：临时目录列举失败，跳过清理 {}: {}",
                             tempPath, ExceptionUtils.getMessage(e));
-                    return;
+                    return TempDirDeleteResult.FAILED_RETRYABLE;
                 }
                 List<OpenListFileInfo> mediaLeft = remaining.stream()
                         .filter(TempDirResidualPolicy::isProtectedTempFile)
@@ -3044,7 +3078,7 @@ public class OpenList implements BaseDownload, OfflineDownloader, OpenListRuntim
                 if (!mediaLeft.isEmpty()) {
                     log.warn("未强制清理且临时目录仍有媒体，跳过 {}: {}",
                             tempPath, mediaLeft.stream().map(OpenListFileInfo::getName).toList());
-                    return;
+                    return TempDirDeleteResult.MISMATCH_HUMAN;
                 }
                 // 非强制：先清垃圾/空壳，再删顶层
                 remaining.stream()
@@ -3073,20 +3107,165 @@ public class OpenList implements BaseDownload, OfflineDownloader, OpenListRuntim
             try {
                 // 115/OpenList：对非空目录直接 remove 顶层即可整树删除
                 fsRemove(savePath, List.of(tempDirName));
-                log.info("已删除临时目录 {}/{}", savePath, tempDirName);
+                // 注意：这里<b>不</b>打"已删除"。990009 只代表"已受理"，是否真的删掉由
+                // verifyTempDirRemoved 回读确认，否则日志会替网盘撒谎（R2）。
             } catch (Exception e) {
+                if (isCleanupRetryable(e)) {
+                    // 限流/冷却期：逐层兜底只会再发一批请求，把限流喂得更久 → 直接交给巡检
+                    log.warn("删除临时目录被限流/冷却拒绝，保留清理债务等巡检补做 {}: {}",
+                            tempPath, ExceptionUtils.getMessage(e));
+                    return TempDirDeleteResult.FAILED_RETRYABLE;
+                }
                 // 若顶层 remove 失败（部分实现拒绝非空），自底向上再试一次
                 log.warn("直接删除临时目录失败，尝试逐层清理 {}: {}", tempPath, e.getMessage());
                 try {
                     forceRemoveTree(tempPath);
                     fsRemove(savePath, List.of(tempDirName));
-                    log.info("逐层清理后已删除临时目录 {}/{}", savePath, tempDirName);
                 } catch (Exception e2) {
-                    log.warn("删除临时目录失败 {}: {}", tempPath, e2.getMessage());
+                    log.warn("删除临时目录失败，保留清理债务等巡检补做 {}: {}", tempPath, e2.getMessage());
+                    return TempDirDeleteResult.FAILED_RETRYABLE;
                 }
             }
         } catch (Exception e) {
-            log.warn("清理临时目录失败 {}: {}", tempPath, e.getMessage());
+            log.warn("清理临时目录失败，保留清理债务等巡检补做 {}: {}", tempPath, e.getMessage());
+            return TempDirDeleteResult.FAILED_RETRYABLE;
+        }
+        return verifyTempDirRemoved(savePath, tempDirName);
+    }
+
+    /**
+     * 清理动作是否属于"可重试"（限流/冷却/网络抖动）：这类失败连兜底请求都不该再发。
+     */
+    private boolean isCleanupRetryable(Exception e) {
+        if (e == null) {
+            return false;
+        }
+        String message = ExceptionUtils.getMessage(e);
+        if (StrUtil.isBlank(message)) {
+            return false;
+        }
+        return message.contains("冷却中") || OpenListApi.isTransientMessage(message);
+    }
+
+    /**
+     * 删除前只做一件事：确认同名项不是文件。
+     * <p>
+     * 这里刻意<b>不</b>复用 {@link #probeTempDirState}：列举失败必须当作"没有冲突"继续删，
+     * 否则一次读超时又会把"最终文件已单层确认"的收尾拖成存疑（v3 当初去掉这次列举就是这个原因）；
+     * 但"确实是同名文件"要拦住，那是现场异常，删下去会误伤用户数据。
+     */
+    private boolean sameNameIsFile(String savePath, String tempDirName) {
+        try {
+            for (OpenListFileInfo info : fsListForCleanup(savePath)) {
+                if (info != null && tempDirName.equals(info.getName())
+                        && !Boolean.TRUE.equals(info.getIsDir())) {
+                    return true;
+                }
+            }
+        } catch (Exception e) {
+            log.debug("删除前安全门列举失败（按无冲突处理） {}: {}", savePath, ExceptionUtils.getMessage(e));
+        }
+        return false;
+    }
+
+    /**
+     * 回读确认临时目录是否真的没了。
+     * <p>
+     * 115 的 {@code fs/remove} 对非空目录是异步的（990009=已受理），所以立刻回读常见"还在"。
+     * 这里短等一次再读：把绝大多数正常收尾判成确认，又不必在收尾线程里长睡——
+     * 更长的重试属于巡检（{@code TempDirCleanupSweeper}）。
+     */
+    private TempDirDeleteResult verifyTempDirRemoved(String savePath, String tempDirName) {
+        TempDirDeleteResult first = probeTempDirState(savePath, tempDirName);
+        if (first != TempDirDeleteResult.FAILED_RETRYABLE) {
+            return first;
+        }
+        ThreadUtil.sleep(ASYNC_REMOVE_VERIFY_DELAY_MS);
+        return probeTempDirState(savePath, tempDirName);
+    }
+
+    /**
+     * 单次回读：目录还在=未确认；同名项是文件=现场异常；目录不存在=确认没有。
+     */
+    private TempDirDeleteResult probeTempDirState(String savePath, String tempDirName) {
+        List<OpenListFileInfo> top;
+        try {
+            // 清理路径必须用严格列举：查不清 ≠ 删掉了
+            top = fsListForCleanup(savePath);
+        } catch (Exception e) {
+            log.debug("回读临时目录状态失败（按未确认处理） {}: {}", savePath, ExceptionUtils.getMessage(e));
+            return TempDirDeleteResult.FAILED_RETRYABLE;
+        }
+        boolean sameNameFile = false;
+        boolean sameNameDir = false;
+        for (OpenListFileInfo info : top) {
+            if (info == null || !tempDirName.equals(info.getName())) {
+                continue;
+            }
+            if (Boolean.TRUE.equals(info.getIsDir())) {
+                sameNameDir = true;
+            } else {
+                sameNameFile = true;
+            }
+        }
+        if (sameNameFile) {
+            log.warn("临时目录位置被同名文件占用（拒绝整树删除，转人工） {}/{}", savePath, tempDirName);
+            return TempDirDeleteResult.MISMATCH_HUMAN;
+        }
+        if (sameNameDir) {
+            log.info("临时目录仍存在（视为未确认，交由清理巡检重试） {}/{}", savePath, tempDirName);
+            return TempDirDeleteResult.FAILED_RETRYABLE;
+        }
+        log.info("已确认删除临时目录 {}/{}", savePath, tempDirName);
+        return TempDirDeleteResult.DELETED;
+    }
+
+    /**
+     * 收尾时的"记账 + 删除 + 销账"：清理债务的唯一入口。
+     * <p>
+     * 顺序刻意是<b>先记账再删</b>：即使进程在删除过程中被强杀，盘上也留着一条
+     * DELETE_PENDING，重启后巡检会接着删；反过来（先删再记账）一旦中途崩溃，
+     * 残留就再无线索，只能靠人工全量扫盘。
+     *
+     * @return 本次是否已回读确认删除
+     */
+    private boolean settleTempDirCleanup(String savePath, String tempDirName, Collection<String> finalizedNames) {
+        if (StrUtil.isBlank(savePath) || StrUtil.isBlank(tempDirName)) {
+            return true;
+        }
+        String id = TempDirCleanupStore.idOf(savePath, tempDirName);
+        TempDirCleanupStore.markDeletePending(savePath, tempDirName, finalizedNames);
+        TempDirDeleteResult result = cleanupTempDownloadDir(savePath, tempDirName, true);
+        if (result == null) {
+            result = TempDirDeleteResult.FAILED_RETRYABLE;
+        }
+        if (result.confirmed()) {
+            TempDirCleanupStore.confirm(id);
+            return true;
+        }
+        if (result == TempDirDeleteResult.MISMATCH_HUMAN) {
+            TempDirCleanupStore.needsHuman(id, "删除临时目录时现场与预期不符");
+        } else {
+            TempDirCleanupStore.defer(id, "删除未被确认（限流/冷却/异步未落地）");
+            log.warn("临时目录删除未被确认，已登记清理债务等待巡检补做 {}/{}", savePath, tempDirName);
+        }
+        return false;
+    }
+
+    /**
+     * 供调度器/按钮调用：补做尚未确认的临时目录删除。
+     * <p>
+     * 单独抽成 public 是因为"每轮 RSS 之后补一次"和"用户点清理"都需要它，
+     * 而它必须是<b>非阻塞、可重复调用</b>的（内部单飞 + 冷却期直接返回）。
+     */
+    public void sweepTempDirCleanup() {
+        try {
+            TempDirCleanupSweeper.SweepResult result = tempDirCleanupSweeper.sweep();
+            if (result.ran() && result.deleted() == 0 && (result.deferred() > 0 || result.needsHuman() > 0)) {
+                log.info("临时目录清理巡检：{}", result.message());
+            }
+        } catch (Exception e) {
+            log.debug("临时目录清理巡检异常: {}", e.getMessage());
         }
     }
 

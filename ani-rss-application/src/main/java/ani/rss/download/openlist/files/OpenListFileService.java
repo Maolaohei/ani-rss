@@ -5,11 +5,13 @@ import ani.rss.commons.ExceptionUtils;
 import ani.rss.download.BaseDownload;
 import ani.rss.download.OfflineDownloader.RelocateResult;
 import ani.rss.download.openlist.policy.OpenListPolicy;
+import ani.rss.download.openlist.residual.TempDirDeleteResult;
 import ani.rss.entity.Ani;
 import ani.rss.entity.Item;
 import ani.rss.entity.OpenListFileInfo;
 import ani.rss.entity.TorrentPlanRecord;
 import ani.rss.util.other.OfflinePlanStore;
+import ani.rss.util.other.TempDirCleanupStore;
 import ani.rss.util.other.TorrentPlanMatcher;
 import ani.rss.util.other.TorrentPlanUtil;
 import ani.rss.util.other.TempDirResidualPolicy;
@@ -790,13 +792,52 @@ public final class OpenListFileService {
             return false;
         }
 
-        // 需要移动的视频/字幕已确认在最终目录顶层 → 强制删除临时目录
-        host.cleanupTempDownloadDir(savePath, tempDirName);
+        // 需要移动的视频/字幕已确认在最终目录顶层 → 强制删除临时目录。
+        // 顺序是「先记账再删」：删除是否真落地要靠回读确认，失败只留下"清理债务"交给巡检，
+        // <b>不</b>改判本次下载结果——把清理失败升级成 UNCERTAIN 会让下一轮重复 rename/move，
+        // 代价远大于一个残留目录。
+        settleTempDirCleanup(savePath, tempDirName, allMovedNames);
         // 云下载兜底：文件已全部移动归位，清理源目录残留的空壳（115 任务目录）
         if (!cloudSourceDirs.isEmpty()) {
             host.cleanupCloudDownloadEmptyDirs(cloudSourceDirs);
         }
         return true;
+    }
+
+    /**
+     * 收尾清理临时目录：登记清理债务 → 删除 → 按回读确认结果销账/延期/转人工。
+     * <p>
+     * {@code finalizedNames} 是"已经确认落在最终目录顶层"的文件名，作为巡检时删除前的安全门：
+     * 少了任何一件都不许自动删临时目录（那可能是唯一一份产物）。
+     */
+    private void settleTempDirCleanup(String savePath, String tempDirName, Set<String> finalizedNames) {
+        if (StrUtil.isBlank(savePath) || StrUtil.isBlank(tempDirName)) {
+            return;
+        }
+        String id = TempDirCleanupStore.idOf(savePath, tempDirName);
+        TempDirCleanupStore.markDeletePending(savePath, tempDirName, finalizedNames);
+        TempDirDeleteResult result;
+        try {
+            result = host.cleanupTempDownloadDir(savePath, tempDirName);
+        } catch (Exception e) {
+            // 连删除入口都炸：同样是"没删成"，留给巡检，不影响下载结论
+            result = TempDirDeleteResult.FAILED_RETRYABLE;
+            log.warn("删除临时目录异常（保留清理债务） {}/{}: {}", savePath, tempDirName,
+                    ExceptionUtils.getMessage(e));
+        }
+        if (result == null) {
+            result = TempDirDeleteResult.FAILED_RETRYABLE;
+        }
+        if (result.confirmed()) {
+            TempDirCleanupStore.confirm(id);
+            return;
+        }
+        if (result == TempDirDeleteResult.MISMATCH_HUMAN) {
+            TempDirCleanupStore.needsHuman(id, "删除临时目录时现场与预期不符");
+        } else {
+            TempDirCleanupStore.defer(id, "删除未被确认（限流/冷却/异步未落地）");
+            log.warn("临时目录删除未被确认，已登记清理债务等待巡检补做 {}/{}", savePath, tempDirName);
+        }
     }
 
     /**

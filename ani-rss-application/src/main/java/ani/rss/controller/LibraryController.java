@@ -14,6 +14,7 @@ import ani.rss.service.AniLocks;
 import ani.rss.service.DownloadService;
 import ani.rss.service.LocalStateCache;
 import ani.rss.util.other.AniUtil;
+import ani.rss.util.other.TempDirCleanupStore;
 import ani.rss.util.other.TorrentUtil;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.util.ReUtil;
@@ -34,6 +35,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
@@ -596,6 +598,10 @@ public class LibraryController extends BaseController {
         List<OpenListFileInfo> allFiles = new ArrayList<>();
         long totalSize = 0L;
         long lastModify = 0L;
+        // 显示层兜底：网盘上还没删掉的临时目录里是"已经搬到顶层的那一份"的副本，
+        // 整棵过滤掉，否则会数出重复集（S1/S1E01.MKV 与 S1/S1E01/S1E01.MKV 各记一集）。
+        // 这里只影响展示与集数统计，真正的删除仍由清理债务巡检负责。
+        files = excludePendingTempDirFiles(files);
         for (OpenListFileInfo f : files) {
             if (Boolean.TRUE.equals(f.getIsDir())) {
                 continue;
@@ -620,6 +626,55 @@ public class LibraryController extends BaseController {
             }
         }
         return new CloudScan(videos, allFiles, totalSize, lastModify);
+    }
+
+    /**
+     * 去掉"清理债务内临时目录"底下的文件。
+     * <p>
+     * 收尾时删临时目录可能撞上限流/冷却（115 的 990009 还要等异步落地），
+     * 这段时间里网盘上同时存在 {@code XXX/S1/S1E01.MKV} 与 {@code XXX/S1/S1E01/S1E01.MKV}。
+     * 前者是已归位的成片，后者是要删的残留——按名字扫就会数成两集。
+     * 这里按债务清单整棵过滤，让"删不掉"不再立刻表现为重复集；
+     * 真正的删除由巡检补做，两者互不依赖。
+     */
+    static List<OpenListFileInfo> excludePendingTempDirFiles(List<OpenListFileInfo> files) {
+        if (files == null || files.isEmpty()) {
+            return files;
+        }
+        Set<String> pendingPaths = TempDirCleanupStore.pendingTempPaths();
+        if (pendingPaths.isEmpty()) {
+            return files;
+        }
+        List<OpenListFileInfo> kept = new ArrayList<>(files.size());
+        for (OpenListFileInfo f : files) {
+            if (!isUnderPendingTempDir(f, pendingPaths)) {
+                kept.add(f);
+            }
+        }
+        return kept;
+    }
+
+    /**
+     * 文件是否位于（或就是）某个待删临时目录之下。
+     * <p>
+     * 递归列举把"所在目录"放在 {@code path}，所以既有 {@code dir == tempPath}（残留里的直接子项），
+     * 也有 {@code dir} 以 {@code tempPath + "/"} 开头（残留里的更深层子项），两种都要算进去。
+     */
+    static boolean isUnderPendingTempDir(OpenListFileInfo f, Set<String> pendingPaths) {
+        String dir = f == null ? null : f.getPath();
+        if (StrUtil.isBlank(dir)) {
+            return false;
+        }
+        String dirWithSlash = dir + "/";
+        for (String tempPath : pendingPaths) {
+            if (StrUtil.isBlank(tempPath)) {
+                continue;
+            }
+            if (dir.equals(tempPath) || dirWithSlash.startsWith(tempPath + "/")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

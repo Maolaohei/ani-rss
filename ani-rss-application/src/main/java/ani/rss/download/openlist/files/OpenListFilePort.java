@@ -59,7 +59,13 @@ public interface OpenListFilePort {
 
     void fsMove(String srcDir, String dstDir, List<String> names);
 
-    void cleanupTempDownloadDir(String savePath, String tempDirName);
+    /**
+     * 整树删除临时目录，返回<b>回读确认后</b>的结果。
+     * <p>
+     * 返回 {@code FAILED_RETRYABLE} 不意味着下载失败——只说明这次没删成（限流/990009 未落地），
+     * 调用方应把清理债务留给巡检补做，而不是改判下载结果。
+     */
+    ani.rss.download.openlist.residual.TempDirDeleteResult cleanupTempDownloadDir(String savePath, String tempDirName);
 
     void cleanupCloudDownloadEmptyDirs(Set<String> sourceDirs);
 

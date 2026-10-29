@@ -1,6 +1,8 @@
 package ani.rss.task;
 
 import ani.rss.commons.ExceptionUtils;
+import ani.rss.download.BaseDownload;
+import ani.rss.download.OfflineDownloader;
 import ani.rss.download.OpenList;
 import ani.rss.download.OpenListApi;
 import ani.rss.download.openlist.runtime.OpenListCancellationSignal;
@@ -2266,6 +2268,11 @@ public class RssTask implements BaseTask, OpenListCancellationSignal {
                 RssJobState.quiescentBusyAniIds.set(quiescent.busyAniIds());
                 syncDownload();
             }
+            // 每轮补做一次临时目录清理债务。
+            // 收尾时删不掉的残留（限流 / 115 的 990009 异步未落地）不能攒着等用户自己发现：
+            // 媒体管理器会先一步扫到 S1/S1E01.MKV 与 S1/S1E01/S1E01.MKV 两份，表现为重复集。
+            // 这里必须非阻塞（成功路径不等待），限流冷却期由巡检自己跳过。
+            sweepTempDirCleanupDebt();
             // 把等待静默的时间从本轮间隔里扣掉。
             // 不扣的话"等待 + 间隔"会把周期悄悄拉长一倍（15 分钟周期变成 30 分钟等待 + 15 分钟间隔），
             // 用户只会觉得"RSS 变慢了"却找不到原因。保底留一小段，避免退化成忙等。
@@ -2275,6 +2282,24 @@ public class RssTask implements BaseTask, OpenListCancellationSignal {
             String message = ExceptionUtils.getMessage(e);
             log.error(message, e);
             sleepInterruptibly(loop, TimeUnit.MINUTES.toMillis(sleepMinutes));
+        }
+    }
+
+    /**
+     * 补做临时目录清理债务（每轮一次）。
+     * <p>
+     * 只对离线型下载器有意义；其它下载器没有"临时目录"概念，{@link OfflineDownloader#sweepTempDirCleanup()}
+     * 默认是空实现。异常一律吞掉：这是收尾补做，不属于 RSS 轮次的成败。
+     */
+    private static void sweepTempDirCleanupDebt() {
+        BaseDownload download = TorrentUtil.DOWNLOAD;
+        if (!(download instanceof OfflineDownloader offline)) {
+            return;
+        }
+        try {
+            offline.sweepTempDirCleanup();
+        } catch (Exception e) {
+            log.debug("补做临时目录清理失败: {}", ExceptionUtils.getMessage(e));
         }
     }
 

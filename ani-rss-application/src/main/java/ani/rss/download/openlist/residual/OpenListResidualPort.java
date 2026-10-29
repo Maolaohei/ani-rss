@@ -49,8 +49,19 @@ public interface OpenListResidualPort {
 
     /**
      * 整树删除网盘上的临时目录（force=true，仅在确认成片已归位后使用）。
+     * <p>
+     * <b>返回确认态</b>：实现必须"删除 + 回读"后才允许返回
+     * {@link TempDirDeleteResult#DELETED}。旧签名是 void，调用方因此把
+     * "限流失败""990009 已受理"一律当成删掉了，于是清理统计虚高、临时目录长期残留。
      */
-    void deleteTempDir(String savePath, String tempDirName);
+    TempDirDeleteResult deleteTempDir(String savePath, String tempDirName);
+
+    /**
+     * 网盘列举熔断冷却剩余毫秒数（0=可用）。
+     * <p>
+     * 巡检必须在冷却期一条请求都不发：否则"清理 → 触发限流 → 更多残留"会互相喂大。
+     */
+    long listingCooldownRemainingMs();
 
     /**
      * 是否已登录：未登录一律不访问网盘。
