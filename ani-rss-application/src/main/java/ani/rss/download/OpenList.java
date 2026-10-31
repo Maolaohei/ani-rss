@@ -632,6 +632,23 @@ public class OpenList implements BaseDownload, OfflineDownloader, OpenListRuntim
     private static final int MAX_STUCK_RESUBMIT = 2;
 
     /**
+     * 「提交即 Failed + 10008」的<b>跨轮</b>连续计数（key = infoHash）。
+     * <p>
+     * 为什么必须跨轮：{@code ctx.instantDuplicateFails} 是单轮上下文，
+     * 而 10008 死锁每轮只发生一次——计数永远停在 1，{@code >= 2} 的死锁分支永远进不去。
+     * 线上表现就是：每 35 分钟提交一次 → 10008 Failed → 等 240 分钟 → 存疑 → 再来一轮，
+     * 24h 里 24 次「添加下载」、18 次「任务已存在(10008)」、12 次 task/info 404，
+     * 既不通知也不进失败队列（UNCERTAIN 的语义是"保留现场"，可这里根本没有可保留的东西）。
+     * <p>
+     * 只有「提交即 Failed 且找不到可复用进行中任务」才算一击；正常复用进行中任务不计数，
+     * 否则会把"云端正在跑"误判成死锁。
+     */
+    private static final Map<String, Integer> DUPLICATE_LOCK_STRIKES = new ConcurrentHashMap<>();
+
+    /** 跨轮达到该击数即认定 115 云端 hash 去重死锁 */
+    private static final int MAX_DUPLICATE_LOCK_STRIKES = 2;
+
+    /**
      * 本次新提交任务无任何进度变化达到该时长，判定为卡住，触发删除+重新提交。
      */
     private static final long STALL_DETECT_MS = TimeUnit.MINUTES.toMillis(10);
@@ -1914,10 +1931,16 @@ public class OpenList implements BaseDownload, OfflineDownloader, OpenListRuntim
         }
         // 「提交即 Failed+10008」计数：连续 ≥2 次说明 115 云端有同 hash 历史任务
         // 去重死锁（AList 列表不可见、删不掉），重提/等待都不会好转。
-        if (state == OpenListTaskInfo.State.Failed) {
+        // ctx 计数只在"本轮"有效，而 10008 每轮只发生一次 —— 单靠它永远到不了 2，
+        // 所以再叠一层按 infoHash 的跨轮计数（只有"找不到可复用进行中任务"才算一击）。
+        boolean adoptedActive = StrUtil.isNotBlank(otherTid) && !otherTid.equals(failedTid)
+                && tid != null;
+        int strikes = 0;
+        if (state == OpenListTaskInfo.State.Failed && !adoptedActive) {
             ctx.instantDuplicateFails++;
+            strikes = bumpDuplicateLockStrike(infoHash);
         }
-        if (ctx.instantDuplicateFails >= 2) {
+        if (ctx.instantDuplicateFails >= 2 || strikes >= MAX_DUPLICATE_LOCK_STRIKES) {
             // 先兜底检查：幽灵旧任务可能已把文件下完落在临时/最终/云下载目录，
             // 有文件直接进后处理归位，不要浪费这次成果
             EpisodeScanResult dupScan = scanEpisodeFilesOnce(path, savePath, tempDownloadDir,
@@ -1937,6 +1960,27 @@ public class OpenList implements BaseDownload, OfflineDownloader, OpenListRuntim
                 clearDuplicateMagnet(infoHash);
                 return DuplicateTaskOutcome.done(finalizeFromScan(ctx, ani, item, savePath, dupScan));
             }
+            // 兜底也没找到 → 先试着自己把死锁解开：115 侧那条任务卡在 99% 时永远占着 hash，
+            // 而它在 AList 侧完全不可见（task/offline_download 返回空），purgeHashTasks 删不到它。
+            // 看门狗开启时按 hash 直连 115 删掉它，然后立刻重提——这可能就是唯一能自愈的路径。
+            // 关闭时（默认）行为与之前完全一致，只告警 + 长冷却。
+            boolean janitorCleared = false;
+            try {
+                janitorCleared = Offline115Janitor.deleteIfStuck(config, infoHash);
+            } catch (Exception janitorEx) {
+                log.debug("115 离线任务看门狗异常 {}: {}", infoHash, janitorEx.getMessage());
+            }
+            if (janitorCleared) {
+                log.info("115 侧卡死离线任务已按 hash 删除，跳过长冷却直接重提 {}", reName);
+                if (resubmitStuckTask(ctx, "115 侧卡死任务已清理")) {
+                    DUPLICATE_LOCK_STRIKES.remove(hashKey(infoHash));
+                    return DuplicateTaskOutcome.resubmitted();
+                }
+                // 本轮重提次数已耗尽：不清 pending、不记失败、不发通知，
+                // 让 pending 到期后由下一轮自然重试（此时 hash 已经可用了）
+                DUPLICATE_LOCK_STRIKES.remove(hashKey(infoHash));
+                return DuplicateTaskOutcome.keepPolling();
+            }
             // 兜底也没找到 → 快速失败 + 长冷却 + 失败队列/通知（人话化提示手动清理）
             markDuplicateMagnetLong(infoHash);
             try {
@@ -1944,14 +1988,18 @@ public class OpenList implements BaseDownload, OfflineDownloader, OpenListRuntim
             } catch (Exception purgeEx) {
                 log.debug("清理 OpenList 任务失败 {}: {}", infoHash, purgeEx.getMessage());
             }
-            // §3.2：10008 去重死锁属于「存疑」——不是"网盘上没有文件"，而是"这一跳问不通"。
-            // 旧实现抛 OfflineTimeoutException 一路走到 handleOfflineFailure，
-            // 会清掉 pending 并写失败队列；v3 只保留现场 + 长冷却 + 提示人工处理。
-            log.warn("{} 115 云端存在该磁力历史任务导致去重死锁(10008)，已进入 24h 长冷却"
-                            + "（存疑：保留 pending / 计划快照 / 网盘文件）；"
-                            + "请到 115 离线列表删除同名旧任务后等下一轮自动重试", reName);
+            // 这里曾经归入 UNCERTAIN（"保留现场，下轮重做归位"），但 10008 死锁根本没有
+            // 可保留的现场：云端那条任务状态是 Failed、task/info 还 404，文件也不会再出现。
+            // 按 UNCERTAIN 处理 = 不记失败、不发通知、pending 不清，于是每 35 分钟重复一次，
+            // 用户在 24h 日志里只能看到 18 条「任务已存在(10008)」却收不到任何告警。
+            // 判 FAILED：清 pending、写失败队列（attempts+1，可被 3 次上限收敛）、发错误通知；
+            // 24h 长冷却仍然保留，避免重推把 115 打爆。
+            log.error("{} 115 云端存在该磁力历史任务导致去重死锁(10008)，已进入 24h 长冷却并记为失败；"
+                            + "请到 115 离线列表删除该 hash 的旧任务后手动重试，"
+                            + "或在设置中开启「115 离线任务看门狗」让 ANI-RSS 自动按 hash 清理后重提", reName);
             uncertainTaskState.incrementAndGet();
-            return DuplicateTaskOutcome.done(Outcome.UNCERTAIN);
+            DUPLICATE_LOCK_STRIKES.remove(hashKey(infoHash));
+            return DuplicateTaskOutcome.done(Outcome.FAILED);
         }
         // 既没有可复用任务、也没触发长冷却：按低频轮询继续等文件出现
         return DuplicateTaskOutcome.keepPolling();
@@ -3547,6 +3595,32 @@ public class OpenList implements BaseDownload, OfflineDownloader, OpenListRuntim
                 System.currentTimeMillis() + DUPLICATE_MAGNET_COOLDOWN_MS);
     }
 
+    /** 跨轮 10008 死锁计数用的归一化 key（大小写不敏感、空 hash 不计数） */
+    static String hashKey(String infoHash) {
+        return StrUtil.isBlank(infoHash) ? "" : infoHash.trim().toLowerCase(Locale.ROOT);
+    }
+
+    /**
+     * 「提交即 Failed + 10008」跨轮计数 +1，返回累计击数。
+     * <p>
+     * 为什么需要它：单轮上下文里的 {@code instantDuplicateFails} 每轮只 +1，
+     * {@code >= 2} 的死锁判定永远不成立，10008 就会被当成"还在等"无限拖下去。
+     * 计数在成功（{@link #clearDuplicateMagnet}）时清零，所以它是"连续"而非"累计"。
+     * <p>
+     * package-private：判定语义要能被单测直接固化。
+     */
+    static int bumpDuplicateLockStrike(String infoHash) {
+        String key = hashKey(infoHash);
+        if (StrUtil.isBlank(key)) {
+            return 0;
+        }
+        if (DUPLICATE_LOCK_STRIKES.size() > 2048) {
+            // 兜底：长期运行不无限增长；清空只会让死锁重新计数（方向安全）
+            DUPLICATE_LOCK_STRIKES.clear();
+        }
+        return DUPLICATE_LOCK_STRIKES.merge(key, 1, Integer::sum);
+    }
+
     /**
      * 10008 重提达上限：标记 24h 长冷却（115 云端 hash 去重残留，AList 侧无任务可删）
      */
@@ -3578,6 +3652,8 @@ public class OpenList implements BaseDownload, OfflineDownloader, OpenListRuntim
         String key = infoHash.toLowerCase(Locale.ROOT);
         runtimeState.duplicateMagnetUntil().remove(key);
         runtimeState.duplicateMagnetLongUntil().remove(key);
+        // 成功/接管后清掉跨轮死锁计数：它表达的是"连续"失败次数，不是历史累计
+        DUPLICATE_LOCK_STRIKES.remove(key);
     }
 
     /**

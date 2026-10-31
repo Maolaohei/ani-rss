@@ -1008,4 +1008,45 @@ public class Config implements Serializable {
      */
     @Schema(description = "质量择优规则")
     private QualityProfile qualityProfile;
+
+    /**
+     * 115 离线任务看门狗（默认关闭）。
+     * <p>
+     * 打开后，判定「10008 去重死锁」时会先去 115 侧按 {@code info_hash} 查这条任务：
+     * 若它卡在 99% 且已超 {@code offline115StuckMinutes} 分钟，就删掉它再重新提交。
+     * 这是该类死锁的<b>唯一</b>解法——这种任务在 AList 的离线任务列表里根本看不到
+     * （{@code /api/task/offline_download/*} 返回空），不删掉 115 侧任务，hash 会一直被去重挡住。
+     * <p>
+     * 关闭时行为与之前完全一致：只告警 + 24h 长冷却，等人工去 115 手动删。
+     */
+    @Schema(description = "115 离线任务看门狗")
+    private Boolean offline115Janitor;
+
+    /**
+     * 115 cookie（留空则从 AList 反查）。
+     * <p>
+     * 常规部署（下载器是 OpenList/AList）不需要填：会用 {@code downloadToolHost} +
+     * {@code downloadToolPassword} 调 AList 的 {@code /api/admin/storage/list}，
+     * 从 115 存储的 {@code addition.cookie} 取。只有 AList 拿不到 cookie（或直连 115）时才手填。
+     */
+    @Schema(description = "115 cookie(留空从AList反查)")
+    private String offline115Cookie;
+
+    /**
+     * AList 里 115 存储的挂载路径，用于反查 cookie
+     */
+    @Schema(description = "115 存储挂载路径")
+    private String offline115Mount;
+
+    /**
+     * 卡死判定阈值（分钟）：进行中 + 99% + 超过该时长未完成 → 视为卡死
+     */
+    @Schema(description = "115 离线卡死判定(分钟)")
+    private Integer offline115StuckMinutes;
+
+    /**
+     * 115 离线配额告警阈值（百分比）
+     */
+    @Schema(description = "115 离线配额告警(%)")
+    private Integer offline115QuotaWarnPercent;
 }

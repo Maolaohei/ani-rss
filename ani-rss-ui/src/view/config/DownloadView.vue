@@ -98,6 +98,69 @@
             </el-text>
           </div>
         </SettingsItem>
+        <SettingsItem label="115 离线看门狗">
+          <div class="full-width">
+            <el-switch v-model:model-value="props.config['offline115Janitor']"/>
+            <br>
+            <el-text class="mx-1" size="small">
+              提交离线任务被 <strong>10008 任务已存在</strong> 挡住时（115 上还留着同 hash 的历史任务），
+              按 hash 查一次 115 离线队列：<strong>只有卡在 99% 永不完成的任务才删除后重提</strong>，
+              其它任务一律不动。仅 OpenList 下载工具下生效
+            </el-text>
+          </div>
+        </SettingsItem>
+        <template v-if="props.config['offline115Janitor']">
+          <SettingsItem label="115 挂载路径">
+            <div class="full-width">
+              <el-input v-model:model-value="props.config['offline115Mount']" placeholder="/115"/>
+              <el-text class="mx-1" size="small">
+                OpenList 里指向 115 的存储挂载路径，用于自动读取 cookie
+              </el-text>
+            </div>
+          </SettingsItem>
+          <SettingsItem label="卡死判定">
+            <div>
+              <el-input-number v-model:model-value="props.config['offline115StuckMinutes']" :min="10" :max="4320">
+                <template #suffix>
+                  <span>分钟</span>
+                </template>
+              </el-input-number>
+              <br>
+              <el-text class="mx-1" size="small">
+                进度 ≥99% 且持续超过该时长仍未完成，才判定为卡死；低进度不判定，避免误删正常任务
+              </el-text>
+            </div>
+          </SettingsItem>
+          <SettingsItem label="配额告警">
+            <div>
+              <el-input-number v-model:model-value="props.config['offline115QuotaWarnPercent']" :min="1" :max="100">
+                <template #suffix>
+                  <span>%</span>
+                </template>
+              </el-input-number>
+              <br>
+              <el-text class="mx-1" size="small">
+                115 离线配额使用率超过该比例时，自检会给出告警
+              </el-text>
+            </div>
+          </SettingsItem>
+          <SettingsItem label="115 Cookie">
+            <div class="full-width">
+              <el-input v-model.trim="props.config['offline115Cookie']" placeholder="留空则自动从 OpenList 读取"
+                        show-password autocomplete="new-password"/>
+              <el-text class="mx-1" size="small">
+                仅当 OpenList 反查不到 cookie 时才需要手填
+              </el-text>
+            </div>
+          </SettingsItem>
+          <SettingsItem label="离线队列">
+            <div class="full-width">
+              <el-button size="small" :loading="offline115Loading" @click="queryOffline115">
+                查询 115 离线队列
+              </el-button>
+            </div>
+          </SettingsItem>
+        </template>
       </template>
       <template v-else>
         <SettingsItem label="用户名">
@@ -310,6 +373,27 @@ const downloadLoginTest = () => {
       })
       .finally(() => {
         downloadLoginTestLoading.value = false
+      })
+}
+
+const offline115Loading = ref(false)
+const queryOffline115 = () => {
+  offline115Loading.value = true
+  http.offline115Status()
+      .then(res => {
+        const data = res.data || {}
+        if (data.enabled === false) {
+          ElMessage.warning(data.message || '先把下载工具设为 OpenList，115 离线看门狗才会生效')
+          return
+        }
+        ElMessage.success(
+            `115 离线任务 ${data.taskCount ?? 0} 条（进行中 ${data.runningCount ?? 0}、`
+            + `已完成 ${data.finishedCount ?? 0}、卡死 ${data.stuckCount ?? 0}），`
+            + `配额 ${data.quota ?? 0}/${data.total ?? 0}（${data.quotaPercent ?? 0}%）`
+        )
+      })
+      .finally(() => {
+        offline115Loading.value = false
       })
 }
 

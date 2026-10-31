@@ -858,6 +858,20 @@ public class ConfigUtil {
         if (config.getCloudListMaxFiles() == null) {
             config.setCloudListMaxFiles(5000);
         }
+        // ---- 115 离线任务看门狗 ----
+        // 默认关闭：它会删 115 侧任务，属于"会动云端数据"的能力，必须由用户显式开启。
+        if (config.getOffline115Janitor() == null) {
+            config.setOffline115Janitor(false);
+        }
+        if (StrUtil.isBlank(config.getOffline115Mount())) {
+            config.setOffline115Mount("/115");
+        }
+        if (config.getOffline115StuckMinutes() == null || config.getOffline115StuckMinutes() < 1) {
+            config.setOffline115StuckMinutes(180);
+        }
+        if (config.getOffline115QuotaWarnPercent() == null) {
+            config.setOffline115QuotaWarnPercent(85);
+        }
 
         NotificationConfig newNotificationConfig = NotificationConfig.createNotificationConfig();
 

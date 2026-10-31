@@ -388,6 +388,19 @@ export let clearCache = () => api.post('api/clearCache')
 export let downloadLoginTest = (config) => api.post('api/downloadLoginTest', config)
 
 /**
+ * 115 离线任务状态（仅 OpenList 下载工具下生效）
+ * @returns {Promise<unknown>}
+ */
+export let offline115Status = () => api.post('api/offline115/status')
+
+/**
+ * 清理 115 卡死离线任务
+ * @param dryRun 为 true 时只列清单不删除
+ * @returns {Promise<unknown>}
+ */
+export let offline115Clean = (dryRun) => api.post('api/offline115/clean', {dryRun})
+
+/**
  * 获取TG最近消息
  * @param notificationConfig 通知配置
  * @returns {Promise<unknown>}

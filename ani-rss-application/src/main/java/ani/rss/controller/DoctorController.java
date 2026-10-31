@@ -4,6 +4,7 @@ import ani.rss.annotation.Auth;
 import ani.rss.commons.ExceptionUtils;
 import ani.rss.commons.FileUtils;
 import ani.rss.download.BaseDownload;
+import ani.rss.download.Offline115Janitor;
 import ani.rss.download.OfflineDownloader;
 import ani.rss.download.OpenList;
 import ani.rss.download.OpenListApi;
@@ -73,6 +74,7 @@ public class DoctorController extends BaseController {
         checks.add(checkOpenListRateLimit(config));
         checks.add(checkOpenListUpstream(config));
         checks.add(checkOpenListOutcome(config));
+        checks.add(checkOffline115(config));
         checks.add(checkLocalStateCache(config));
 
         Map<String, Integer> summary = new LinkedHashMap<>();
@@ -724,6 +726,55 @@ public class DoctorController extends BaseController {
                 LocalStateCache.getAppendedCount(),
                 LocalStateCache.resolveTtlMs(LocalStateCache.Source.LOCAL_DISK) / 1000L,
                 LocalStateCache.resolveTtlMs(LocalStateCache.Source.CLOUD_API) / 1000L);
+    }
+
+    /**
+     * 115 离线任务与配额。
+     * <p>
+     * 这项只有在「下载器 = OpenList / Alist」时才有意义。它之所以值得单独一行，是因为
+     * 115 的离线任务<b>不通过 AList 暴露</b>：配额打满、任务卡死在 99%，在 ANI-RSS 这一侧
+     * 与「网盘抖动」「网络超时」看起来完全一样，只能靠这条自检把两者分开。
+     */
+    private DoctorCheck checkOffline115(Config config) {
+        String key = "offline115";
+        String label = "115 离线任务";
+        long start = System.currentTimeMillis();
+        if (!RssTask.isOpenListTool(config)) {
+            return timed(DoctorCheck.skip(key, label, "当前下载器不是 OpenList / Alist，无 115 离线任务"), start);
+        }
+        if (!Offline115Janitor.enabled(config)) {
+            return timed(DoctorCheck.skip(key, label,
+                    "「115 离线任务看门狗」未开启（offline115Janitor）；"
+                            + "关闭时 10008 去重死锁只能人工去 115 删任务"), start);
+        }
+        Offline115Janitor.Snapshot snapshot;
+        try {
+            snapshot = Offline115Janitor.snapshot(config);
+        } catch (Exception e) {
+            snapshot = null;
+        }
+        if (snapshot == null) {
+            return timed(DoctorCheck.warn(key, label, "未能读取 115 离线任务（cookie 不可用或接口超时）",
+                    "填 offline115Cookie；常规部署可留空改由 AList 反查，"
+                            + "需确认 offline115Mount 与 AList 里 115 存储的挂载路径一致"), start);
+        }
+        int stuckMinutes = Offline115Janitor.stuckMinutes(config);
+        int stuck = snapshot.stuck(stuckMinutes).size();
+        String evidence = StrUtil.format(
+                "任务 {} 条（进行中 {}、已完成 {}），配额 {}/{}（{}%），卡死判定 {} 分钟，当前卡死 {} 条",
+                snapshot.tasks().size(), snapshot.runningCount(), snapshot.finishedCount(),
+                snapshot.quota(), snapshot.total(), snapshot.quotaPercent(), stuckMinutes, stuck);
+        if (stuck > 0) {
+            return timed(DoctorCheck.warn(key, label, evidence,
+                    "卡死任务会一直占着 info_hash，之后每次提交都被 10008 挡住；"
+                            + "调 /offline115/clean（dryRun=true 先看清单）清理，或等死锁时自动清理"), start);
+        }
+        if (snapshot.quotaPercent() >= Offline115Janitor.quotaWarnPercent(config)) {
+            return timed(DoctorCheck.warn(key, label, evidence,
+                    "115 离线配额接近上限，到顶后新任务会被直接拒绝且没有明显报错；"
+                            + "清理已完成的旧任务即可回收（任务记录不影响已落盘文件）"), start);
+        }
+        return timed(DoctorCheck.ok(key, label, evidence), start);
     }
 
     private static DoctorCheck timed(DoctorCheck check, long start) {
