@@ -1960,26 +1960,10 @@ public class OpenList implements BaseDownload, OfflineDownloader, OpenListRuntim
                 clearDuplicateMagnet(infoHash);
                 return DuplicateTaskOutcome.done(finalizeFromScan(ctx, ani, item, savePath, dupScan));
             }
-            // 兜底也没找到 → 先试着自己把死锁解开：115 侧那条任务卡在 99% 时永远占着 hash，
-            // 而它在 AList 侧完全不可见（task/offline_download 返回空），purgeHashTasks 删不到它。
-            // 看门狗开启时按 hash 直连 115 删掉它，然后立刻重提——这可能就是唯一能自愈的路径。
-            // 关闭时（默认）行为与之前完全一致，只告警 + 长冷却。
-            boolean janitorCleared = false;
-            try {
-                janitorCleared = Offline115Janitor.deleteIfStuck(config, infoHash);
-            } catch (Exception janitorEx) {
-                log.debug("115 离线任务看门狗异常 {}: {}", infoHash, janitorEx.getMessage());
-            }
-            if (janitorCleared) {
-                log.info("115 侧卡死离线任务已按 hash 删除，跳过长冷却直接重提 {}", reName);
-                if (resubmitStuckTask(ctx, "115 侧卡死任务已清理")) {
-                    DUPLICATE_LOCK_STRIKES.remove(hashKey(infoHash));
-                    return DuplicateTaskOutcome.resubmitted();
-                }
-                // 本轮重提次数已耗尽：不清 pending、不记失败、不发通知，
-                // 让 pending 到期后由下一轮自然重试（此时 hash 已经可用了）
-                DUPLICATE_LOCK_STRIKES.remove(hashKey(infoHash));
-                return DuplicateTaskOutcome.keepPolling();
+            // 兜底也没找到 → 先试着自己把死锁解开（看门狗关闭时返回 null，行为与之前一致）
+            DuplicateTaskOutcome janitorOutcome = clearStuckByJanitor(ctx, config, infoHash, reName);
+            if (janitorOutcome != null) {
+                return janitorOutcome;
             }
             // 兜底也没找到 → 快速失败 + 长冷却 + 失败队列/通知（人话化提示手动清理）
             markDuplicateMagnetLong(infoHash);
@@ -2002,6 +1986,43 @@ public class OpenList implements BaseDownload, OfflineDownloader, OpenListRuntim
             return DuplicateTaskOutcome.done(Outcome.FAILED);
         }
         // 既没有可复用任务、也没触发长冷却：按低频轮询继续等文件出现
+        return DuplicateTaskOutcome.keepPolling();
+    }
+
+    /**
+     * 10008 死锁时的自愈尝试：让「115 离线任务看门狗」按 hash 删掉 115 侧卡死任务后立刻重提。
+     * <p>
+     * 为什么需要它：115 侧那条任务卡在 99% 时永远占着 hash，而它在 AList 侧完全不可见
+     * （{@code task/offline_download} 返回空），{@code purgeHashTasks} 删不到它，于是每次重提都在
+     * 10008 上撞死。看门狗开启时直连 115 的 {@code web/lixian} 按 hash 删除，这是唯一能自愈的路径；
+     * 关闭时（默认）返回 {@code null}，调用方行为与之前完全一致（告警 + 24h 长冷却 + 记失败）。
+     * <p>
+     * 抽成独立方法有两个原因：一是让 10008 分支保持一眼能看懂的编排（结构测试卡了行数上限），
+     * 二是把"网络异常绝不能影响死锁判定"这条容错收在一个地方。
+     *
+     * @return 已清理并成功重提 → {@code resubmitted()}；已清理但本轮重提次数耗尽 → {@code keepPolling()}；
+     *         未清理（未开启 / 未卡死 / 异常）→ {@code null}
+     */
+    private DuplicateTaskOutcome clearStuckByJanitor(OfflineDownloadContext ctx, Config config,
+                                                    String infoHash, String reName) {
+        boolean cleared;
+        try {
+            cleared = Offline115Janitor.deleteIfStuck(config, infoHash);
+        } catch (Exception e) {
+            log.debug("115 离线任务看门狗异常 {}: {}", infoHash, e.getMessage());
+            return null;
+        }
+        if (!cleared) {
+            return null;
+        }
+        log.info("115 侧卡死离线任务已按 hash 删除，跳过长冷却直接重提 {}", reName);
+        if (resubmitStuckTask(ctx, "115 侧卡死任务已清理")) {
+            DUPLICATE_LOCK_STRIKES.remove(hashKey(infoHash));
+            return DuplicateTaskOutcome.resubmitted();
+        }
+        // 本轮重提次数已耗尽：不清 pending、不记失败、不发通知，
+        // 让 pending 到期后由下一轮自然重试（此时 hash 已经可用了）
+        DUPLICATE_LOCK_STRIKES.remove(hashKey(infoHash));
         return DuplicateTaskOutcome.keepPolling();
     }
 

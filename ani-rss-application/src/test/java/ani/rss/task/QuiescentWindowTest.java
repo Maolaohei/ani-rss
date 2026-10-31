@@ -14,6 +14,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -179,6 +180,33 @@ class QuiescentWindowTest {
         // 只建目录不建文件 → 仍算静默（残留空目录无害）
         Files.createDirectories(tempDir.resolve("torrents").resolve(".pending").resolve("某番"));
         assertEquals(0, RssTask.countPendingMarkers());
+    }
+
+    @Test
+    void expired_pending_markers_do_not_block_quiescent() throws IOException {
+        // 孤儿 pending 会被刻意保留（在途账本），过期后不能再拖着静默门空转
+        Path pending = tempDir.resolve("torrents").resolve(".pending").resolve("某番").resolve("Season 1");
+        Files.createDirectories(pending);
+        Path fresh = pending.resolve("fresh.torrent");
+        Path old = pending.resolve("old.torrent");
+        Path ancient = pending.resolve("ancient.torrent");
+        Files.writeString(fresh, "x");
+        Files.writeString(old, "y");
+        Files.writeString(ancient, "z");
+
+        long now = System.currentTimeMillis();
+        long hour = 3_600_000L;
+        Files.setLastModifiedTime(old, FileTime.fromMillis(now - 3 * hour));
+        Files.setLastModifiedTime(ancient, FileTime.fromMillis(now - 30 * 24 * hour));
+
+        // 原始计数包含全部文件
+        assertEquals(3, RssTask.countPendingMarkers());
+        // 2h 有效期：只有刚写的那条算在途
+        assertEquals(1, RssTask.countInFlightPendingMarkers(now, 2 * hour));
+        // 4h 有效期：3h 前的那条也算在途
+        assertEquals(2, RssTask.countInFlightPendingMarkers(now, 4 * hour));
+        // 有效期极短（1ms）时全过期 → 静默门放行
+        assertEquals(0, RssTask.countInFlightPendingMarkers(now + 60_000L, 1L));
     }
 
     // ---------------- 静默判定 ----------------

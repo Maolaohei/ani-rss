@@ -634,7 +634,7 @@ public class RssTask implements BaseTask, OpenListCancellationSignal {
             return QuiescentState.busy("有 RSS 轮次正在运行", Set.of());
         }
         // F4-3 离线网盘：.pending 下不能还有未落地的标记文件
-        int pending = countPendingMarkers();
+        int pending = countInFlightPendingMarkers();
         if (pending > 0) {
             return QuiescentState.busy("有 " + pending + " 个离线任务尚未落地", Set.of());
         }
@@ -712,6 +712,57 @@ public class RssTask implements BaseTask, OpenListCancellationSignal {
             return count[0];
         } catch (Exception e) {
             log.debug("统计 pending 标记失败: {}", ExceptionUtils.getMessage(e));
+            return 0;
+        }
+    }
+
+    /**
+     * 统计<b>仍在在途有效期内</b>的 pending 标记数（F4-3 的实际判据）。
+     * <p>
+     * 与 {@link #countPendingMarkers()} 的差别就是"过期不复位"：{@code .pending} 从临时标记升级成
+     * 在途账本之后，孤儿标记会被<b>刻意保留</b>（启动清理只删"正式记录已存在"的那些），
+     * 于是它可能永久留在盘上。而静默门要求"pending 已清空"——按全部文件计数就意味着
+     * <b>几个上下文早已不相关的孤儿标记能把每一轮都拖到静默超时</b>（线上实测：6 个孤儿 → 轮询从
+     * 15 分钟漂移到 30 分钟以上，且每轮都被记成"强制开轮"）。
+     * <p>
+     * 一旦超过在途有效期（{@link TorrentUtil#pendingTtlMs(Config)}，即 {@code alistDownloadTimeout × 2}），
+     * 这条标记已经不再代表"还在等"，{@link ani.rss.service.DownloadService#submitItem} 下次遇到它也不再只等，
+     * 所以静默门不该继续为它空转。过期标记本身不删：那一集重新出现在 RSS 里时，
+     * 放行路径要拿它做"重做归位 + 确认"，删了反而丢掉在途账本。
+     *
+     * @return 在途有效期内的标记数
+     */
+    static int countInFlightPendingMarkers() {
+        return countInFlightPendingMarkers(System.currentTimeMillis(), TorrentUtil.pendingTtlMs(ConfigUtil.CONFIG));
+    }
+
+    /**
+     * 计数主体（显式传入时间与有效期，便于单测不依赖系统时钟）。
+     *
+     * @param nowMs 当前毫秒时间
+     * @param ttlMs 在途有效期毫秒
+     */
+    static int countInFlightPendingMarkers(long nowMs, long ttlMs) {
+        try {
+            File pendingRoot = new File(ConfigUtil.getConfigDir(), "torrents/.pending");
+            if (!pendingRoot.isDirectory()) {
+                return 0;
+            }
+            long ttl = Math.max(1L, ttlMs);
+            int[] count = {0};
+            FileUtil.walkFiles(pendingRoot, f -> {
+                if (!f.isFile()) {
+                    return;
+                }
+                if (nowMs - f.lastModified() > ttl) {
+                    // 已过在途有效期：交给放行路径复核，不再算「还在等」
+                    return;
+                }
+                count[0]++;
+            });
+            return count[0];
+        } catch (Exception e) {
+            log.debug("统计在途 pending 标记失败: {}", ExceptionUtils.getMessage(e));
             return 0;
         }
     }

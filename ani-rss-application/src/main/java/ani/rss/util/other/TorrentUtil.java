@@ -472,6 +472,10 @@ public class TorrentUtil {
             if (!pendingRoot.isDirectory()) {
                 return;
             }
+            long now = System.currentTimeMillis();
+            long ttl = pendingTtlMs(ConfigUtil.CONFIG);
+            // [0]=保留的孤儿数 [1]=其中已过在途有效期的数
+            int[] stat = {0, 0};
             FileUtil.walkFiles(pendingRoot, f -> {
                 if (!f.isFile()) {
                     return;
@@ -488,9 +492,25 @@ public class TorrentUtil {
                     log.info("清理已完成任务的 pending 残留: {}", rel);
                 } else {
                     // 孤儿 pending：保留为在途账本，等过期复核或下轮判定处理
+                    stat[0]++;
+                    long ageMs = now - f.lastModified();
+                    if (ageMs > ttl) {
+                        // 已过在途有效期：不再计入静默门（见 RssTask.countInFlightPendingMarkers），
+                        // 但标记本身不删——那一集重新出现在 RSS 里时要拿它做「重做归位 + 确认」
+                        stat[1]++;
+                        log.warn("在途 pending 已过有效期（{} 分钟，判定 {} 分钟），不再计入静默门，"
+                                        + "等该集重新出现在 RSS 时复核: {}",
+                                ageMs / 60_000L, ttl / 60_000L, rel);
+                        return;
+                    }
                     log.info("保留在途 pending（离线未闭环，等过期复核）: {}", rel);
                 }
             });
+            if (stat[1] > 0) {
+                log.warn("共 {} 个待复核 pending，其中 {} 个已过在途有效期；"
+                                + "这些陈旧标记不会拖慢轮询，但对应集若长期不再出现需要人工清理",
+                        stat[0], stat[1]);
+            }
         } catch (Exception e) {
             log.warn("清理 pending 残留失败: {}", ExceptionUtils.getMessage(e));
         }
