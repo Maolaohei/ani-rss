@@ -476,6 +476,31 @@ public class RenameUtil {
         return list;
     }
 
+    /**
+     * RSS 集数 + 订阅集数偏移，并对"算到 {@code <=0}"做闸门。
+     * <p>
+     * <b>为什么必须有闸门</b>：偏移是「季内集数 → 最终集数」的平移量，配错了就会把本集算成负数。
+     * 青之箱 第二季（RSS 用季内编号 [01]..[04]，订阅偏移 -25）算出的 -21 被直接写进
+     * {@code renameTemplate} 成为 {@code 青之箱 S02E-21}——这种名字在网盘里<b>永远不可能存在</b>，
+     * 归位对账注定 NOT_FOUND，随后每轮「确认没有 → 保留记录 / 重下」永不收敛
+     * （2026-10 线上 24h 内 112 条「等下一轮复核」、占全部告警 42.6% 的真实成因）。
+     * <p>
+     * 处置：回退为 RSS 原始集数（这是唯一能落地的名字），并把「去修订阅偏移」写进 ERROR 日志——
+     * 静默产出非法文件名，比报错糟糕得多。
+     * <p>
+     * package-private：闸门本身要能被单测直接固化。
+     */
+    static double applyEpisodeOffset(double rawEpisode, int offset, String title) {
+        double shifted = rawEpisode + offset;
+        if (shifted > 0) {
+            return shifted;
+        }
+        log.error("集数偏移异常：RSS 集数 {} + 订阅偏移 {} = {}（<=0），"
+                        + "已回退按 RSS 原始集数命名，请修正订阅「{}」的集数偏移",
+                rawEpisode, offset, shifted, title);
+        return rawEpisode;
+    }
+
     public static Boolean rename(Ani ani, Item item) {
         Config config = ConfigUtil.CONFIG;
         boolean v2 = isNamingV2(ani);
@@ -635,8 +660,9 @@ public class RenameUtil {
                 return false;
             }
 
-            double episode = Double.parseDouble(episodeStr) + offset;
-            item.setEpisode(episode);
+            double rawEpisode = Double.parseDouble(episodeStr);
+            double shifted = applyEpisodeOffset(rawEpisode, offset, ani.getTitle());
+            item.setEpisode(shifted);
         }
 
         double episode = item.getEpisode();

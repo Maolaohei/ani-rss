@@ -731,14 +731,17 @@ public class DownloadService implements OpenListDownloadPathResolver, RssDownloa
             return ExistingRecordResult.SKIP;
         }
         if (!presence.valid()) {
-            if (isOpenListTool()) {
-                log.warn("种子记录存在但未确认网盘产物，按 v3 保留记录（不删、不重下），"
-                        + "等下一轮复核 {}", reName);
-                RssTask.countRoundLocalState(LocalState.UNKNOWN);
-                return ExistingRecordResult.SKIP;
-            }
-            log.warn("清理过期种子记录(无对应任务/文件) {}", reName);
+            // 走到这里说明缺席已被「跨时间确认」放行（ABSENT 只会由 absenceOrUnconfirmed 放出来），
+            // 而按 2118 行那段注释的语义，确认没有是**唯一**允许删记录重下的判定。
+            // v3 曾在 OpenList 分支直接 SKIP：记录留着、文件不在、下一轮重新计时，
+            // 于是「确认 → 什么都不做 → 重新登记 → 再等 62 分钟」无限循环，
+            // 24h 里刷出 112 条「等下一轮复核」+ 112 条「缺席未确认」+ 52 条「按 v3 保留记录」，
+            // 占全部 WARN/ERROR 的 42.6%，且那几集永远下不下来。这里对两种下载工具统一处置。
+            log.warn("确认网盘侧无本集产物，清理过期种子记录并重新下载 {}", reName);
             FileUtil.del(torrent);
+            // 计时清零必须发生在「真的执行了动作」之后：先清（原 absenceOrUnconfirmed 的写法）
+            // 会让确认永远从零开始，是同一个死循环的另一半。
+            clearAbsence(FailedDownloadQueue.keyOf(ani.getId(), item.getInfoHash(), reName));
             return ExistingRecordResult.CONTINUE;
         }
         TorrentsInfo standbyPlaceholder = findRemovableStandbyPlaceholder(ani, item, torrentsInfos);
@@ -2232,8 +2235,20 @@ public class DownloadService implements OpenListDownloadPathResolver, RssDownloa
      * @param decision 原本的 ABSENT 判定（确认后原样返回，由调用方执行删记录重下）
      */
     private static PresenceDecision absenceOrUnconfirmed(String key, String reName, PresenceDecision decision) {
-        if (absenceConfirmed(key)) {
-            clearAbsence(key);
+        return absenceOrUnconfirmed(key, reName, decision, System.currentTimeMillis());
+    }
+
+    /**
+     * 同上，{@code nowMs} 可注入：确认后**再确认一次仍是确认**这条语义要能被单测固化。
+     * <p>
+     * package-private：生产路径走上面 3 参版本，单测走合成时间。
+     */
+    static PresenceDecision absenceOrUnconfirmed(String key, String reName, PresenceDecision decision, long nowMs) {
+        if (absenceConfirmed(key, nowMs)) {
+            // 这里**不清**登记：清掉等于"确认作废"，下一轮从零重新计时 62 分钟，
+            // 于是「确认没有 → 什么都不做 → 重新登记 → 再等 62 分钟」永远循环
+            // （2026-10 线上 112 次/24h 的「判为没有文件但尚未跨时间确认」正是这么来的）。
+            // 清零的责任在有动作的那一侧：handleExistingRecord 真正删掉记录重下之后再清。
             return decision;
         }
         log.warn("判为「没有文件」但尚未跨时间确认（网盘目录列举自带缓存、可达 1 小时），"
