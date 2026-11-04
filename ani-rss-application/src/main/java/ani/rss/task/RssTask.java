@@ -1245,8 +1245,9 @@ public class RssTask implements BaseTask, OpenListCancellationSignal {
                     if (pool != null) {
                         pool.shutdownNow();
                     }
-                    // 兼容：OpenList/Alist 才清理远端离线任务；其它工具只停 RSS 推进
-                    cleanupDownloadToolOnCancel("手动抢先");
+                    // 让路 ≠ 取消：这里只停止 RSS 推进（取消信号已置位，等待方会尽快退出），
+                    // 绝不调 cleanupDownloadToolOnCancel——那会把别的订阅在途/刚下完的
+                    // 离线任务连任务记录一起删掉，制造孤儿目录与假「用户取消」。
                     // 不强制立刻 release：等 download finally 释放后 drain pending
                     if (prev != null) {
                         return "已请求周期任务让路，并将替换先前的待执行刷新";
@@ -1298,7 +1299,7 @@ public class RssTask implements BaseTask, OpenListCancellationSignal {
                     RssJobState.cancelRequested.set(true);
                 }
             }
-            cleanupDownloadToolOnCancel("未知来源抢先");
+            // 同上：排队/让路语义不清理远端离线任务，只有真正的用户取消才清理
             return "存在运行中任务，已请求让路并排队手动刷新";
         }
 
@@ -2226,6 +2227,15 @@ public class RssTask implements BaseTask, OpenListCancellationSignal {
     @Override
     public boolean isCancellationRequested() {
         return RssTask.isCancelRequested();
+    }
+
+    /**
+     * 让路（手动刷新插队）与用户取消必须分开：让路只停 RSS 推进，
+     * 不动远端离线任务、不删 pending、不改临时目录。
+     */
+    @Override
+    public boolean isYieldRequested() {
+        return RssJobState.cancelReason.get() == CancelReason.PREEMPT;
     }
 
     private static OpenListRuntimeView openListRuntimeView() {

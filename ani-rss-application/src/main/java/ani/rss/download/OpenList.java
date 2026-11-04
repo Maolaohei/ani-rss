@@ -993,14 +993,31 @@ public class OpenList implements BaseDownload, OfflineDownloader, OpenListRuntim
         Boolean delete = config == null ? null : config.getDelete();
         try {
             Outcome outcome = awaitAndFinalize(ctx, ani, item, savePath);
-            // N6：取消优先级最高，先于三态分流。取消是独立态：清 pending、不记失败、不发通知。
-            if (CANCEL_REQUESTED_HASHES.contains(ctx.infoHash) || cancellationSignal.isCancellationRequested()) {
-                log.info("离线下载被用户取消，清理 pending {}", ctx.reName);
-                try {
-                    TorrentUtil.deletePendingTorrent(ani, item);
-                } catch (Exception ignored) {
+            // N6：取消优先于三态分流，但先要分清取消的性质——
+            //   1) 产物已确认就位：任何取消都不能把已到手的文件判成"未完成"，
+            //      否则会清掉 pending 又不记历史，事后看只剩"用户取消"一行误导日志；
+            //   2) 只是让路（手动刷新插队）：保留 pending 与远端任务，下一轮继续；
+            //   3) 真正的用户取消：清 pending、不记失败、不发通知。
+            boolean explicitlyCancelled = CANCEL_REQUESTED_HASHES.contains(ctx.infoHash);
+            boolean cancelled = explicitlyCancelled || cancellationSignal.isCancellationRequested();
+            switch (resolveCancelAction(explicitlyCancelled, cancelled, cancellationSignal.isYieldRequested(), outcome)) {
+                case HOLD -> {
+                    log.info("让路给手动刷新：保留 pending 与离线任务，下一轮继续 {}", ctx.reName);
+                    return;
                 }
-                return;
+                case ABORT -> {
+                    log.info("离线下载被用户取消，清理 pending {}", ctx.reName);
+                    try {
+                        TorrentUtil.deletePendingTorrent(ani, item);
+                    } catch (Exception ignored) {
+                    }
+                    return;
+                }
+                default -> {
+                    if (cancelled) {
+                        log.info("产物已就位，忽略取消请求按完成处理 {}", ctx.reName);
+                    }
+                }
             }
             if (outcome == Outcome.SUCCESS) {
                 outcomeSuccess.incrementAndGet();
@@ -2250,19 +2267,150 @@ public class OpenList implements BaseDownload, OfflineDownloader, OpenListRuntim
      * <p>
      * qB / Transmission / Aria2 的历史由 {@code DownloadService.notification} 统一记录，
      * 但 OpenList 走的是自己的完成判定链路，不经过该方法，需在此单独埋点。
+     * <p>
+     * 合集必须按实际落地的集数逐条记账：一次 01-12 的合集只记一条 E01 时，
+     * 记录页看起来"只下了第 1 集"，日/月统计也会少算其余集数。
      */
     private void recordHistory(Ani ani, Item item, String note) {
         try {
             if (ani == null || item == null) {
                 return;
             }
+            String source = ConfigUtil.CONFIG.getDownloadToolType();
+            List<Double> episodes = sortedEpisodeRange(item.getEpisodeRange());
+            List<String> batchReNames = batchEpisodeReNames(item.getReName(), episodes);
+            if (episodes.size() > 1 && batchReNames.size() == episodes.size()) {
+                String scope = episodeSpanLabel(episodes);
+                String batchNote = StrUtil.isBlank(note)
+                        ? StrFormatter.format("合集下载 {}（共 {} 集）", scope, episodes.size())
+                        : StrFormatter.format("{}（合集 {}，共 {} 集）", note, scope, episodes.size());
+                for (int i = 0; i < episodes.size(); i++) {
+                    DownloadHistory.record(ani.getId(), ani.getTitle(), batchReNames.get(i), item.getInfoHash(),
+                            episodes.get(i), item.getLength(), source, ani.getSubgroup(),
+                            DownloadHistory.Result.SUCCESS, batchNote);
+                }
+                return;
+            }
             DownloadHistory.record(ani.getId(), ani.getTitle(), item.getReName(), item.getInfoHash(),
-                    item.getEpisode(), item.getLength(),
-                    ConfigUtil.CONFIG.getDownloadToolType(), ani.getSubgroup(),
+                    item.getEpisode(), item.getLength(), source, ani.getSubgroup(),
                     DownloadHistory.Result.SUCCESS, note);
         } catch (Exception e) {
             log.debug("记录离线下载历史失败: {}", e.getMessage());
         }
+    }
+
+    /** 合集单轮记账上限：超出则退回单条摘要，避免异常范围把历史刷爆 */
+    private static final int BATCH_HISTORY_MAX_EPISODES = 200;
+
+    /**
+     * 合集范围归一：去空、去重、升序。
+     */
+    static List<Double> sortedEpisodeRange(List<Double> range) {
+        if (range == null || range.isEmpty()) {
+            return List.of();
+        }
+        return range.stream()
+                .filter(Objects::nonNull)
+                .distinct()
+                .sorted()
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * 由合集条目的 reName 推导每一集的最终名字，只认「…E01」这种以集数收尾的命名。
+     * 自定义模板（结尾不是 E+数字）返回空列表，调用方退回单条记账。
+     */
+    static List<String> batchEpisodeReNames(String reName, List<Double> episodes) {
+        if (StrUtil.isBlank(reName) || episodes == null || episodes.size() < 2
+                || episodes.size() > BATCH_HISTORY_MAX_EPISODES) {
+            return List.of();
+        }
+        int end = reName.length();
+        int digitsStart = end;
+        while (digitsStart > 0 && Character.isDigit(reName.charAt(digitsStart - 1))) {
+            digitsStart--;
+        }
+        if (digitsStart == end || digitsStart == 0) {
+            return List.of();
+        }
+        char marker = reName.charAt(digitsStart - 1);
+        if (marker != 'E' && marker != 'e') {
+            return List.of();
+        }
+        String prefix = reName.substring(0, digitsStart);
+        int width = Math.max(end - digitsStart, 2);
+        List<String> names = new ArrayList<>(episodes.size());
+        for (Double episode : episodes) {
+            names.add(prefix + episodeToken(episode, width));
+        }
+        return names;
+    }
+
+    private static String episodeToken(double episode, int width) {
+        if (episode == Math.rint(episode)) {
+            return String.format("%0" + width + "d", (long) episode);
+        }
+        return java.math.BigDecimal.valueOf(episode).stripTrailingZeros().toPlainString();
+    }
+
+    /**
+     * 片段标签：连续整数记成 {@code 01-12}，否则逗号列出前几个。
+     */
+    static String episodeSpanLabel(List<Double> episodes) {
+        if (episodes == null || episodes.isEmpty()) {
+            return "";
+        }
+        if (episodes.size() == 1) {
+            return episodeToken(episodes.get(0), 2);
+        }
+        boolean contiguous = true;
+        for (int i = 1; i < episodes.size(); i++) {
+            if (episodes.get(i) - episodes.get(i - 1) != 1D) {
+                contiguous = false;
+                break;
+            }
+        }
+        if (contiguous) {
+            return episodeToken(episodes.get(0), 2) + "-"
+                    + episodeToken(episodes.get(episodes.size() - 1), 2);
+        }
+        String joined = episodes.stream()
+                .limit(6)
+                .map(episode -> episodeToken(episode, 2))
+                .collect(Collectors.joining(","));
+        return episodes.size() > 6 ? joined + ",…" : joined;
+    }
+
+    /**
+     * 取消 / 让路的分流结果：照常完成、保留现场、清理 pending。
+     */
+    enum CancelAction {
+        PROCEED, HOLD, ABORT
+    }
+
+    /**
+     * 取消和让路必须分开处置。
+     * <p>
+     * 线上事故：手动刷新插队被当成"用户取消"，清理逻辑按全部在途 hash 去删远端离线任务，
+     * 把别的订阅正在下载、甚至已经下完的任务连任务记录一起删了，日志还写成"离线下载被用户取消"。
+     *
+     * @param explicitlyCancelled 该 hash 是否被显式点名取消（用户取消 / 清理远端任务）
+     * @param cancelled           本轮是否收到取消信号（含让路）
+     * @param yieldRequested      取消信号是否只是"让路给手动刷新"
+     * @param outcome             本轮离线终态
+     */
+    static CancelAction resolveCancelAction(boolean explicitlyCancelled, boolean cancelled,
+                                            boolean yieldRequested, Outcome outcome) {
+        if (!cancelled && !explicitlyCancelled) {
+            return CancelAction.PROCEED;
+        }
+        if (outcome == Outcome.SUCCESS) {
+            return CancelAction.PROCEED;
+        }
+        if (!explicitlyCancelled && yieldRequested) {
+            return CancelAction.HOLD;
+        }
+        return CancelAction.ABORT;
     }
 
     /**

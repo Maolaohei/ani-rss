@@ -13,4 +13,15 @@ public interface OpenListCancellationSignal {
     OpenListCancellationSignal NONE = () -> false;
 
     boolean isCancellationRequested();
+
+    /**
+     * 本次取消是否只是「让路」——手动刷新要插队，让周期任务尽快退出。
+     * <p>
+     * 让路不是用户取消：在途的离线任务、pending 标记、临时目录都必须原样保留，
+     * 否则一次「添加订阅并立即下载」就会把别的订阅正在下（甚至刚下完）的离线任务删掉。
+     * 默认 false，便于纯单元测试与既有 lambda 实现。
+     */
+    default boolean isYieldRequested() {
+        return false;
+    }
 }

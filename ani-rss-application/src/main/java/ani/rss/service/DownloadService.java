@@ -546,6 +546,10 @@ public class DownloadService implements OpenListDownloadPathResolver, RssDownloa
         if (run.v2 && run.downloadedEpisodes != null) {
             if (item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty()) {
                 run.downloadedEpisodes.addAll(item.getEpisodeRange());
+                // 一个 01-12 的合集条目是一条 item，但会把 12 集一次性记进 downloadedEpisodes，
+                // currentDownloadCount 也随之只 +1。记下"本轮提交过合集"，把完结判定推到下一轮，
+                // 否则"提交即完结"——文件还在落地，订阅就已经被停用了（见 flushRunState）。
+                run.batchSubmitted = true;
             } else {
                 run.downloadedEpisodes.add(plan.episode);
             }
@@ -582,7 +586,12 @@ public class DownloadService implements OpenListDownloadPathResolver, RssDownloa
 
         if (run.autoDisabled) {
             Integer totalEpisodeNumber = ani.getTotalEpisodeNumber();
-            if (totalEpisodeNumber != null && totalEpisodeNumber >= 1
+            if (run.batchSubmitted) {
+                // 合集下载：一个条目就覆盖整季，提交轮往往已经把集数记满，但文件还在落地。
+                // 此刻停用会让订阅错过"产物确认"这一步，成功后没人复检、失败后也没人重试，
+                // 所以完结判定推迟到下一轮（pending 已清、产物已确认）再做。
+                log.info("{} 本轮提交了合集下载，完结判定推迟到下一轮产物确认后", run.title);
+            } else if (totalEpisodeNumber != null && totalEpisodeNumber >= 1
                     && run.currentDownloadCount >= totalEpisodeNumber) {
                 log.info("{} 第 {} 季 共 {} 集 已全部下载完成, 自动停止订阅", run.title, run.season, totalEpisodeNumber);
                 NotificationUtil.send(config, ani, StrFormatter.format("{} 订阅已完结", run.title), NotificationStatusEnum.COMPLETED);
@@ -774,6 +783,8 @@ public class DownloadService implements OpenListDownloadPathResolver, RssDownloa
         private Set<String> pushedHashes;
         private Set<String> localEpisodeIndex;
         private int currentDownloadCount;
+        /** 本轮是否提交过合集条目（合集提交后产物还没落地，完结判定要推迟一轮） */
+        private boolean batchSubmitted;
     }
 
     /**
