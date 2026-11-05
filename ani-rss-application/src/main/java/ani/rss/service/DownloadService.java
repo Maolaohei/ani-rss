@@ -654,20 +654,9 @@ public class DownloadService implements OpenListDownloadPathResolver, RssDownloa
         ItemsUtil.omit(ani, run.items);
         log.debug("{} 共 {} 个", run.title, run.items.size());
 
+        // 未完成的任务数（口径见 TorrentsInfo#finished）
         run.activeDownloadCount = run.torrentsInfos.stream()
-                .filter(it -> {
-                    TorrentsInfo.State state = it.getState();
-                    if (Objects.isNull(state)) {
-                        return true;
-                    }
-                    return !List.of(
-                            TorrentsInfo.State.queuedUP.name(),
-                            TorrentsInfo.State.uploading.name(),
-                            TorrentsInfo.State.stalledUP.name(),
-                            TorrentsInfo.State.pausedUP.name(),
-                            TorrentsInfo.State.stoppedUP.name()
-                    ).contains(state.name());
-                })
+                .filter(it -> !it.finished())
                 .count();
         run.savePath = getDownloadPath(ani);
         run.sync = false;
@@ -1603,10 +1592,9 @@ public class DownloadService implements OpenListDownloadPathResolver, RssDownloa
      * @param torrentsInfo
      */
     public void notification(TorrentsInfo torrentsInfo) {
-        TorrentsInfo.State state = torrentsInfo.getState();
         String name = torrentsInfo.getName();
 
-        if (!isDownloadCompleteState(state)) {
+        if (!torrentsInfo.finished()) {
             return;
         }
         List<String> tags = torrentsInfo.getTags();
@@ -1628,19 +1616,6 @@ public class DownloadService implements OpenListDownloadPathResolver, RssDownloa
         boolean standby = notifyDownloadComplete(ani, name, tags);
         recordDownloadCompletion(ani, torrentsInfo, name, subgroup, standby);
         completeAniQuietly(ani);
-    }
-
-    private static boolean isDownloadCompleteState(TorrentsInfo.State state) {
-        if (Objects.isNull(state)) {
-            return false;
-        }
-        return List.of(
-                TorrentsInfo.State.queuedUP.name(),
-                TorrentsInfo.State.uploading.name(),
-                TorrentsInfo.State.stalledUP.name(),
-                TorrentsInfo.State.pausedUP.name(),
-                TorrentsInfo.State.stoppedUP.name()
-        ).contains(state.name());
     }
 
     private static boolean claimDownloadCompleteTag(TorrentsInfo torrentsInfo, List<String> tags) {

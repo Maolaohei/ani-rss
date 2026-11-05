@@ -676,15 +676,9 @@ public class TorrentUtil {
             ).contains(state.name());
         }
 
-        return List.of(
-                TorrentsInfo.State.queuedUP.name(),
-                TorrentsInfo.State.uploading.name(),
-                TorrentsInfo.State.stalledUP.name(),
-                TorrentsInfo.State.pausedUP.name(),
-                TorrentsInfo.State.stoppedUP.name()
-        ).contains(state.name());
+        // 正常口径：做种/上传族 + 进度已到 100（见 TorrentsInfo#finished）
+        return torrentsInfo.finished();
     }
-
 
     /**
      * 删除已完成任务

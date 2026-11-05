@@ -295,7 +295,9 @@ const addAni = async (fun) => {
     }
   }
 
-  http.addAni(ani.value)
+  // 上面已经做过"同名同季"的用户确认，所以这里带 override=true 直接把旧订阅替换掉；
+  // 不带 override 的话后端会以"订阅标题重复"拒绝，用户确认了个空。
+  http.addAni(ani.value, true)
       .then(res => {
         ElMessage.success(res.message)
         // 新订阅可能被顶栏的搜索词/筛选藏起来，这里清掉搜索条件并刷新，确保用户能看到结果
@@ -303,6 +305,7 @@ const addAni = async (fun) => {
         window.$reLoadList()
         dialogVisible.value = false
       })
+      .catch(e => ElMessage.error(e?.message || '添加订阅失败'))
       .finally(fun)
 }
 

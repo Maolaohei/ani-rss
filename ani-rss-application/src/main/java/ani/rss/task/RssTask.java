@@ -555,23 +555,13 @@ public class RssTask implements BaseTask, OpenListCancellationSignal {
     static final long MIN_QUIESCENT_INTERVAL_MS = 500L;
 
     /**
-     * 「已下载完成、进入做种/上传」的状态集合。
+     * 是否处于"已完成下载"状态。
      * <p>
-     * 这些状态下文件已经落盘，若还缺 {@code RENAME} 标签，说明改名尚未完成——
-     * 正是需要等待的窗口。其余状态（下载中/校验中/暂停下载/出错/元数据）属于"还没下完"。
+     * 口径统一在 {@link TorrentsInfo#finished()}：既看状态族，也看进度是否到 100。
+     * 此处保留一层薄封装只为让调用点的语义更直白。
      */
-    private static final Set<String> SEEDING_STATES = Set.of(
-            TorrentsInfo.State.queuedUP.name(),
-            TorrentsInfo.State.uploading.name(),
-            TorrentsInfo.State.stalledUP.name(),
-            TorrentsInfo.State.pausedUP.name(),
-            TorrentsInfo.State.stoppedUP.name());
-
-    /**
-     * 是否处于"已完成下载"状态。{@code null} 状态按"未完成"处理（保守）。
-     */
-    static boolean isSeedingState(TorrentsInfo.State state) {
-        return state != null && SEEDING_STATES.contains(state.name());
+    static boolean isSeedingState(TorrentsInfo torrentsInfo) {
+        return torrentsInfo != null && torrentsInfo.finished();
     }
 
     /**
@@ -651,7 +641,7 @@ public class RssTask implements BaseTask, OpenListCancellationSignal {
             if (ti == null) {
                 continue;
             }
-            if (!isSeedingState(ti.getState())) {
+            if (!isSeedingState(ti)) {
                 inFlight++;
                 continue;
             }

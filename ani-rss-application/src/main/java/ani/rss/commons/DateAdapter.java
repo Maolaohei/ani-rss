@@ -15,6 +15,7 @@ import com.google.gson.JsonSerializer;
 import java.lang.reflect.Type;
 import java.text.ParsePosition;
 import java.time.LocalDate;
+import java.time.YearMonth;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.TemporalAccessor;
@@ -49,6 +50,9 @@ import java.util.Objects;
  */
 public class DateAdapter implements JsonDeserializer<Date>, JsonSerializer<Date> {
 
+    /** 年月串（{@code 2026-10} / {@code 2026-1}）的判定正则 */
+    private static final String MONTH_REGEX = "^(19|20)\\d{2}-(0?[1-9]|1[0-2])$";
+
     /** 输出格式：与原先的 SimpleDateFormat(NORM_DATE_PATTERN) 一致 */
     private static final DateTimeFormatter OUTPUT_FORMATTER =
             DateTimeFormatter.ofPattern(DatePattern.NORM_DATE_PATTERN);
@@ -59,6 +63,19 @@ public class DateAdapter implements JsonDeserializer<Date>, JsonSerializer<Date>
      */
     private static final DateTimeFormatter INPUT_FORMATTER =
             DateTimeFormatter.ofPattern("yyyy-M-d");
+
+    /**
+     * 只有年月的输入格式（如 {@code 2026-10}）。
+     * <p>
+     * Bangumi 对尚未定档的动画会把 {@code date} 返回成 {@code yyyy-MM}，
+     * 而 {@link #INPUT_FORMATTER} 需要 day-of-month，遇到这种串会解析出年+月却缺日，
+     * {@code LocalDate.from} 直接抛异常 —— 表现为整个订阅解析失败。
+     * <p>
+     * {@link java.time.YearMonth} 恰好要求"年 + 月"两个字段，月份仍允许 1~2 位。
+     * 日期取该月 1 日，与 upstream 修复（{@code DateTime.of(s, "yyyy-MM")}）语义一致。
+     */
+    private static final DateTimeFormatter INPUT_MONTH_FORMATTER =
+            DateTimeFormatter.ofPattern("yyyy-M");
 
     @Override
     public JsonElement serialize(Date src, Type typeOfSrc, JsonSerializationContext context) {
@@ -86,6 +103,18 @@ public class DateAdapter implements JsonDeserializer<Date>, JsonSerializer<Date>
         String regex = "^(19|20)\\d{2}$";
         if (ReUtil.contains(regex, s)) {
             return DateTime.of(s, "yyyy");
+        }
+
+        // yyyy-MM：未定档动画的放送日期，必须先于 yyyy-M-d 分支判断
+        if (ReUtil.contains(MONTH_REGEX, s)) {
+            try {
+                return Date.from(YearMonth.parse(s, INPUT_MONTH_FORMATTER)
+                        .atDay(1)
+                        .atStartOfDay(ZoneId.systemDefault())
+                        .toInstant());
+            } catch (Exception e) {
+                throw new JsonParseException(StrUtil.format("无法解析日期: {}", s), e);
+            }
         }
 
         try {

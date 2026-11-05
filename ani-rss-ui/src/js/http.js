@@ -24,9 +24,11 @@ export let listAni = () => api.post('api/listAni')
 /**
  * 添加订阅
  * @param ani 订阅
+ * @param override 检测到重复订阅时是否覆盖（默认 false，由用户显式确认后才传 true）
  * @returns {Promise<unknown>}
  */
-export let addAni = (ani) => api.post('api/addAni', ani)
+export let addAni = (ani, override = false) =>
+    api.post(`api/addAni?override=${override}`, ani, {silent: true})
 
 /**
  * 修改订阅

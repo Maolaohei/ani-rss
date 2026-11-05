@@ -156,6 +156,7 @@ import {ref} from "vue";
 import {ElMessage, ElText} from "element-plus";
 import {DocumentCopy} from "@element-plus/icons-vue";
 import * as http from "@/js/http.js";
+import {addAniWithDuplicateConfirm} from "@/js/addAni.js";
 import {formatDate, fromNow} from "@/js/format.js";
 import {proxyImage} from "@/js/global.js";
 
@@ -306,7 +307,7 @@ let batchAddition = async () => {
         "subgroup": item[0].name
       }
 
-      ani = (await http.rssToAni(ani)).data
+      // 备用 RSS 随 DTO 一起交给解析接口，由后端按每条 RSS 分别推断剧集偏移
       if (item.length > 1) {
         ani.standbyRssList = item.slice(1)
             .map(o => {
@@ -317,8 +318,10 @@ let batchAddition = async () => {
               }
             })
       }
+      ani = (await http.rssToAni(ani)).data
       batchAdditionNum.value += item.length
-      await http.addAni(ani)
+      // 重复订阅由用户确认后再覆盖；用户取消则中断本批
+      if (!await addAniWithDuplicateConfirm(ani)) return
     }
     ElMessage.success("添加成功")
 

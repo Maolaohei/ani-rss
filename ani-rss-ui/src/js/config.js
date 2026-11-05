@@ -65,7 +65,6 @@ export let configData = {
     "skip5": true,
     "standbyRss": false,
     "coexist": false,
-    "copyMasterToStandby": false,
     // 后端上限 512，默认 128
     "logsMax": 128,
     "debug": false,
@@ -175,7 +174,6 @@ export let configData = {
     "scrape": false,
     "followDay": 14,
     "bangumiIniEnabled": false,
-    "replace": false,
     "sortType": "SCORE",
     "qualityProfile": {
         "enable": false,

@@ -125,10 +125,13 @@ public class AniController extends BaseController {
     @Auth
     @Operation(summary = "添加订阅")
     @PostMapping("/addAni")
-    public Result<Void> addAni(@RequestBody Ani ani) {
+    public Result<Void> addAni(@RequestBody Ani ani,
+                               @RequestParam(value = "override", defaultValue = "false") Boolean override) {
         ani.setTitle(ani.getTitle().trim())
                 .setUrl(ani.getUrl().trim());
         AniUtil.verify(ani);
+
+        boolean overrideDuplicate = Boolean.TRUE.equals(override);
 
         synchronized (SUBSCRIPTION_LOCK) {
             Optional<Ani> first = AniUtil.getAniList().stream()
@@ -136,7 +139,14 @@ public class AniController extends BaseController {
                     .findFirst();
 
             if (first.isPresent()) {
-                throw new IllegalArgumentException("此订阅已存在");
+                // 同 id 即同一个订阅；只有调用方明确要求覆盖时才替换
+                if (!overrideDuplicate) {
+                    throw new IllegalArgumentException("此订阅已存在");
+                }
+                AniUtil.getAniList().remove(first.get());
+                AniLocks.release(first.get());
+                AniUtil.invalidateIdIndex();
+                log.info("覆盖订阅 {} {} {}", ani.getTitle(), ani.getSeason(), ani.getId());
             }
 
             first = AniUtil.getAniList().stream()
@@ -147,15 +157,13 @@ public class AniController extends BaseController {
             Integer season = ani.getSeason();
 
             if (first.isPresent()) {
-                Config config = ConfigUtil.CONFIG;
-                Boolean replace = config.getReplace();
-                if (replace) {
+                if (overrideDuplicate) {
                     AniUtil.getAniList().remove(first.get());
                     // 被替换掉的订阅不再存在，尽力回收它的锁对象（P2-4）
                     AniLocks.release(first.get());
                     // 立刻失效 id 索引，避免"改完列表到 sync() 之间"查到已被替换掉的订阅（P2-14）
                     AniUtil.invalidateIdIndex();
-                    log.info("自动替换 {} 第{}季", title, season);
+                    log.info("覆盖订阅 {} 第{}季", title, season);
                 } else {
                     throw new IllegalArgumentException("订阅标题重复");
                 }

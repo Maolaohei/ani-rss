@@ -1,5 +1,6 @@
 package ani.rss.mcp;
 
+import ani.rss.commons.GsonStatic;
 import ani.rss.controller.AniController;
 import ani.rss.controller.RssJobController;
 import ani.rss.entity.*;
@@ -7,6 +8,7 @@ import ani.rss.entity.dto.AniBTQueryDTO;
 import ani.rss.entity.dto.RssToAniDTO;
 import ani.rss.entity.vo.RssJobStatus;
 import ani.rss.exception.ResultException;
+import ani.rss.mcp.dto.DeleteSubscriptionDTO;
 import ani.rss.mcp.dto.ListSubscriptionDTO;
 import ani.rss.mcp.dto.SearchMikanDTO;
 import ani.rss.mcp.vo.SubscriptionDiagnosisVO;
@@ -31,6 +33,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 @Slf4j
@@ -176,9 +179,39 @@ public class AniMcpTools {
         return animeGardenService.group(bgmId);
     }
 
+    /**
+     * 把 RSS 参数解析成完整订阅对象（#744）。
+     * <p>
+     * 拆成单独一步的理由：{@link RssToAniDTO} 只描述"从哪个 RSS 建订阅"，
+     * 而后续预览/添加需要的是解析后的完整 {@link Ani}。若直接让模型拼 {@code Ani}，
+     * 实体的空字段会被 MCP Schema 当成必填，调用几乎必然失败。
+     * 由服务端解析一次、再由模型带着完整对象走后续工具，是最稳的链路。
+     *
+     * @param dto RSS 订阅参数
+     * @return 已补全番剧信息的订阅
+     */
+    @McpTool(
+            name = "rss_to_subscription",
+            description = "将 RSS 地址解析并转换为完整的 ANI-RSS 订阅对象。请先调用此工具，再将返回的订阅对象传给 preview_subscription_items 或 add_subscription",
+            annotations = @McpTool.McpAnnotations(
+                    title = "RSS 转订阅",
+                    readOnlyHint = true,
+                    destructiveHint = false,
+                    idempotentHint = true,
+                    openWorldHint = true
+            )
+    )
+    public Ani rssToSubscription(@McpToolParam RssToAniDTO dto) {
+        try {
+            return AniUtil.getAni(dto);
+        } catch (Exception e) {
+            throw mcpException("RSS转换失败", e);
+        }
+    }
+
     @McpTool(
             name = "preview_subscription_items",
-            description = "预览某个 RSS 订阅最终会命中的原始剧集条目",
+            description = "预览完整订阅对象最终会命中的原始剧集条目。请先调用 rss_to_subscription",
             annotations = @McpTool.McpAnnotations(
                     title = "预览订阅条目",
                     readOnlyHint = true,
@@ -187,9 +220,12 @@ public class AniMcpTools {
                     openWorldHint = true
             )
     )
-    public SubscriptionItemsPreviewVO previewSubscriptionItems(@McpToolParam RssToAniDTO dto) {
+    public SubscriptionItemsPreviewVO previewSubscriptionItems(
+            @McpToolParam(description = "由 rss_to_subscription 返回的完整订阅对象")
+            Map<String, Object> subscription
+    ) {
         try {
-            Ani ani = AniUtil.getAni(dto);
+            Ani ani = mapToAni(subscription);
             List<Item> items = ItemsUtil.getItems(ani);
             return new SubscriptionItemsPreviewVO(ani, items);
         } catch (Exception e) {
@@ -199,7 +235,7 @@ public class AniMcpTools {
 
     @McpTool(
             name = "add_subscription",
-            description = "添加一个 ANI-RSS 订阅。需要预览命中条目时请先调用 preview_subscription_items",
+            description = "添加一个完整的 ANI-RSS 订阅对象。请先调用 rss_to_subscription，可选调用 preview_subscription_items",
             annotations = @McpTool.McpAnnotations(
                     title = "添加订阅",
                     readOnlyHint = false,
@@ -208,10 +244,14 @@ public class AniMcpTools {
                     openWorldHint = false
             )
     )
-    public Ani addSubscription(@McpToolParam RssToAniDTO dto) {
+    public Ani addSubscription(
+            @McpToolParam(description = "由 rss_to_subscription 返回的完整订阅对象")
+            Map<String, Object> subscription
+    ) {
         try {
-            Ani ani = AniUtil.getAni(dto);
-            aniController.addAni(ani);
+            Ani ani = mapToAni(subscription);
+            // MCP 侧不替用户做"覆盖已有订阅"的决定，冲突时直接报错由调用方确认
+            aniController.addAni(ani, false);
             return ani;
         } catch (Exception e) {
             throw mcpException("创建订阅失败", e);
@@ -223,7 +263,62 @@ public class AniMcpTools {
         return ResultException.exception(action);
     }
 
+    /**
+     * MCP 入参（{@code Map<String, Object>}）转实体。
+     * <p>
+     * 走 Gson 而不是 BeanUtil：字段名与 {@code @SerializedName} 别名、
+     * 日期适配器（{@code DateAdapter}）等语义才能和落盘/接口完全一致。
+     */
+    private Ani mapToAni(Map<String, Object> map) {
+        return GsonStatic.fromJson(GsonStatic.toJson(map), Ani.class);
+    }
+
     // ==================== 写操作（补齐"助手只长了一只手"的缺口） ====================
+
+    @McpTool(
+            name = "edit_subscription",
+            description = "编辑一个 ANI-RSS 订阅。请先调用 list_subscriptions 获取完整订阅对象，保留 id 并修改需要调整的字段后传入",
+            annotations = @McpTool.McpAnnotations(
+                    title = "编辑订阅",
+                    destructiveHint = false,
+                    idempotentHint = true,
+                    openWorldHint = false
+            )
+    )
+    public Ani editSubscription(
+            @McpToolParam(description = "修改后的完整订阅对象，id 必须对应现有订阅")
+            Map<String, Object> subscription
+    ) {
+        try {
+            // 用 Map 接收，避免实体空字段被 MCP Schema 声明为必填
+            Ani ani = mapToAni(subscription);
+            aniController.setAni(ani);
+            log.info("MCP 编辑订阅 {} {}", ani.getId(), ani.getTitle());
+            return ani;
+        } catch (Exception e) {
+            throw mcpException("编辑订阅失败", e);
+        }
+    }
+
+    @McpTool(
+            name = "delete_subscription",
+            description = "删除一个或多个 ANI-RSS 订阅。deleteFiles 为 true 时还会删除下载器任务和本地视频文件",
+            annotations = @McpTool.McpAnnotations(
+                    title = "删除订阅",
+                    openWorldHint = false
+            )
+    )
+    public List<String> deleteSubscription(@McpToolParam DeleteSubscriptionDTO dto) {
+        try {
+            List<String> ids = dto.getIds();
+            boolean deleteFiles = Boolean.TRUE.equals(dto.getDeleteFiles());
+            aniController.deleteAni(ids, deleteFiles);
+            log.info("MCP 删除订阅 {} deleteFiles={}", ids, deleteFiles);
+            return ids;
+        } catch (Exception e) {
+            throw mcpException("删除订阅失败", e);
+        }
+    }
 
     @McpTool(
             name = "set_subscription_enabled",

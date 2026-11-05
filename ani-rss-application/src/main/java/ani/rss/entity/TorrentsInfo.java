@@ -8,6 +8,8 @@ import lombok.experimental.Accessors;
 
 import java.io.Serializable;
 import java.util.List;
+import java.util.Objects;
+import java.util.Set;
 import java.util.function.Supplier;
 
 /**
@@ -178,6 +180,41 @@ public class TorrentsInfo implements Serializable {
             return minutes + "分" + seconds + "秒";
         }
         return seconds + "秒";
+    }
+
+    /**
+     * 「已完成下载，进入做种/上传」的状态集合。
+     * <p>
+     * 这些状态下文件已经落盘；其余状态（下载中/校验中/暂停下载/出错/元数据缺失）
+     * 都属于"还没下完"。
+     */
+    private static final Set<State> SEEDING_STATES = Set.of(
+            State.queuedUP,
+            State.uploading,
+            State.stalledUP,
+            State.pausedUP,
+            State.stoppedUP);
+
+    /**
+     * 是否已完成下载（b0945d81）。
+     * <p>
+     * 必须同时满足两条：
+     * <ol>
+     *   <li>进度已到 100 —— 只卡在 99.x% 却仍报 {@code uploading} 的种子
+     *       （校验中、缺最后一个 piece、磁盘配额不足）不能算完成；</li>
+     *   <li>状态属于做种/上传族。</li>
+     * </ol>
+     * 缺了进度判定会导致提前发完成通知、提前改名、提前打 {@code DOWNLOAD_COMPLETE} 标签。
+     * <p>
+     * 判定口径统一在这里：此前 DownloadService / RssTask / TorrentUtil 各自维护了
+     * 一份相同的状态集合，四处都有这个漏洞。
+     * {@code progress} 为 {@code null}（老下载器未上报）时按"已完成"处理，保持原有行为。
+     */
+    public boolean finished() {
+        if (Objects.nonNull(progress) && progress < 100) {
+            return false;
+        }
+        return Objects.nonNull(state) && SEEDING_STATES.contains(state);
     }
 
     public enum State {

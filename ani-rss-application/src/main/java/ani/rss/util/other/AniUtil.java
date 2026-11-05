@@ -404,12 +404,17 @@ public class AniUtil {
         Boolean enable = dto.getEnable();
         enable = ObjectUtil.defaultIfNull(enable, true);
 
+        // 批量添加时备用 RSS 随 DTO 一起传进来（#7493cc04），
+        // 不再依赖"添加订阅时复制主 RSS 至备用"这个全局开关
+        List<StandbyRss> dtoStandbyRssList = ObjectUtil.defaultIfNull(dto.getStandbyRssList(), new ArrayList<>());
+
         Assert.notBlank(url, "RSS地址 不能为空");
 
         type = StrUtil.blankToDefault(type, "mikan");
 
         Ani ani = AniUtil.createAni();
         ani.setUrl(url);
+        ani.getStandbyRssList().addAll(dtoStandbyRssList);
 
         Map<String, String> paramMap = HttpUtil.decodeParamMap(url, StandardCharsets.UTF_8);
 
@@ -503,43 +508,62 @@ public class AniUtil {
 
         List<StandbyRss> standbyRssList = ani.getStandbyRssList();
 
-        boolean copyMasterToStandby = config.getCopyMasterToStandby();
-        boolean standbyRss = config.getStandbyRss();
-        if (copyMasterToStandby && standbyRss) {
-            StandbyRss copyStandbyRss = new StandbyRss()
-                    .setUrl(url.trim())
-                    .setOffset(0)
-                    .setLabel(ani.getSubgroup());
-            standbyRssList.add(copyStandbyRss);
-        }
-
         log.debug("获取到动漫信息 {}", JSONUtil.formatJsonStr(GsonStatic.toJson(ani)));
         if (ani.getOva()) {
             return ani;
         }
 
-        // 自动推断剧集偏移
+        // 自动推断剧集偏移：主 RSS 与每条备用 RSS 各算各的（#7493cc04）
         if (config.getOffset()) {
-            List<Item> items = ItemsUtil.getItems(ani, url, subgroup);
-            if (items.isEmpty()) {
-                return ani;
-            }
-            Double minEpisode = items.stream()
-                    .map(Item::getEpisode)
-                    .min(Comparator.comparingDouble(i -> i))
-                    .get();
-
-            // x.5 半集必须单独处理：首集为 1.5 时应偏移 -1（首集归零），
-            // 而 -(1.5 - 1) 取整后是 0，会让后续所有集数匹配整体偏一位
-            int offset = ItemsUtil.is5(minEpisode) ? -minEpisode.intValue() : -(minEpisode.intValue() - 1);
+            int offset = autoOffset(ani, url, subgroup);
             log.debug("自动获取到剧集偏移为 {}", offset);
             ani.setOffset(offset);
 
             for (StandbyRss rss : standbyRssList) {
-                rss.setOffset(offset);
+                if (rss == null || StrUtil.isBlank(rss.getUrl())) {
+                    continue;
+                }
+                // 备用 RSS 的字幕组可能与主 RSS 不同，用各自的 label 解析，
+                // 否则会拿主订阅的字幕组去过滤备用 RSS，直接命中 0 条
+                String label = StrUtil.blankToDefault(rss.getLabel(), "");
+                int standbyOffset = autoOffset(ani, rss.getUrl(), label);
+                log.debug("自动获取到备用剧集偏移为 {} ({})", standbyOffset, rss.getUrl());
+                rss.setOffset(standbyOffset);
             }
         }
         return ani;
+    }
+
+    /**
+     * 自动推断某条 RSS 的剧集偏移。
+     * <p>
+     * 每条 RSS 单独解析：主订阅与备用订阅的首集可能不同（备用常缺首集），
+     * 用同一偏移会让备用 RSS 全部错位。
+     *
+     * @param ani       订阅
+     * @param rssUrl    RSS 地址
+     * @param subgroup  字幕组（空字符串表示不过滤）
+     * @return 偏移量；解析失败或无条目时为 0
+     */
+    private static int autoOffset(Ani ani, String rssUrl, String subgroup) {
+        List<Item> items;
+        try {
+            items = ItemsUtil.getItems(ani, rssUrl, subgroup);
+        } catch (Exception e) {
+            log.warn("自动推断剧集偏移失败 {}: {}", rssUrl, e.getMessage());
+            return 0;
+        }
+        if (CollUtil.isEmpty(items)) {
+            return 0;
+        }
+        Double minEpisode = items.stream()
+                .map(Item::getEpisode)
+                .min(Comparator.comparingDouble(i -> i))
+                .get();
+
+        // x.5 半集必须单独处理：首集为 1.5 时应偏移 -1（首集归零），
+        // 而 -(1.5 - 1) 取整后是 0，会让后续所有集数匹配整体偏一位
+        return ItemsUtil.is5(minEpisode) ? -minEpisode.intValue() : -(minEpisode.intValue() - 1);
     }
 
 

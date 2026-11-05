@@ -707,12 +707,6 @@ public class Config implements Serializable {
     private Boolean notificationSystemMigrated;
 
     /**
-     * 添加订阅时自动复制主rss至备用rss
-     */
-    @Schema(description = "添加订阅时复制主RSS至备用")
-    private Boolean copyMasterToStandby;
-
-    /**
      * 排序方式
      */
     @Schema(description = "排序方式")
@@ -735,12 +729,6 @@ public class Config implements Serializable {
 
     @Schema(description = "bangumi.ini")
     private Boolean bangumiIniEnabled;
-
-    /**
-     * 重名的订阅将允许被替换
-     */
-    @Schema(description = "重名订阅允许替换")
-    private Boolean replace;
 
     /**
      * 最大文件名长度 不包含后缀 如: .mkv .mp4
