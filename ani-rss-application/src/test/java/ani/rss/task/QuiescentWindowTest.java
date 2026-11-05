@@ -93,28 +93,45 @@ class QuiescentWindowTest {
 
     // ---------------- 状态分类 ----------------
 
+    /**
+     * 造一条"已下完、进入做种/上传"的种子。
+     * <p>{@code finished()} 是唯一口径：progress 必须到 100，状态还要在 SEEDING_STATES 里。
+     */
+    private static TorrentsInfo seeding(TorrentsInfo.State state) {
+        return new TorrentsInfo()
+                .setProgress(100.0)
+                .setState(state);
+    }
+
     @Test
     void seeding_states_are_recognised() {
         // 「已下载完成、进入做种/上传」——文件已落盘，缺 RENAME 标签即为"待改名"
-        assertTrue(RssTask.isSeedingState(TorrentsInfo.State.queuedUP));
-        assertTrue(RssTask.isSeedingState(TorrentsInfo.State.uploading));
-        assertTrue(RssTask.isSeedingState(TorrentsInfo.State.stalledUP));
-        assertTrue(RssTask.isSeedingState(TorrentsInfo.State.pausedUP));
-        assertTrue(RssTask.isSeedingState(TorrentsInfo.State.stoppedUP));
+        assertTrue(RssTask.isSeedingState(seeding(TorrentsInfo.State.queuedUP)));
+        assertTrue(RssTask.isSeedingState(seeding(TorrentsInfo.State.uploading)));
+        assertTrue(RssTask.isSeedingState(seeding(TorrentsInfo.State.stalledUP)));
+        assertTrue(RssTask.isSeedingState(seeding(TorrentsInfo.State.pausedUP)));
+        assertTrue(RssTask.isSeedingState(seeding(TorrentsInfo.State.stoppedUP)));
     }
 
     @Test
     void in_flight_states_are_not_seeding() {
-        assertFalse(RssTask.isSeedingState(TorrentsInfo.State.downloading));
-        assertFalse(RssTask.isSeedingState(TorrentsInfo.State.stalledDL));
-        assertFalse(RssTask.isSeedingState(TorrentsInfo.State.queuedDL));
-        assertFalse(RssTask.isSeedingState(TorrentsInfo.State.checkingResumeData));
-        assertFalse(RssTask.isSeedingState(TorrentsInfo.State.checkingDisk));
-        assertFalse(RssTask.isSeedingState(TorrentsInfo.State.metaDownload));
-        assertFalse(RssTask.isSeedingState(TorrentsInfo.State.error));
-        assertFalse(RssTask.isSeedingState(TorrentsInfo.State.unknown));
+        assertFalse(RssTask.isSeedingState(seeding(TorrentsInfo.State.downloading)));
+        assertFalse(RssTask.isSeedingState(seeding(TorrentsInfo.State.stalledDL)));
+        assertFalse(RssTask.isSeedingState(seeding(TorrentsInfo.State.queuedDL)));
+        assertFalse(RssTask.isSeedingState(seeding(TorrentsInfo.State.checkingResumeData)));
+        assertFalse(RssTask.isSeedingState(seeding(TorrentsInfo.State.checkingDisk)));
+        assertFalse(RssTask.isSeedingState(seeding(TorrentsInfo.State.metaDownload)));
+        assertFalse(RssTask.isSeedingState(seeding(TorrentsInfo.State.error)));
+        assertFalse(RssTask.isSeedingState(seeding(TorrentsInfo.State.unknown)));
         // null 状态按"未完成"处理（保守：宁可等）
         assertFalse(RssTask.isSeedingState(null));
+        // progress 没到 100 时，即便状态已经是 uploading 也不算完成
+        assertFalse(RssTask.isSeedingState(new TorrentsInfo()
+                .setProgress(99.9)
+                .setState(TorrentsInfo.State.uploading)));
+        // 老下载器不报 progress（null）时沿用状态判定
+        assertTrue(RssTask.isSeedingState(new TorrentsInfo()
+                .setState(TorrentsInfo.State.uploading)));
     }
 
     // ---------------- 配置解析 ----------------
