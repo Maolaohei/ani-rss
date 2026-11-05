@@ -22,6 +22,48 @@
 
 ---
 
+## 3.4.39 增量（2026-11）
+
+本版是一次「选择性跟进上游」的清理，五处都是能复现的实际问题，外加一处顺手修掉的 fork 自身 bug。
+
+### Bangumi 只返回年月时，整个订阅解析失败
+
+上游 `b79122c3`。Bangumi 的作品日期可能是 `2026-10`（只有年月），`DateAdapter` 只认 `yyyy` 与 `yyyy-M-d`，于是抛 `无法解析日期` —— 订阅列表接口与 `ani.v2.json` 落盘都走这条路径，一个日期就能让整份列表读不出来。
+
+- 补 `yyyy-MM` 分支（`YearMonth.parse` + `yyyy-M` formatter），与文件既有 `java.time` 风格一致（未用上游的 `DateTime.of`，避免引入非线程安全路径）。
+
+### 「下载完成」有三套口径，`activeDownloadCount` 漏了 `pausedUP`
+
+上游 `b0945d81`。`DownloadService.notification` / `RssTask.isSeedingState` / `TorrentUtil.isDelete` 各自维护一份"已完成状态集合"，`pausedUP` 在 `activeDownloadCount` 里没算完成——已下完的种子仍被统计成"还在下载"，任务管理器的在途数量长期偏高。
+
+- 收口成唯一口径 `TorrentsInfo.finished()`：`progress < 100` 一律未完成；否则看状态是否在 `SEEDING_STATES`（`queuedUP/uploading/stalledUP/pausedUP/stoppedUP`）。四处调用点统一委托。
+
+### 重复订阅改由用户当场决定，废弃全局「自动替换」开关
+
+上游 `90006164`。旧行为是全局 `config.replace`：开启就**静默覆盖**同名订阅（匹配规则、排除列表、下载进度一起丢），关闭就直接报错。用户在添加时看不到"这将覆盖已有订阅"。
+
+- `addAni` 增加 `override` 参数；命中同 id / 同标题同季时默认报 `此订阅已存在` / `订阅标题重复`；
+- 前端新增 `js/addAni.js`：先不带 `override` 请求，命中重复才弹「是否覆盖原订阅」，确认后带 `override=true` 重试（Mikan / AniBT / AnimeGarden 批量添加与首页添加全部接入）；
+- 删除 `Config.replace` 字段、默认值与前端的「自动替换」开关（老 `config.json` 里的 `replace` 会被 Gson 忽略，无需迁移）。
+
+> 顺手修的 fork bug：`view/home/AddView.vue` 本来就有"同名同季"确认弹窗，但确认后仍不带 `override`，会被后端以"订阅标题重复"拒绝——用户确认了个空。
+
+### MCP：补上编辑/删除，添加入参不再要求实体全字段
+
+上游 `1e074fa6` + `2b660711`。此前 MCP 只有"预览/添加/启用/刷新/诊断"，改一条订阅或删一条订阅得回网页操作；而 `addSubscription` 直接吃 `RssToAniDTO` 实体，空字段在 MCP schema 里被当成必填，模型很难调通。
+
+- 新增 `rss_to_subscription`（只解析不落库）、`edit_subscription`、`delete_subscription`；
+- `previewSubscriptionItems` / `addSubscription` 入参改为 `Map<String, Object>`，内部经 Gson 转实体（保留 `@SerializedName` 别名与 `DateAdapter`）。
+
+### 批量添加时，每条备用 RSS 的剧集偏移各算各的
+
+上游 `7493cc04`。老逻辑给所有备用 RSS 传同一个 offset（就是主 RSS 的偏移）。备用 RSS 常常缺首集或起集不同，于是备用源整季错位，命中 0 条后表现为"备用 RSS 配了但从来不下载"。
+
+- 删除 `config.copyMasterToStandby`（前端开关、后端字段与默认值全清），备用 RSS 改由 `RssToAniDTO` 携带；
+- 新增 `AniUtil.autoOffset(ani, rssUrl, subgroup)`：主 RSS 用订阅字幕组、每条备用 RSS 用**自己的 label** 解析，逐条推断偏移；解析失败或无条目退化为 0，不再影响主 RSS 的偏移计算。
+
+---
+
 ## 3.4.38 增量（2026-11）
 
 ### 合集下载：一处记账口径引发的一串误判
