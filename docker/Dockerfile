@@ -1,4 +1,8 @@
 # 统一使用 Temurin 21 LTS（兼容 Java 17 构建目标；UseCompactObjectHeaders 由 IgnoreUnrecognizedVMOptions 兜底忽略）
+#
+# 体积更小的 jlink 版镜像见 docker/Dockerfile-jlink（配合 docker/build-image.sh 使用）：
+# 不装整包 JRE，只带 jlink 裁出的 52 MB 运行时，并裁掉非目标平台的原生库，约 120 MB。
+# 本文件保持原样作为回退路径。
 
 # ---- 安全：从信任库中移除 eMudhra（emSign）根证书 ----
 # 背景：2026-10 披露的 eMudhra 中介 CA 私钥外泄事件（CVE-2026-91403）。Temurin 21.0.12

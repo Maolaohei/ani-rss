@@ -80,30 +80,17 @@
             平台包按需引入：缺失的平台（如 32 位 arm、musl）在运行时会抛
             UnsatisfiedLinkError，由 MagnetTorrentUtil 统一转成用户可读的提示，
             不影响其余功能（种子文件走原有 Base64 链路）。
+
+            平台包的**引入方式见本文件末尾的 <profiles>**（4 个平台包共 17.1 MB，每个镜像只用得上 1 个）：
+              · 不传 -Dnative.platform（默认）= 全部 4 个平台 → 通用 jar，GitHub Release 三端共用；
+              · -Dnative.platform=<plat>       = 只引目标平台     → 单架构 jar，Docker 镜像用（小约 13 MB）；
+              · -Dnative.platform=none        = 不引任何平台包   → 无 jlibtorrent 原生库的平台（musl），
+                                                                   磁力功能降级为可读提示。
+            发布链路（package.sh / build.yml）不带参数，行为与改动前完全一致。
         -->
         <dependency>
             <groupId>com.frostwire</groupId>
             <artifactId>jlibtorrent</artifactId>
-            <version>${jlibtorrent.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>com.frostwire</groupId>
-            <artifactId>jlibtorrent-windows</artifactId>
-            <version>${jlibtorrent.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>com.frostwire</groupId>
-            <artifactId>jlibtorrent-linux-x86_64</artifactId>
-            <version>${jlibtorrent.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>com.frostwire</groupId>
-            <artifactId>jlibtorrent-linux-arm64</artifactId>
-            <version>${jlibtorrent.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>com.frostwire</groupId>
-            <artifactId>jlibtorrent-macosx-arm64</artifactId>
             <version>${jlibtorrent.version}</version>
         </dependency>
         <dependency>
@@ -399,6 +386,121 @@
                     </plugin>
                 </plugins>
             </build>
+        </profile>
+        <!--
+          ──────────────────────────────────────────────────────────────────────────
+          原生库裁剪（A 方案）：jlibtorrent 平台包 17.1 MB，单架构镜像只用得上 1 个。
+
+          激活方式：-Dnative.platform=<值>。不给值 = native-all-platforms（通用 jar，
+          发布链路用的就是这个，行为与改动前一致）。校验用：
+            mvn -q -pl ani-rss-application dependency:list -DincludeGroupIds=com.frostwire
+          ──────────────────────────────────────────────────────────────────────────
+        -->
+        <profile>
+            <id>native-all-platforms</id>
+            <activation>
+                <property>
+                    <name>!native.platform</name>
+                </property>
+            </activation>
+            <dependencies>
+                <dependency>
+                    <groupId>com.frostwire</groupId>
+                    <artifactId>jlibtorrent-windows</artifactId>
+                    <version>${jlibtorrent.version}</version>
+                </dependency>
+                <dependency>
+                    <groupId>com.frostwire</groupId>
+                    <artifactId>jlibtorrent-linux-x86_64</artifactId>
+                    <version>${jlibtorrent.version}</version>
+                </dependency>
+                <dependency>
+                    <groupId>com.frostwire</groupId>
+                    <artifactId>jlibtorrent-linux-arm64</artifactId>
+                    <version>${jlibtorrent.version}</version>
+                </dependency>
+                <dependency>
+                    <groupId>com.frostwire</groupId>
+                    <artifactId>jlibtorrent-macosx-arm64</artifactId>
+                    <version>${jlibtorrent.version}</version>
+                </dependency>
+            </dependencies>
+        </profile>
+        <profile>
+            <id>native-windows</id>
+            <activation>
+                <property>
+                    <name>native.platform</name>
+                    <value>windows</value>
+                </property>
+            </activation>
+            <dependencies>
+                <dependency>
+                    <groupId>com.frostwire</groupId>
+                    <artifactId>jlibtorrent-windows</artifactId>
+                    <version>${jlibtorrent.version}</version>
+                </dependency>
+            </dependencies>
+        </profile>
+        <profile>
+            <id>native-linux-x86_64</id>
+            <activation>
+                <property>
+                    <name>native.platform</name>
+                    <value>linux-x86_64</value>
+                </property>
+            </activation>
+            <dependencies>
+                <dependency>
+                    <groupId>com.frostwire</groupId>
+                    <artifactId>jlibtorrent-linux-x86_64</artifactId>
+                    <version>${jlibtorrent.version}</version>
+                </dependency>
+            </dependencies>
+        </profile>
+        <profile>
+            <id>native-linux-arm64</id>
+            <activation>
+                <property>
+                    <name>native.platform</name>
+                    <value>linux-arm64</value>
+                </property>
+            </activation>
+            <dependencies>
+                <dependency>
+                    <groupId>com.frostwire</groupId>
+                    <artifactId>jlibtorrent-linux-arm64</artifactId>
+                    <version>${jlibtorrent.version}</version>
+                </dependency>
+            </dependencies>
+        </profile>
+        <profile>
+            <id>native-macosx-arm64</id>
+            <activation>
+                <property>
+                    <name>native.platform</name>
+                    <value>macosx-arm64</value>
+                </property>
+            </activation>
+            <dependencies>
+                <dependency>
+                    <groupId>com.frostwire</groupId>
+                    <artifactId>jlibtorrent-macosx-arm64</artifactId>
+                    <version>${jlibtorrent.version}</version>
+                </dependency>
+            </dependencies>
+        </profile>
+        <profile>
+            <!-- 有意留空：musl / 32 位 arm 等平台没有可用的 jlibtorrent 原生库，
+                 磁力功能由 MagnetTorrentUtil 降级为可读提示（与改动前 musl 镜像的实际行为一致）。 -->
+            <id>native-none</id>
+            <activation>
+                <property>
+                    <name>native.platform</name>
+                    <value>none</value>
+                </property>
+            </activation>
+            <dependencies/>
         </profile>
     </profiles>
 

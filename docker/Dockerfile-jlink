@@ -1,0 +1,107 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# jlink 版镜像（B 方案）：不装整包 JRE，只带 jlink 裁出来的运行时。
+#
+# 实测对比（JDK 21，见 docs/jvm-optimization-plan.md）：
+#   整包 temurin-21-jre-alpine  ≈ 135 MB → jlink 21 模块 ≈ 52 MB，启动 6.50s → 4.03s
+#   注意 java.desktop 不能删：Spring 的 bean 内省依赖 java.beans，
+#   去掉后启动直接 NoClassDefFoundError: java/beans/PropertyEditorSupport（实测）。
+#
+# 两种 libc 变体（原生库必须与 libc 匹配，别混）：
+#   · musl（默认）：BUILDER=eclipse-temurin:21-jdk-alpine  RUNTIME=alpine:3.21
+#       体积最小；sqlite 用 Linux-Musl 原生库（xerial 有提供）；
+#       jlibtorrent 没有 musl 构建 → 磁力功能降级为可读提示（与改造前的 alpine 镜像行为一致）。
+#   · glibc：BUILDER=eclipse-temurin:21-jdk  RUNTIME=debian:bookworm-slim
+#       大 ~55 MB，但**磁力可用**（jlibtorrent 只有 glibc 构建），这是改造前 alpine 镜像没有的能力。
+#
+# 构建入口用 docker/build-image.sh，它负责先产出单架构精简 jar（A 方案）再调这里。
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ---- 安全：从信任库中移除 eMudhra（emSign）根证书 ----
+# 背景：2026-10 披露的 eMudhra 中介 CA 私钥外泄事件（CVE-2026-91403）。Temurin 21.0.12
+# 及更早版本的 cacerts 仍信任 emSign Root CA G1/G2 与 ECC Root CA G3，任何持有泄漏私钥者
+# 均可签发被本镜像接受的服务端证书，从而中间人劫持 115 / mikan / bgm.tv 等出站 HTTPS。
+# 必须在 jlink **之前**做：jlink 会把 cacerts 一起复制进裁剪出来的运行时。
+# 上游 JDK（21.0.13 / 17.0.21 / 25.0.5）正式发布并移除该 CA 后，可删除本阶段与下方的校验。
+ARG BUILDER_IMAGE=eclipse-temurin:21-jdk-alpine
+FROM ${BUILDER_IMAGE} AS jdk
+
+RUN set -eux; \
+    keytool -J-Duser.language=en -list -v -cacerts -storepass changeit \
+      | sed -n 's/^Alias name: //p' | grep -i emsign > /tmp/emsign || true; \
+    while IFS= read -r a; do \
+      keytool -J-Duser.language=en -delete -cacerts -storepass changeit -alias "$a"; \
+    done < /tmp/emsign; \
+    if keytool -J-Duser.language=en -list -cacerts -storepass changeit | grep -qi emsign; then \
+      echo "emSign roots still present in cacerts" >&2; exit 1; \
+    fi; \
+    echo "emSign roots removed from cacerts"
+
+# ---- jlink：裁出只含本项目所需模块的运行时 ----
+# 模块清单来自 jdeps（对 3.4.39 的 fat jar 跑出来的闭包），再加 jdk.localedata 以支持
+# --include-locales=zh,en。改动依赖后请重新跑一次 jdeps，否则可能缺模块到运行期才炸：
+#   jdeps --multi-release 21 --ignore-missing-deps --print-module-deps \
+#     --class-path 'ani-rss-application/target/ani-rss.jar' \
+#     ani-rss-application/target/ani-rss.jar
+#
+# 模块清单写成 shell 变量而不是 ENV：Dockerfile 的 ENV 跨行续行会把续行的缩进带进值里，
+# --add-modules 对空格不容错；shell 的 "\<换行>" 是确定的"直接拼接"。
+RUN set -eux; \
+    MODULES="java.base,java.compiler,java.desktop,java.instrument,java.logging,\
+java.management,java.naming,java.net.http,java.prefs,java.scripting,java.security.jgss,\
+java.security.sasl,java.sql,java.xml,jdk.charsets,jdk.crypto.ec,jdk.localedata,\
+jdk.management,jdk.naming.dns,jdk.unsupported,jdk.zipfs"; \
+    jlink \
+      --add-modules "$MODULES" \
+      --include-locales=zh,en \
+      --strip-debug \
+      --no-header-files \
+      --no-man-pages \
+      --compress=zip-6 \
+      --output /opt/jre; \
+    /opt/jre/bin/java -version; \
+    test -f /opt/jre/lib/security/cacerts; \
+    if keytool -J-Duser.language=en -list -cacerts -storepass changeit \
+         -keystore /opt/jre/lib/security/cacerts | grep -qi emsign; then \
+      echo "裁剪后的运行时里仍有 emSign 根证书" >&2; exit 1; \
+    fi; \
+    du -sh /opt/jre
+
+# ---- 运行时镜像 ----
+ARG RUNTIME_IMAGE=alpine:3.21
+FROM ${RUNTIME_IMAGE}
+
+# run.sh 用 pgrep / wget / wait；exec.sh 用 su-exec。
+# debian 变体没有 su-exec，用 gosu 顶替（gosu 同样接受 uid:gid 形式）。
+RUN set -eux; \
+    if command -v apk >/dev/null 2>&1; then \
+      apk add --no-cache su-exec tzdata procps; \
+    else \
+      apt-get update; \
+      apt-get install -y --no-install-recommends gosu tzdata procps wget ca-certificates; \
+      ln -sf /usr/sbin/gosu /usr/local/bin/su-exec; \
+      rm -rf /var/lib/apt/lists/*; \
+    fi
+
+COPY --from=jdk /opt/jre /opt/jre
+
+COPY docker/run.sh /run.sh
+COPY docker/exec.sh /exec.sh
+# 这两个产物由 docker/build-image.sh 生成（单架构精简 jar + 抽出来的 sqlite 原生库）。
+# 不要直接拿发布用的通用 ani-rss.jar 来 build 这个 Dockerfile：那会把 4 个平台的
+# jlibtorrent 和 20 个平台的 sqlite 原生库全塞进镜像，白占 ~24 MB。
+COPY ani-rss-application/target/ani-rss-slim.jar /usr/app/ani-rss.jar
+COPY ani-rss-application/target/native/ /usr/app/native/
+
+WORKDIR /usr/app
+VOLUME /config
+ENV PUID=0 PGID=0 UMASK=022
+ENV JAVA_HOME=/opt/jre \
+    JAVA_BIN=/opt/jre/bin/java \
+    PATH=/opt/jre/bin:$PATH \
+    JAVA_PROFILE=default \
+    SQLITE_LIB_PATH=/usr/app/native \
+    SQLITE_LIB_NAME=libsqlitejdbc.so
+ENV SERVER_PORT=7789 CONFIG=/config TZ=Asia/Shanghai SWAGGER_ENABLED=false MCP_ENABLED=false SERVER_ADDRESS=0.0.0.0
+EXPOSE $SERVER_PORT
+RUN sed -i 's/\r//g' /*.sh && chmod +x /*.sh
+CMD ["/exec.sh"]

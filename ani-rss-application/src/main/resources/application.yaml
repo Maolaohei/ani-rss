@@ -24,7 +24,9 @@ server:
   address: ${SERVER_ADDRESS:127.0.0.1}
   tomcat:
     threads:
-      max: 100
+      # lowmem 档（JAVA_PROFILE=lowmem）由 docker/run.sh 设成 40：小内存机器上
+      # 100 条工作线程的栈预留没必要，限量后反而更容易判断过载。默认值保持 100 不变。
+      max: ${TOMCAT_MAX_THREADS:100}
       min-spare: 5
 
 springdoc:
