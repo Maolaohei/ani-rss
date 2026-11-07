@@ -3,6 +3,8 @@
   <CollectionPreviewView ref="collectionPreviewRef" v-model:data="data"/>
   <el-dialog v-model="dialogVisible"
              center
+             width="900px"
+             :close-on-click-modal="false"
              title="添加合集">
     <div v-loading="loading" style="height: 500px;">
       <el-scrollbar style="padding: 0 12px;">
@@ -189,7 +191,7 @@
                                        placeholder="季" size="small" style="width:70px;"/>
                       <el-input-number v-if="!seg.ova" v-model="seg.offset" :controls="false"
                                        placeholder="偏移" size="small" style="width:80px;"/>
-                      <el-text size="small" type="info">{{ seg.fileCount }} 个文件</el-text>
+                      <el-text size="small" type="info">{{ seg.videoCount }} 集 / {{ seg.fileCount }} 文件</el-text>
                     </div>
                     <el-input v-model="seg.downloadPath" placeholder="下载位置（留空则按模版自动计算）" size="small"/>
                     <el-text v-if="seg.sample" class="segment-sample" size="small" type="info">{{ seg.sample }}</el-text>
@@ -211,7 +213,7 @@
       <el-button :disabled="!data.torrent" bg
                  icon="Grid"
                  text
-                 @click="collectionPreviewRef?.show">
+                 @click="openPreview">
         预览
       </el-button>
       <el-button :disabled="!data.torrent"
@@ -279,6 +281,21 @@ let downloadPath = () => {
 
 let collectionPreviewRef = ref()
 
+let isVideo = (name) => /\.(mkv|mp4|ts|m2ts|avi|rmvb|flv|wmv|mov)$/i.test(name || '')
+
+/**
+ * 打开预览弹窗。
+ * 组件还没挂载 / 引用丢失时给一句明确提示，而不是点了没反应。
+ */
+let openPreview = () => {
+  let preview = collectionPreviewRef.value
+  if (!preview) {
+    ElMessage.error('预览组件未就绪，请关闭后重新打开合集弹窗')
+    return
+  }
+  preview.show()
+}
+
 let startLoading = ref(false);
 
 let bgmRef = ref()
@@ -344,7 +361,9 @@ let analyze = () => {
           ova: seg.ova,
           downloadPath: seg.downloadPath,
           fileCount: (seg.items || []).length,
-          sample: (seg.items || [])[0]?.reName || '',
+          // 样例取第一个视频：种子里第一条常是 .mka / .ass，拿它当样例会让人以为整段识别错了
+          videoCount: (seg.items || []).filter(it => isVideo(it.reName)).length,
+          sample: (seg.items || []).find(it => isVideo(it.reName))?.reName || '',
         }))
         data.value.mode = res.data?.mode || 'SINGLE'
         data.value.segments = segments

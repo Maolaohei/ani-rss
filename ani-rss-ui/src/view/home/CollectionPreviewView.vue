@@ -1,5 +1,7 @@
 <template>
   <el-dialog v-model="dialogVisible"
+             append-to-body
+             :z-index="4000"
              center
              class="el-dialog-auto-width"
              title="合集预览">

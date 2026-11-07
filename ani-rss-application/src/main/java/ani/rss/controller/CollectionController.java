@@ -206,6 +206,11 @@ public class CollectionController extends BaseController {
         ani.setMatch(scopeMatch(base.getMatch(), segment.getScope()));
         ani.setExclude(base.getExclude() == null ? new ArrayList<>() : new ArrayList<>(base.getExclude()));
 
+        // 分段各自继承「自定义下载位置」会让所有段落进同一个目录（剧场版进番剧库、
+        // S2 也进 Season 1），这里必须放开，让每段按自己的标题 / 季 / 剧场版标记重新算目录。
+        // 用户在分段卡片里改过的目录会写回 segment.downloadPath，优先级仍高于模板。
+        ani.setCustomDownloadPath(false);
+
         ani.setTitle(StrUtil.blankToDefault(segment.getTitle(), base.getTitle()));
         ani.setSeason(segment.getSeason() == null ? base.getSeason() : segment.getSeason());
         // 未显式指定偏移时沿用基础设置，避免单段/自定义偏移被静默清零
