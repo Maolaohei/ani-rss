@@ -64,12 +64,13 @@
               </el-form-item>
               <el-form-item label="季">
                 <div class="form-item-flex">
-                  <el-input-number v-model:model-value="data.ani.season" :min="0" class="width-150"/>
+                  <el-input-number v-model:model-value="data.ani.season" :disabled="splitMode" :min="0" class="width-150"/>
+                  <el-text v-if="splitMode" size="small" type="info" style="margin-left:8px;">拆分模式下由各部分组成</el-text>
                 </div>
               </el-form-item>
               <el-form-item label="集数偏移">
                 <div class="form-item-flex">
-                  <el-input-number v-model:model-value="data.ani.offset"/>
+                  <el-input-number v-model:model-value="data.ani.offset" :disabled="splitMode"/>
                 </div>
               </el-form-item>
               <el-form-item label="日期">
@@ -90,7 +91,7 @@
                 <el-switch v-model:model-value="data.ani['globalExclude']"/>
               </el-form-item>
               <el-form-item label="剧场版">
-                <el-switch v-model:model-value="data.ani.ova"/>
+                <el-switch v-model:model-value="data.ani.ova" :disabled="splitMode"/>
               </el-form-item>
               <el-form-item label="自定义集数规则">
                 <div class="flex full-width">
@@ -159,13 +160,45 @@
                               :autosize="{ minRows: 2, maxRows: 4 }"
                               clearable
                               placeholder="magnet:?xt=urn:btih:..."
-                              type="textarea"/>
+                              type="textarea"
+                              @blur="analyze"/>
                     <div class="margin-top-4">
                       <el-text size="small" type="info">
                         点「预览 / 开始」时才解析元数据（获取文件列表才能匹配、改名），
                         热门资源几秒完成，冷门资源最长等待 60 秒；解析结果会缓存在本地。
                       </el-text>
                     </div>
+                  </div>
+                </div>
+              </el-form-item>
+              <el-form-item v-if="splitMode" label="合集拆分">
+                <div class="full-width">
+                  <el-alert :closable="false" show-icon style="margin-bottom:8px;" type="success">
+                    <template #title>
+                      检测到 {{ data.segments.length }} 个部分：{{ segmentSummary }}。
+                      每部分会生成独立订阅，按各自的季 / 偏移 / 目录落盘。
+                    </template>
+                  </el-alert>
+                  <el-alert v-for="(w, wi) in data.warnings" :key="'warn' + wi"
+                            :closable="false" :title="w" show-icon style="margin-bottom:6px;" type="warning"/>
+                  <div v-for="(seg, si) in data.segments" :key="seg.id || si" class="segment-row">
+                    <div class="segment-head">
+                      <el-tag :type="seg.ova ? 'warning' : 'primary'" size="small">{{ segmentKind(seg) }}</el-tag>
+                      <el-input v-model="seg.title" :placeholder="data.ani.title" size="small" style="max-width:240px;"/>
+                      <el-input-number v-if="!seg.ova" v-model="seg.season" :controls="false" :min="0"
+                                       placeholder="季" size="small" style="width:70px;"/>
+                      <el-input-number v-if="!seg.ova" v-model="seg.offset" :controls="false"
+                                       placeholder="偏移" size="small" style="width:80px;"/>
+                      <el-text size="small" type="info">{{ seg.fileCount }} 个文件</el-text>
+                    </div>
+                    <el-input v-model="seg.downloadPath" placeholder="下载位置（留空则按模版自动计算）" size="small"/>
+                    <el-text v-if="seg.sample" class="segment-sample" size="small" type="info">{{ seg.sample }}</el-text>
+                  </div>
+                  <div class="segment-actions">
+                    <el-button :loading="analyzing" bg icon="Refresh" size="small" text type="primary" @click="analyze">
+                      重新分析
+                    </el-button>
+                    <el-text size="small" type="info">改完标题 / 季 / 偏移 / 目录后点「预览」查看重命名结果</el-text>
                   </div>
                 </div>
               </el-form-item>
@@ -194,7 +227,7 @@
 </template>
 
 <script setup>
-import {ref} from "vue";
+import {computed, ref} from "vue";
 import {ElMessage, ElMessageBox} from "element-plus";
 
 const emit = defineEmits(['added'])
@@ -283,6 +316,62 @@ let uploadCallback = (res, file) => {
           ElMessage.success(`字幕组已更新为 ${res.data}`)
         }
       })
+  // 结构分析：多季 / 剧场版混合的种子会返回多个分段，由用户逐段确认
+  analyze()
+}
+
+/**
+ * 合集结构分析。只上传结构字段，分段自带的 items 不回传（体积大且用不上）。
+ */
+let analyze = () => {
+  if (!data.value.torrent) {
+    data.value.mode = ''
+    data.value.segments = []
+    data.value.warnings = []
+    return
+  }
+  analyzing.value = true
+  http.analyzeCollection({torrent: data.value.torrent, ani: data.value.ani})
+      .then(res => {
+        let segments = (res.data?.segments || []).map(seg => ({
+          id: seg.id,
+          name: seg.name,
+          kind: seg.kind,
+          season: seg.season,
+          offset: seg.offset,
+          title: seg.title,
+          scope: seg.scope,
+          ova: seg.ova,
+          downloadPath: seg.downloadPath,
+          fileCount: (seg.items || []).length,
+          sample: (seg.items || [])[0]?.reName || '',
+        }))
+        data.value.mode = res.data?.mode || 'SINGLE'
+        data.value.segments = segments
+        data.value.warnings = res.data?.warnings || []
+        if (segments.length > 1) {
+          ElMessage.success(`检测到 ${segments.length} 个部分，请确认季 / 偏移 / 目录`)
+        }
+      })
+      .catch(() => {
+        data.value.mode = ''
+        data.value.segments = []
+        data.value.warnings = []
+      })
+      .finally(() => analyzing.value = false)
+}
+
+let analyzing = ref(false)
+
+let splitMode = computed(() => data.value.mode === 'SPLIT' && data.value.segments.length > 0)
+
+let segmentSummary = computed(() => (data.value.segments || []).map(segmentKind).join(' + '))
+
+let segmentKind = (seg) => {
+  if (seg.ova) {
+    return seg.name || '剧场版'
+  }
+  return `第${seg.season ?? 0}季`
 }
 
 let data = ref({
@@ -290,6 +379,10 @@ let data = ref({
   torrent: '',
   ani: aniData,
   show: false,
+  // 合集结构分析结果：mode=SPLIT 时按 segments 分别设置并分别建订阅
+  mode: '',
+  segments: [],
+  warnings: [],
 })
 
 // 合集来源：种子文件（base64）或磁力链接，后端按 torrent 内容自动识别
@@ -298,6 +391,9 @@ let torrentSource = ref('file')
 let clearTorrent = () => {
   data.value.filename = ''
   data.value.torrent = ''
+  data.value.mode = ''
+  data.value.segments = []
+  data.value.warnings = []
 }
 
 // 切换来源时清空已选内容，避免把上一种来源的数据带过去提交
@@ -312,6 +408,9 @@ let show = () => {
   data.value.ani.title = ''
   data.value.torrent = ''
   data.value.filename = ''
+  data.value.mode = ''
+  data.value.segments = []
+  data.value.warnings = []
   torrentSource.value = 'file'
   dialogVisible.value = true
 }
@@ -385,5 +484,33 @@ defineExpose({show})
   display: flex;
   justify-content: space-between;
   margin-top: 10px;
+}
+
+.segment-row {
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+
+.segment-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.segment-sample {
+  display: block;
+  margin-top: 4px;
+  word-break: break-all;
+}
+
+.segment-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 </style>

@@ -390,6 +390,11 @@ public class OpenList implements BaseDownload, OfflineDownloader, OpenListRuntim
         }
 
         @Override
+        public void mkdir(String path) {
+            OpenList.this.mkdir(path);
+        }
+
+        @Override
         public TempDirDeleteResult cleanupTempDownloadDir(String savePath, String tempDirName) {
             return OpenList.this.cleanupTempDownloadDir(savePath, tempDirName, true);
         }

@@ -22,6 +22,28 @@
 
 ---
 
+## 3.4.40 增量（2026-11）
+
+### 合集：一个种子里的多季 + 剧场版，现在能拆成多条订阅
+
+旧实现里「合集」只认一个 `Ani`：一个季、一个 offset、一个模板、一个下载目录。于是 `[VCB-Studio] Jujutsu Kaisen`（S1 1–24）+ `... S2`（目录名标 S2，文件却是绝对集 25–47）+ `Gekijouban Jujutsu Kaisen 0`（剧场版）这种混合种子只能按同一季平铺重命名：S2 被写成 `S02E25`，剧场版要么被当成第 1 集撞名、要么整段被丢；115 侧只有一次离线目录与一次集数校验，缺任何一段就整包判「存疑」。
+
+- 新增 `CollectionSegment` / `CollectionAnalyzer`：按种子目录聚簇，从目录名与文件名识别 `S2 / Season 2 / 第2季 / II`、`劇場版 / Movie / 剧场版`、`OVA / SP / NCOP`，给出「建议分段 + 每段文件数 + 集数序列 + 判定理由」；识别只是建议，最终由用户确认；
+- `CollectionInfo` 增加 `mode / segments / warnings`，每段内部复用完整 `Ani`（季、offset、标题、模板、下载路径、ova/mediaType 全部独立），剧场版因此自然走 `${title} (${year})` 与剧场版目录，不再和 TV 抢集号；
+- 新增 `POST api/analyzeCollection`；`previewCollection` 支持带 `segments` 重新预览（逐文件回 `segmentId / targetDir`），单段请求与旧版行为一致；
+- 执行侧：qB 仍一次提交一个种子，但按分段算相对子路径做 `renameFile`（同一保存根下仍保留做种），目标不在公共根时明确告警而不是静默落回根目录；OpenList 仍一次离线提交，归位阶段按 `targetDir` 分组 `mkdir` + `fs/move`，逐段独立校验集数，某段缺集只让该段失败；
+- 前端合集页新增分段卡片（类型 / 季 / 偏移 / 标题 / TMDB / 路径 / 模板 / 集数序列）、整目录改归属、按目录自动分配、删段、改类型、未归属文件清单，以及开始前的同名/同集号冲突拦截。
+
+### 三个「配置本身合法、批量场景被放大」的坑改成代码兜底
+
+这几项在 `config.json` 里都不算错，是合集规模把影响放大，与其让用户逐项改配置，不如在代码里兜住：
+
+- `maxFileNameLength: 0`（不限字符数）时，中文标题一字 3 字节，超 255 字节在 115/Alist 上直接创建失败 → 新增 `RenameUtil.capUtf8Bytes` 按 UTF-8 字节兜底（保留扩展名，不改变"0 = 不按字符数截断"的语义）；
+- `ovaRenameTemplate` 里多打的空格会原样进文件名（`" xxx.mkv"`）→ 重命名结果统一 `trim`；
+- `openListApiPerSecond: 1` 下，几百个 `fs/move` 会被令牌桶拖成分钟级 → 归位窗口内临时提速到 `max(3, 配置值)`，`finally` 恢复，不写回用户配置、不影响常驻轮询。
+
+---
+
 ## 3.4.39 增量（2026-11）
 
 本版是一次「选择性跟进上游」的清理，五处都是能复现的实际问题，外加一处顺手修掉的 fork 自身 bug。

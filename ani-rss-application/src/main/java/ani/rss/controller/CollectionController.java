@@ -13,11 +13,13 @@ import ani.rss.util.basic.HttpReq;
 import ani.rss.util.other.TorrentMetadata;
 import ani.rss.util.other.AniUtil;
 import ani.rss.util.other.ConfigUtil;
+import ani.rss.util.other.CollectionAnalyzer;
 import ani.rss.util.other.ItemsUtil;
 import ani.rss.util.other.MagnetTorrentUtil;
 import ani.rss.util.other.RenameUtil;
 import ani.rss.util.other.TorrentPlanUtil;
 import ani.rss.util.other.TorrentUtil;
+import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.core.codec.Base64;
 import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.io.FileUtil;
@@ -47,6 +49,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -92,27 +95,23 @@ public class CollectionController extends BaseController {
             Ani ani = collectionInfo.getAni();
             // 尽早校验: 标题会进下载路径、季数会被拆箱, 有问题要在动手下载之前就拒掉
             AniUtil.verifyCollectionAni(ani);
-            String title = ani.getTitle();
-            String subgroup = ani.getSubgroup();
-            String downloadPath = ani.getDownloadPath();
 
-            String name = StrFormatter.format("[{}] {} 第{}季", subgroup, title, ani.getSeason());
+            // 拆分模式: 每段一份独立计划/独立落盘目录/独立订阅; 单段模式与旧行为完全一致
+            List<SegmentPlan> plans = buildSegmentPlans(collectionInfo, torrentFile);
+            Assert.notEmpty(plans, "预览结果为空, 请检查匹配/排除规则");
 
             Config config = ConfigUtil.CONFIG;
             String downloadTool = config.getDownloadToolType();
 
-            // 预览计划: 一次解析, qB 与 OpenList 共用
-            // NOTE: preview 内部会再次解码/解析同一种子（双解析），未复用此处 torrentFile：
-            // preview 是多入口共用的 static synchronized 方法，复用需改签名，改动面大；
-            // 合集为低频人工操作，双解析成本可接受，此处至少保证 tempFile 在 finally 清理。
-            List<Item> plan = preview(collectionInfo);
-            Assert.notEmpty(plan, "预览结果为空, 请检查匹配/排除规则");
-
-            // OpenList/Alist: 走离线下载全链路(提交/等待/重命名/归位/清理/通知), 与订阅体验一致
+            // OpenList/Alist: 整份种子只提交一次离线任务（按段重复提交 = 重复下载同一份种子），
+            // 归位阶段再按每条的 targetDir 分目录落盘
             if ("OpenList".equalsIgnoreCase(downloadTool) || "Alist".equalsIgnoreCase(downloadTool)) {
-                Result<Void> result = startCollectionByOpenList(ani, plan, tempFile, torrentFile.getName());
+                List<Item> plan = plans.stream().flatMap(p -> p.items().stream()).toList();
+                String savePath = commonRoot(plans.stream().map(SegmentPlan::downloadPath).toList());
+                Result<Void> result = startCollectionByOpenList(
+                        plans.get(0).ani(), plan, tempFile, torrentFile.getName(), savePath);
                 // 合集关联的番剧也写入订阅列表(仅入列、不轮询、去重), 使其在「订阅」里可见可管理
-                AniUtil.addCollectionAni(ani);
+                plans.forEach(p -> AniUtil.addCollectionAni(p.ani()));
                 return result;
             }
 
@@ -121,25 +120,240 @@ public class CollectionController extends BaseController {
                         "合集下载暂时只支持 qBittorrent / OpenList, 当前: {}", downloadTool));
             }
 
-            download(name, tempFile, downloadPath, List.of("ANI-RSS合集下载", subgroup));
-
-            TorrentsInfo torrentsInfo = new TorrentsInfo()
-                    .setHash(torrentFile.getHash());
-
-            // 合集关联的番剧也写入订阅列表(仅入列、不轮询、去重), 使其在「订阅」里可见可管理。
-            // 放在提交后立即执行：后处理已异步化，若等它跑完再入列，用户要 ~32.5s 后才看得到订阅
-            AniUtil.addCollectionAni(ani);
-
-            // 等待元数据 + 逐文件重命名放后台：最坏 ~32.5s，不能占用 Tomcat 请求线程（P1-8）
-            COLLECTION_POST_POOL.execute(() -> finishQbCollection(torrentsInfo, plan, config));
-
-            return Result.success("已经开始下载合集, 正在后台等待元数据并重命名, 进度可在日志中查看");
+            return startCollectionByQb(ani, plans, tempFile, torrentFile, config);
         } finally {
             // 磁力链接指向的是解析缓存，删了下次还得重新抓一次元数据
             if (!magnet) {
                 FileUtil.del(tempFile);
             }
         }
+    }
+
+    /**
+     * 一个分段的执行计划：独立 Ani（标题/季/偏移/模板）+ 独立落盘目录 + 该段命中的文件。
+     *
+     * @param segment      分段描述；单段模式为 null
+     * @param ani          该段实际使用的订阅信息（模板/季/偏移已按分段覆盖）
+     * @param items        该段的预览计划（reName 已按段重命名）
+     * @param downloadPath 该段最终落盘目录（绝对路径 / 网盘路径）
+     */
+    public record SegmentPlan(CollectionSegment segment, Ani ani, List<Item> items, String downloadPath) {
+    }
+
+    /**
+     * 按合集方案构建执行计划。
+     * <p>
+     * 单段（{@code mode != SPLIT}）：与旧实现完全一致，一份种子一个计划一个目录。
+     * 多段：每段复制一份基础 Ani，按分段覆盖季/偏移/标题/剧场版标记，并把该段目录
+     * 作为额外匹配条件（match 是 AND 语义，见 {@link TorrentPlanUtil#build}），
+     * 因此同一份种子解析一次即可得到多段互不重叠的计划。
+     */
+    public List<SegmentPlan> buildSegmentPlans(CollectionInfo collectionInfo, TorrentMetadata torrentFile) {
+        return buildSegmentPlans(collectionInfo, torrentFile, true);
+    }
+
+    /**
+     * @param verify 是否校验分段后的订阅信息（执行时必须校验，预览时放宽以便边改边看）
+     */
+    public List<SegmentPlan> buildSegmentPlans(CollectionInfo collectionInfo, TorrentMetadata torrentFile,
+                                               boolean verify) {
+        Ani base = collectionInfo.getAni();
+        List<CollectionSegment> segments = collectionInfo.getSegments();
+        boolean split = "SPLIT".equalsIgnoreCase(collectionInfo.getMode())
+                || (StrUtil.isBlank(collectionInfo.getMode()) && CollUtil.isNotEmpty(segments));
+        if (!split || CollUtil.isEmpty(segments)) {
+            List<Item> items = TorrentPlanUtil.build(torrentFile, base);
+            String path = downloadService.getDownloadPath(base);
+            for (Item item : items) {
+                item.setTargetDir(path);
+            }
+            return List.of(new SegmentPlan(null, base, items, path));
+        }
+
+        List<SegmentPlan> plans = new ArrayList<>();
+        for (CollectionSegment segment : segments) {
+            Ani ani = segmentAni(base, segment);
+            if (verify) {
+                AniUtil.verifyCollectionAni(ani);
+            }
+            List<Item> items = TorrentPlanUtil.build(torrentFile, ani);
+            if (items.isEmpty()) {
+                log.warn("合集分段「{}」未匹配到文件，已跳过", segment.getName());
+                continue;
+            }
+            String path = StrUtil.isNotBlank(segment.getDownloadPath())
+                    ? segment.getDownloadPath()
+                    : downloadService.getDownloadPath(ani);
+            for (Item item : items) {
+                item.setSegmentId(segment.getId());
+                item.setTargetDir(path);
+            }
+            plans.add(new SegmentPlan(segment, ani, items, path));
+        }
+        return plans;
+    }
+
+    /**
+     * 由基础 Ani + 分段描述派生该段实际使用的 Ani。
+     * <p>
+     * 只覆盖会影响「匹配 / 命名 / 落盘」的字段：标题、季、集数偏移、剧场版标记、目录约束。
+     * 其它字段（字幕组、模板、评分、洗版策略）沿用弹窗里的基础设置。
+     */
+    public static Ani segmentAni(Ani base, CollectionSegment segment) {
+        Ani ani = new Ani();
+        BeanUtil.copyProperties(base, ani);
+        // 列表字段会被下游原地改写，这里必须重建
+        ani.setMatch(scopeMatch(base.getMatch(), segment.getScope()));
+        ani.setExclude(base.getExclude() == null ? new ArrayList<>() : new ArrayList<>(base.getExclude()));
+
+        ani.setTitle(StrUtil.blankToDefault(segment.getTitle(), base.getTitle()));
+        ani.setSeason(segment.getSeason() == null ? base.getSeason() : segment.getSeason());
+        // 未显式指定偏移时沿用基础设置，避免单段/自定义偏移被静默清零
+        ani.setOffset(segment.getOffset() == null ? base.getOffset() : segment.getOffset());
+
+        boolean movie = Boolean.TRUE.equals(segment.getOva())
+                || "MOVIE".equalsIgnoreCase(segment.getKind());
+        ani.setOva(movie);
+        if (movie) {
+            ani.setMediaType("movie");
+        } else if ("OVA".equalsIgnoreCase(segment.getKind())) {
+            // OVA 段按 OVA 归类，但命名仍走 TV 模板（ova=true 在历史数据里等同于剧场版）
+            ani.setMediaType("ova");
+        } else {
+            ani.setMediaType("tv");
+        }
+        return ani;
+    }
+
+    /**
+     * 把分段命中的种子目录拼进匹配规则（AND 语义，不会放宽原有规则）。
+     *
+     * @param match 基础匹配规则
+     * @param scope 该段的种子内根目录，多行分隔；空表示整份种子
+     */
+    static List<String> scopeMatch(List<String> match, String scope) {
+        List<String> list = match == null ? new ArrayList<>() : new ArrayList<>(match);
+        if (StrUtil.isBlank(scope)) {
+            return list;
+        }
+        String pattern = Arrays.stream(scope.split("\n"))
+                .map(String::trim)
+                .filter(StrUtil::isNotBlank)
+                .map(s -> Pattern.quote(s.replace("\\", "/")) + "/")
+                .collect(Collectors.joining("|", "^(?:", ")"));
+        list.add(pattern);
+        return list;
+    }
+
+    /**
+     * qBittorrent 合集提交：一份种子只提交一次，重命名时按分段目录写相对子路径。
+     * <p>
+     * qB 的 {@code renameFile} 的 newPath 是相对 savepath 的路径，因此把「该段目录相对
+     * 公共祖先的路径」拼在文件名前面，就能让同一种子的文件分别落到 S1 / S2 / 剧场版目录。
+     * 单段时相对路径为空，行为与旧实现一致。
+     */
+    private Result<Void> startCollectionByQb(Ani ani, List<SegmentPlan> plans, File tempFile,
+                                             TorrentMetadata torrentFile, Config config) {
+        String root = commonRoot(plans.stream().map(SegmentPlan::downloadPath).toList());
+        Assert.notBlank(root, "无法确定合集下载目录, 请为每个部分设置下载位置");
+
+        for (SegmentPlan plan : plans) {
+            String rel = relativize(root, plan.downloadPath());
+            if (StrUtil.isBlank(rel) && !trimSlash(plan.downloadPath().replace("\\", "/"))
+                    .equalsIgnoreCase(trimSlash(root.replace("\\", "/")))) {
+                // 目标不在公共保存根之下（例如跨盘/跨挂载点）：qB 的 renameFile 只能写
+                // 相对 savepath 的路径，这里无法安全表达，明确告警而不是静默落回根目录。
+                log.warn("分段目录不在合集保存根下, 该段文件将落在打包目录顶层 {} -> {}",
+                        plan.downloadPath(), root);
+            }
+            for (Item item : plan.items()) {
+                item.setTargetDir(plan.downloadPath());
+                if (StrUtil.isNotBlank(rel)) {
+                    item.setReName(rel + "/" + item.getReName());
+                }
+            }
+        }
+
+        String name = StrFormatter.format("[{}] {} 合集", StrUtil.nullToEmpty(ani.getSubgroup()), ani.getTitle());
+        download(name, tempFile, root, List.of("ANI-RSS合集下载", StrUtil.nullToEmpty(ani.getSubgroup())));
+
+        TorrentsInfo torrentsInfo = new TorrentsInfo()
+                .setHash(torrentFile.getHash());
+
+        // 合集关联的番剧也写入订阅列表(仅入列、不轮询、去重), 使其在「订阅」里可见可管理。
+        // 放在提交后立即执行：后处理已异步化，若等它跑完再入列，用户要 ~32.5s 后才看得到订阅
+        plans.forEach(p -> AniUtil.addCollectionAni(p.ani()));
+
+        // 等待元数据 + 逐文件重命名放后台：最坏 ~32.5s，不能占用 Tomcat 请求线程（P1-8）
+        List<Item> all = plans.stream().flatMap(p -> p.items().stream()).toList();
+        COLLECTION_POST_POOL.execute(() -> finishQbCollection(torrentsInfo, all, config));
+
+        if (plans.size() > 1) {
+            return Result.success(StrFormatter.format(
+                    "已经开始下载合集: 共 {} 个部分, 将分别落盘到各自目录, 进度可在日志中查看", plans.size()));
+        }
+        return Result.success("已经开始下载合集, 正在后台等待元数据并重命名, 进度可在日志中查看");
+    }
+
+    /**
+     * 多个目标目录的公共祖先（按路径段比较）。
+     * <p>
+     * 用于 qB 只允许一个 savepath 的场景：先落到公共祖先，再靠 {@code renameFile} 的相对
+     * 子路径分发到各段目录。仅保留盘符/根时说明各段不在同一媒体库，此时仍以公共祖先提交，
+     * 由 {@link #relativize} 生成完整相对路径。
+     */
+    static String commonRoot(List<String> paths) {
+        List<String> valid = paths.stream().filter(StrUtil::isNotBlank).toList();
+        if (valid.isEmpty()) {
+            return "";
+        }
+        // 绝对路径必须保留前导 '/'，否则 /115/动画 会退化成相对路径 115/动画，
+        // qB/OpenList 会把它当成 savepath 下的子目录，文件直接落错位置
+        boolean absolute = valid.get(0).replace("\\", "/").startsWith("/");
+        String[] base = splitPath(valid.get(0));
+        int depth = base.length;
+        for (String p : valid) {
+            String[] cur = splitPath(p);
+            int i = 0;
+            while (i < depth && i < cur.length && base[i].equalsIgnoreCase(cur[i])) {
+                i++;
+            }
+            depth = i;
+        }
+        if (depth <= 0) {
+            return base[0] + "/";
+        }
+        String joined = String.join("/", Arrays.copyOf(base, depth));
+        return absolute ? "/" + joined : joined;
+    }
+
+    /**
+     * 目标目录相对公共祖先的子路径；不在公共祖先下时返回空串（调用方回退为扁平重命名）。
+     */
+    static String relativize(String root, String path) {
+        if (StrUtil.isBlank(root) || StrUtil.isBlank(path)) {
+            return "";
+        }
+        String r = trimSlash(root.replace("\\", "/"));
+        String p = trimSlash(path.replace("\\", "/"));
+        if (p.equalsIgnoreCase(r)) {
+            return "";
+        }
+        if (!p.toLowerCase(Locale.ROOT).startsWith(r.toLowerCase(Locale.ROOT) + "/")) {
+            return "";
+        }
+        return p.substring(r.length() + 1);
+    }
+
+    private static String trimSlash(String s) {
+        return s.replaceAll("/+$", "");
+    }
+
+    private static String[] splitPath(String path) {
+        String normalized = path.replace("\\", "/").replaceAll("/+$", "");
+        return Arrays.stream(normalized.split("/"))
+                .filter(StrUtil::isNotBlank)
+                .toArray(String[]::new);
     }
 
     /**
@@ -261,16 +475,64 @@ public class CollectionController extends BaseController {
      * 完成后按预览计划自动重命名并归位到下载目录顶层, 未匹配文件随临时目录清理。
      * 提交即受理, 等待在后台进行, 进度可在任务管理器中查看。
      */
-    private Result<Void> startCollectionByOpenList(Ani ani, List<Item> plan, File torrentFile, String torrentName) {
+    private Result<Void> startCollectionByOpenList(Ani ani, List<Item> plan, File torrentFile,
+                                                   String torrentName, String savePath) {
         Assert.isTrue(TorrentUtil.login(), "下载器登录失败");
         if (!(TorrentUtil.DOWNLOAD instanceof OpenList openList)) {
             throw ResultException.exception("当前离线下载器不支持合集下载");
         }
-        // 下载位置与订阅口径一致(尊重自定义下载位置/模板), OpenList 为网盘虚拟路径
-        String savePath = downloadService.getDownloadPath(ani);
-        Boolean ok = openList.downloadCollection(ani, plan, savePath, torrentFile, torrentName);
+        // 下载位置与订阅口径一致(尊重自定义下载位置/模板), OpenList 为网盘虚拟路径；
+        // 多段时使用各段目录的公共祖先，归位阶段再按 item.targetDir 分发
+        String path = StrUtil.isNotBlank(savePath) ? savePath : downloadService.getDownloadPath(ani);
+        Boolean ok = openList.downloadCollection(ani, plan, path, torrentFile, torrentName);
         Assert.isTrue(Boolean.TRUE.equals(ok), "合集离线下载提交失败, 请查看日志");
         return Result.success("合集已提交离线下载, 完成后将自动重命名并归位, 进度可在任务管理器中查看");
+    }
+
+    @Auth
+    @Operation(summary = "合集结构分析")
+    @PostMapping("/analyzeCollection")
+    public Result<CollectionInfo> analyzeCollection(@RequestBody CollectionInfo collectionInfo) {
+        String torrent = collectionInfo.getTorrent();
+        Assert.notBlank(torrent, "种子内容为空, 请重新上传种子文件或填入磁力链接");
+        boolean magnet = MagnetTorrentUtil.isMagnet(torrent);
+        File tempFile = getTorrentFile(torrent);
+        try {
+            TorrentMetadata torrentFile;
+            try {
+                torrentFile = TorrentMetadata.from(tempFile);
+            } catch (Exception e) {
+                throw ResultException.exception("种子文件解析失败, 请确认是有效的 .torrent 文件或磁力链接");
+            }
+            Ani base = collectionInfo.getAni();
+            CollectionAnalyzer.Analysis analysis = CollectionAnalyzer.analyze(torrentFile, base);
+            List<CollectionSegment> segments = new ArrayList<>(analysis.segments());
+            for (CollectionSegment segment : segments) {
+                // 把「该段落盘到哪」提前算出来给用户看，用户也可以直接改
+                segment.setDownloadPath(downloadService.getDownloadPath(segmentAni(base, segment)));
+            }
+            // 顺带把每段命中的条目算出来：弹窗里能直接看到条目数/集数，不必再请求一次预览
+            CollectionInfo planInfo = new CollectionInfo();
+            planInfo.setAni(base);
+            planInfo.setMode("SPLIT");
+            planInfo.setSegments(segments);
+            for (SegmentPlan plan : buildSegmentPlans(planInfo, torrentFile, false)) {
+                if (plan.segment() != null) {
+                    plan.segment().setItems(plan.items());
+                }
+            }
+            CollectionInfo result = new CollectionInfo();
+            result.setTorrent(torrent);
+            result.setAni(base);
+            result.setSegments(segments);
+            result.setWarnings(analysis.warnings());
+            result.setMode(CollectionAnalyzer.isMixed(segments) ? "SPLIT" : "SINGLE");
+            return Result.success(result);
+        } finally {
+            if (!magnet) {
+                FileUtil.del(tempFile);
+            }
+        }
     }
 
     @Auth
@@ -302,7 +564,7 @@ public class CollectionController extends BaseController {
     }
 
 
-    public static synchronized List<Item> preview(CollectionInfo collectionInfo) {
+    public synchronized List<Item> preview(CollectionInfo collectionInfo) {
         String torrent = collectionInfo.getTorrent();
         Assert.notBlank(torrent, "种子内容为空, 请重新上传种子文件或填入磁力链接");
         boolean magnet = MagnetTorrentUtil.isMagnet(torrent);
@@ -314,8 +576,11 @@ public class CollectionController extends BaseController {
             } catch (Exception e) {
                 throw ResultException.exception("种子文件解析失败, 请确认是有效的 .torrent 文件或磁力链接");
             }
-            // 计划构建与订阅离线下载共用同一口径（TorrentPlanUtil）
-            return TorrentPlanUtil.build(torrentFile, collectionInfo.getAni());
+            // 计划构建与订阅离线下载共用同一口径（TorrentPlanUtil）；拆分模式按段展开后合并
+            return buildSegmentPlans(collectionInfo, torrentFile, false)
+                    .stream()
+                    .flatMap(plan -> plan.items().stream())
+                    .toList();
         } finally {
             // 解析已在内存（TorrentMetadata），临时文件不再需要，必须清理防 /tmp 堆积；
             // 磁力链接的缓存文件例外（下次还要复用，删了要重新抓元数据）

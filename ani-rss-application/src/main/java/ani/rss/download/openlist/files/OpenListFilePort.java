@@ -60,6 +60,14 @@ public interface OpenListFilePort {
     void fsMove(String srcDir, String dstDir, List<String> names);
 
     /**
+     * 递归创建目录（父目录不存在时一并创建）；目录已存在视为成功。
+     * <p>
+     * 合集拆分归位前必须先建目标目录：Alist/115 的 {@code fs/move} 不会自动创建
+     * 不存在的 {@code dst_dir}，直接移动会失败或被静默丢进根目录。
+     */
+    void mkdir(String path);
+
+    /**
      * 整树删除临时目录，返回<b>回读确认后</b>的结果。
      * <p>
      * 返回 {@code FAILED_RETRYABLE} 不意味着下载失败——只说明这次没删成（限流/990009 未落地），

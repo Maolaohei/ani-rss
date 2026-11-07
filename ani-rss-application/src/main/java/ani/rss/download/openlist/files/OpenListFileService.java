@@ -3,6 +3,7 @@ package ani.rss.download.openlist.files;
 import ani.rss.commons.FileUtils;
 import ani.rss.commons.ExceptionUtils;
 import ani.rss.download.BaseDownload;
+import ani.rss.download.OpenListApi;
 import ani.rss.download.OfflineDownloader.RelocateResult;
 import ani.rss.download.openlist.policy.OpenListPolicy;
 import ani.rss.download.openlist.residual.TempDirDeleteResult;
@@ -10,6 +11,7 @@ import ani.rss.entity.Ani;
 import ani.rss.entity.Item;
 import ani.rss.entity.OpenListFileInfo;
 import ani.rss.entity.TorrentPlanRecord;
+import ani.rss.util.other.ConfigUtil;
 import ani.rss.util.other.OfflinePlanStore;
 import ani.rss.util.other.TempDirCleanupStore;
 import ani.rss.util.other.TorrentPlanMatcher;
@@ -474,6 +476,103 @@ public final class OpenListFileService {
     }
 
     /**
+     * 合集拆分归位结果：{@code ok=false} 表示还有文件没落到目标目录（下轮重做即可，不是下载失败）。
+     */
+    public record SegmentRelocateResult(boolean ok, int moved, List<String> failures) {
+        static final SegmentRelocateResult EMPTY = new SegmentRelocateResult(true, 0, List.of());
+    }
+
+    /**
+     * 合集拆分：把已归位到公共目录顶层的文件，按 {@link Item#getTargetDir()} 分发到各段目录。
+     * <p>
+     * 一份混合种子（S1 + S2 + 剧场版）只提交一次离线任务，落点只能是同一个临时目录；
+     * 拆分发生在归位阶段：这里按目标目录分组移动，实现「一份种子、多个库目录」。
+     * <ul>
+     *   <li>先 {@code fs/mkdir} 递归建目录——Alist/115 的 {@code fs/move} 不会自动创建 dst_dir；</li>
+     *   <li>目标已存在同名文件视为已归位，不重复移动、不覆盖（可安全重跑）；</li>
+     *   <li>移动后按目标目录逐个回读校验，缺名即返回失败，交给下一轮重做。</li>
+     * </ul>
+     *
+     * @param plan     合集计划（分段模式下每条的 targetDir 指向该段最终目录）
+     * @param savePath 公共落点目录（离线任务归位后的顶层目录）
+     */
+    public SegmentRelocateResult relocateSegmentTargets(List<Item> plan, String savePath) {
+        if (plan == null || plan.isEmpty() || StrUtil.isBlank(savePath)) {
+            return SegmentRelocateResult.EMPTY;
+        }
+        String saveNorm = OpenListPolicy.trimTrailingSlash(savePath);
+        Map<String, List<String>> byTarget = new LinkedHashMap<>();
+        for (Item planned : plan) {
+            String target = OpenListPolicy.trimTrailingSlash(planned.getTargetDir());
+            if (StrUtil.isBlank(target) || Objects.equals(target, saveNorm)) {
+                continue;
+            }
+            if (StrUtil.isBlank(planned.getReName())) {
+                continue;
+            }
+            byTarget.computeIfAbsent(target, k -> new ArrayList<>()).add(planned.getReName());
+        }
+        if (byTarget.isEmpty()) {
+            return SegmentRelocateResult.EMPTY;
+        }
+
+        List<String> failures = new ArrayList<>();
+        int moved = 0;
+        // 归位是短时批量动作：常驻速率 1 次/秒时，几百个 move 会被限流拖到分钟级。
+        // 这里只在归位窗口内提速（不会写回用户配置），结束后立刻恢复。
+        int perSecond = Math.max(3, OpenListApi.effectiveApiPerSecond(ConfigUtil.CONFIG));
+        int burst = Math.max(3, ConfigUtil.CONFIG == null || ConfigUtil.CONFIG.getOpenListApiBurst() == null
+                ? 3 : ConfigUtil.CONFIG.getOpenListApiBurst());
+        OpenListApi.beginBurstWindow(perSecond, burst);
+        try {
+            for (Map.Entry<String, List<String>> entry : byTarget.entrySet()) {
+                String target = entry.getKey();
+                List<String> names = entry.getValue().stream().distinct().toList();
+                String failure = relocateOneTarget(target, names, saveNorm);
+                if (failure == null) {
+                    moved += names.size();
+                } else {
+                    failures.add(failure);
+                }
+            }
+        } finally {
+            OpenListApi.endBurstWindow();
+        }
+        return new SegmentRelocateResult(failures.isEmpty(), moved, List.copyOf(failures));
+    }
+
+    /**
+     * 把一个分段的文件从临时目录移到它自己的最终目录。
+     *
+     * @return null 表示本目标全部到位；否则返回可读的失败原因
+     */
+    private String relocateOneTarget(String target, List<String> names, String saveNorm) {
+        try {
+            // Alist/115 的 fs/move 不会自动创建目标目录，必须先 mkdir
+            host.mkdir(target);
+            Set<String> existing = host.listDirectChildrenStrict(target).stream()
+                    .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
+                    .map(OpenListFileInfo::getName)
+                    .collect(Collectors.toSet());
+            List<String> todo = names.stream().filter(n -> !existing.contains(n)).toList();
+            if (!todo.isEmpty()) {
+                host.fsMove(saveNorm, target, todo);
+            }
+            List<String> missing = verifyTopLevelNames(target, new HashSet<>(names));
+            host.invalidateListCache(target, saveNorm);
+            if (missing.isEmpty()) {
+                log.info("分段归位完成: {} 个文件 -> {}", names.size(), target);
+                return null;
+            }
+            log.warn("分段归位未完成: {} 仍缺 {} 项 {}", target, missing.size(), missing);
+            return target + " 缺 " + missing.size() + " 项";
+        } catch (Exception e) {
+            log.warn("分段归位失败 {}: {}", target, ExceptionUtils.getMessage(e));
+            return target;
+        }
+    }
+
+    /**
      * 后处理：对一次扫描命中的本集文件执行重命名 → 移动 → 顶层校验（失败重试）→ 清理临时/云下载
      * 空壳 → 合集缺集校验 → 完成通知。等待循环与 10008 死锁快速路径共用。
      */
@@ -521,31 +620,59 @@ public final class OpenListFileService {
             return new FinalizeResult(false, planMissingVideos, null);
         }
 
-        // 缺集校验：只看最终目录顶层——刚刚被 verifyTopLevelNames 确认过的那一层。
-        // 本段只产出日志，读失败时宁可跳过，也不要报一个假的"全部缺失"。
+        // 合集拆分：先按 plan 里的 targetDir 把文件从公共目录分发到各段目录；
+        // 失败属于「这次没搬成」，与 relocateResolved 同样按存疑处理，下轮幂等重做
+        SegmentRelocateResult segmentRelocate = relocateSegmentTargets(ctx.plan(), savePath);
+        if (!segmentRelocate.ok()) {
+            log.warn("分段归位未完成（存疑：保留 pending / 计划快照，下轮重做） {} 详情={}",
+                    reName, segmentRelocate.failures());
+            host.recordRelocateUncertain();
+            return new FinalizeResult(false, planMissingVideos, null);
+        }
+
+        // 缺集校验：按最终目录分组校验——拆分合集每个分段都有自己的目录与集数集合。
+        // 只看最终目录顶层（刚被 verifyTopLevelNames 确认过的那一层）；读失败时宁可跳过，
+        // 也不要报一个假的「全部缺失」。
+        Map<String, List<Double>> episodesByDir = new LinkedHashMap<>();
         if (item.getEpisodeRange() != null && !item.getEpisodeRange().isEmpty()) {
+            episodesByDir.put(OpenListPolicy.trimTrailingSlash(savePath), item.getEpisodeRange());
+        }
+        if (ctx.plan() != null) {
+            for (Item planned : ctx.plan()) {
+                if (planned.getEpisodeRange() == null || planned.getEpisodeRange().isEmpty()) {
+                    continue;
+                }
+                String dir = StrUtil.isNotBlank(planned.getTargetDir())
+                        ? OpenListPolicy.trimTrailingSlash(planned.getTargetDir())
+                        : OpenListPolicy.trimTrailingSlash(savePath);
+                episodesByDir.put(dir, planned.getEpisodeRange());
+            }
+        }
+        for (Map.Entry<String, List<Double>> entry : episodesByDir.entrySet()) {
+            String checkDir = entry.getKey();
             List<OpenListFileInfo> topLevel = null;
             try {
-                topLevel = host.listDirectChildrenStrict(savePath);
+                topLevel = host.listDirectChildrenStrict(checkDir);
             } catch (Exception e) {
                 log.warn("缺集校验列举失败，跳过本次校验（不影响已确认的成功判定） {}: {}",
-                        reName, ExceptionUtils.getMessage(e));
+                        checkDir, ExceptionUtils.getMessage(e));
             }
-            if (topLevel != null) {
-                List<OpenListFileInfo> actualVideos = topLevel.stream()
-                        // 115 会按文件名建同名目录（可能带 .mkv），必须排除目录
-                        .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
-                        .filter(f -> FileUtils.isVideoFormat(f.getName()))
-                        .toList();
-                OpenListFilePort.EpisodeValidation validation =
-                        host.validateCollectionEpisodes(item.getEpisodeRange(), actualVideos);
-                if (validation.missing().isEmpty()) {
-                    log.info("合集集数校验通过: {} 本次期望 {}, 已命中 {}",
-                            reName, validation.expected(), validation.matched());
-                } else {
-                    log.warn("合集缺集: {} 本次期望 {}, 已命中 {}, 缺失 {}",
-                            reName, validation.expected(), validation.matched(), validation.missing());
-                }
+            if (topLevel == null) {
+                continue;
+            }
+            List<OpenListFileInfo> actualVideos = topLevel.stream()
+                    // 115 会按文件名建同名目录（可能带 .mkv），必须排除目录
+                    .filter(f -> !Boolean.TRUE.equals(f.getIsDir()))
+                    .filter(f -> FileUtils.isVideoFormat(f.getName()))
+                    .toList();
+            OpenListFilePort.EpisodeValidation validation =
+                    host.validateCollectionEpisodes(entry.getValue(), actualVideos);
+            if (validation.missing().isEmpty()) {
+                log.info("合集集数校验通过: {} 目录={} 本次期望 {}, 已命中 {}",
+                        reName, checkDir, validation.expected(), validation.matched());
+            } else {
+                log.warn("合集缺集: {} 目录={} 本次期望 {}, 已命中 {}, 缺失 {}",
+                        reName, checkDir, validation.expected(), validation.matched(), validation.missing());
             }
         }
 

@@ -162,6 +162,24 @@ public class Item implements Serializable {
     private Integer rssOffset;
 
     /**
+     * 合集拆分：条目归属的分段 id（见 {@link CollectionSegment#getId()}）。
+     * <p>
+     * 为空表示「不拆分」的老口径（整份种子落同一个目录）。非空时归位阶段会按
+     * {@link #targetDir} 分目录落盘，一个种子可以同时产出多季/剧场版多套文件。
+     */
+    @Schema(description = "合集分段 id")
+    private String segmentId;
+
+    /**
+     * 合集拆分：本条目的最终落盘目录（本地绝对路径 / 网盘绝对路径）。
+     * <p>
+     * 为空时回退合集统一下载位置（旧口径）。分段模式下每个分段各自一份，
+     * 归位时按此字段分组移动并校验。
+     */
+    @Schema(description = "最终落盘目录")
+    private String targetDir;
+
+    /**
      * 子集列表 (预览时合集折叠用)
      */
     @Schema(description = "子集列表")

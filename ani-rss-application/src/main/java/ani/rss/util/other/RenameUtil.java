@@ -17,6 +17,7 @@ import lombok.extern.slf4j.Slf4j;
 import wushuo.tmdb.api.entity.Tmdb;
 import wushuo.tmdb.api.entity.TmdbEpisode;
 
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.function.Function;
 import java.util.regex.Matcher;
@@ -62,6 +63,12 @@ public class RenameUtil {
 
     // 集数范围: 01-06, 01~06, 01～06
     public static final String EP_RANGE_REG = "(\\d+(?:\\.5)?)[\\s]*[-~～][\\s]*(\\d+(?:\\.5)?)";
+
+    /**
+     * 文件名 UTF-8 字节硬上限。ext4 / NTFS 单段上限 255 字节，115 与 Alist 亦同，
+     * 超出直接创建失败；{@code maxFileNameLength=0}（不限）时用它兜底。
+     */
+    public static final int MAX_FILE_NAME_BYTES = 255;
 
     // Vol范围: Vol.01-Vol.06
     public static final String VOL_RANGE_REG = "(?:Vol\\.?\\s*)(\\d+(?:\\.5)?)[\\s]*[-~～][\\s]*(\\d+(?:\\.5)?)";
@@ -764,10 +771,19 @@ public class RenameUtil {
 
         String reName = getName(renameTemplate);
 
+        // 模板里的前后导空格（例如把 ovaRenameTemplate 写成 " ${title} (${year})"）会原样落进
+        // 文件名，115/Emby 侧表现为" xxx.mkv"这类看不见的脏名，这里统一裁掉。
+        reName = StrUtil.trim(reName);
+
         Integer maxFileNameLength = config.getMaxFileNameLength();
 
-        if (maxFileNameLength > 0) {
+        if (maxFileNameLength != null && maxFileNameLength > 0) {
             reName = StrUtil.sub(reName, 0, maxFileNameLength);
+        } else {
+            // maxFileNameLength=0 表示"不限"，但文件系统与网盘仍按 UTF-8 字节计数：
+            // 超 255 字节在 115/Alist 上会直接创建失败，而中文标题一字 3 字节，
+            // 100 字就触顶。这里保留一个硬上限兜底，不改变"0=不按字符数截断"的语义。
+            reName = capUtf8Bytes(reName, MAX_FILE_NAME_BYTES);
         }
 
         // 提取版本号用于洗版判断
@@ -1070,6 +1086,41 @@ public class RenameUtil {
         // Windows 不允许文件名以点/空格结尾
         s = s.replaceAll("[. ]+$", "");
         return s.trim();
+    }
+
+    /**
+     * 按 UTF-8 字节数截断文件名，尽量保留扩展名。
+     * <p>
+     * 只在 {@code maxFileNameLength <= 0}（用户选择"不限制字符数"）时作为硬兜底使用：
+     * 中文标题一字 3 字节，长标题 + 组名在 115 上会因超过 255 字节而创建失败。
+     */
+    public static String capUtf8Bytes(String name, int maxBytes) {
+        if (StrUtil.isBlank(name) || maxBytes <= 0) {
+            return name;
+        }
+        if (name.getBytes(StandardCharsets.UTF_8).length <= maxBytes) {
+            return name;
+        }
+        String ext = "";
+        int dot = name.lastIndexOf('.');
+        if (dot > 0 && dot >= name.length() - 10) {
+            ext = name.substring(dot);
+        }
+        int reserve = ext.getBytes(StandardCharsets.UTF_8).length;
+        int budget = Math.max(8, maxBytes - reserve);
+        StringBuilder sb = new StringBuilder();
+        int used = 0;
+        for (int i = 0; i < name.length(); ) {
+            int cp = name.codePointAt(i);
+            int len = new String(Character.toChars(cp)).getBytes(StandardCharsets.UTF_8).length;
+            if (used + len > budget) {
+                break;
+            }
+            sb.appendCodePoint(cp);
+            used += len;
+            i += Character.charCount(cp);
+        }
+        return sb.toString().trim() + ext;
     }
 
     /**

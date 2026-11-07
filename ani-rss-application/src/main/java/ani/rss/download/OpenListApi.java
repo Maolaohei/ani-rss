@@ -83,6 +83,16 @@ public class OpenListApi {
     /** 限流累计等待毫秒数（可观测：到底被限流拖了多少时间） */
     private static final java.util.concurrent.atomic.AtomicLong throttleWaitMs =
             new java.util.concurrent.atomic.AtomicLong(0L);
+    /**
+     * 合集归位期的临时速率覆盖（0 表示不覆盖）。
+     * <p>
+     * 合集一次性要做「1 + 分段数」次 mkdir 与每个文件一次 fs/move；在
+     * {@code openListApiPerSecond=1} 下几百个文件会白白耗掉数分钟。归位是短时批量
+     * 任务，与常驻 RSS 轮询的稳态压力不同，所以只在这段时间提速，退出即恢复，
+     * 既不修改用户配置，也不影响其它轮次。
+     */
+    private static volatile int burstOverridePerSecond = 0;
+    private static volatile int burstOverrideBurst = 0;
 
     // ---- 熔断：连续失败到阈值后进入冷却，冷却期内不再发起网盘请求 ----
     private static final java.util.concurrent.atomic.AtomicInteger consecutiveListingFailures =
@@ -1719,6 +1729,27 @@ public class OpenListApi {
     }
 
     /**
+     * 进入合集归位期：临时提高令牌桶速率，避免几百次 fs/move 被 1 次/秒的常驻速率拖成分钟级。
+     * <p>
+     * 必须在 finally 中调用 {@link #endBurstWindow()}，否则会一直用高速率打扰网盘账号。
+     *
+     * @param perSecond 目标速率（次/秒，超出上限会被钳制）
+     * @param burst     突发额度（超出上限会被钳制）
+     */
+    public static void beginBurstWindow(int perSecond, int burst) {
+        burstOverridePerSecond = Math.max(0, Math.min(perSecond, (int) MAX_API_PER_SECOND));
+        burstOverrideBurst = Math.max(0, Math.min(burst, (int) MAX_API_BURST));
+    }
+
+    /**
+     * 退出合集归位期，恢复用户配置的速率。
+     */
+    public static void endBurstWindow() {
+        burstOverridePerSecond = 0;
+        burstOverrideBurst = 0;
+    }
+
+    /**
      * 仅供测试/诊断：复位熔断、令牌桶与全部可观测计数
      */
     public static void resetRateLimitState() {
@@ -1726,6 +1757,7 @@ public class OpenListApi {
             lastTokenAtNanos = 0L;
             availableTokens = 0.0;
         }
+        endBurstWindow();
         consecutiveListingFailures.set(0);
         cooldownLevel.set(0);
         cooldownUntilMs = 0L;
@@ -1788,8 +1820,14 @@ public class OpenListApi {
         apiCallCount.incrementAndGet();
         apiCallCountRound.incrementAndGet();
         synchronized (API_RATE_LOCK) {
-            double perSecond = effectiveApiPerSecond(ConfigUtil.CONFIG);
-            double burst = intConfig(ConfigUtil.CONFIG == null ? null : ConfigUtil.CONFIG.getOpenListApiBurst(),
+            int overridePerSecond = burstOverridePerSecond;
+            double perSecond = overridePerSecond > 0
+                    ? Math.min(overridePerSecond, MAX_API_PER_SECOND)
+                    : effectiveApiPerSecond(ConfigUtil.CONFIG);
+            int overrideBurst = burstOverrideBurst;
+            double burst = overrideBurst > 0
+                    ? Math.min(overrideBurst, MAX_API_BURST)
+                    : intConfig(ConfigUtil.CONFIG == null ? null : ConfigUtil.CONFIG.getOpenListApiBurst(),
                     (int) DEFAULT_API_BURST, 1, (int) MAX_API_BURST);
 
             long now = System.nanoTime();

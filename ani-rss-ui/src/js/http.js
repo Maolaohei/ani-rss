@@ -466,6 +466,13 @@ export let getSubtitles = (filename) => {
 export let startCollection = (info) => api.post('api/startCollection', info)
 
 /**
+ * 分析合集结构（按季 / 剧场版 / OVA 分段）
+ * @param info 合集
+ * @returns {Promise<unknown>}
+ */
+export let analyzeCollection = (info) => api.post('api/analyzeCollection', info)
+
+/**
  * 预览合集
  * @param info 合集
  * @returns {Promise<unknown>}
