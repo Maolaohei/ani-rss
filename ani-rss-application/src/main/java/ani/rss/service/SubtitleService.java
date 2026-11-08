@@ -14,6 +14,7 @@ import ani.rss.service.subtitle.SubtitleMatchLog;
 import ani.rss.service.subtitle.SubtitleMatchLogEntry;
 import ani.rss.service.subtitle.SubtitlePick;
 import ani.rss.util.other.ConfigUtil;
+import ani.rss.util.other.TorrentUtil;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.util.StrUtil;
 import jakarta.annotation.Resource;
@@ -31,6 +32,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -267,16 +269,33 @@ public class SubtitleService {
 
     /**
      * 目录内视频的索引：用于把字幕按「季 + 集」定位到唯一视频。
+     * <p>
+     * 泛型参数是「视频的载体」：本地导入是 {@link File}，云端（OpenList/AList）导入是
+     * {@link CloudVideo}（网盘文件没有本地路径，只有名字与所在目录）。
+     * 匹配规则必须本地/云端共用同一份实现——否则「集数不唯一时宁可失败」这类歧义判定
+     * 迟早会在两边分叉，变成"本地拒绝、云端误配"。
      */
-    private static class VideoIndex {
+    private static class VideoIndex<T> {
         /**
-         * 主键：规范化 {@code SxxExx}（小写，如 {@code s03e15}）→ 视频文件
+         * 主键：规范化 {@code SxxExx}（小写，如 {@code s03e15}）→ 视频
          */
-        private final Map<String, File> bySeasonEpisode = new LinkedHashMap<>();
+        private final Map<String, T> bySeasonEpisode = new LinkedHashMap<>();
         /**
-         * 兜底键：集数 → 视频文件列表（字幕未带季数、或视频名未带季标记时使用）
+         * 兜底键：集数 → 视频列表（字幕未带季数、或视频名未带季标记时使用）
          */
-        private final Map<Integer, List<File>> byEpisode = new LinkedHashMap<>();
+        private final Map<Integer, List<T>> byEpisode = new LinkedHashMap<>();
+    }
+
+    /**
+     * 网盘上的一集视频：名字 + 所在目录。
+     * <p>
+     * {@link OpenListFileInfo#getPath()} 是<b>父目录</b>而非完整路径（见 fs/list 的填充逻辑），
+     * 所以写入字幕时用 {@code dir + "/" + 目标名} 拼完整路径。
+     *
+     * @param name 视频文件名
+     * @param dir  视频所在网盘目录
+     */
+    private record CloudVideo(String name, String dir) {
     }
 
     /**
@@ -578,8 +597,12 @@ public class SubtitleService {
      * 语言后缀取字幕文件名中的语言标识（sc/tc/chs/cht/jp/jpsc/jptc 等，见
      * {@link FileUtils#extractSubtitleLangSuffix(String)}），无则命名为 {@code 剧名 SxxExx.ext}。
      * <p>
-     * 本方法只处理本地目录（含离线下载订阅的本地落盘目录）；若订阅目录不存在（如纯云端离线订阅），
-     * 全部文件以统一原因失败返回，不抛异常。
+     * 本方法按当前下载器分派：OpenList/AList 离线订阅走网盘（
+     * {@link #importCloudSubtitles(String, List, boolean)}），其余走本地目录；
+     * 本地目录不存在时全部文件以统一原因失败返回，不抛异常。
+     * <p>
+     * 注意：<b>被显式传入目录的 File 重载仍只处理本地目录</b>，方便单测与自定义路径；
+     * 网盘分支只在「按订阅下载路径分派」时生效。
      *
      * @param ani   订阅（其下载目录为导入目标）
      * @param files 上传的字幕文件
@@ -598,7 +621,14 @@ public class SubtitleService {
         if (ani == null) {
             return new ImportResult();
         }
-        return importLocalSubtitles(new File(downloadService.getDownloadPath(ani)), files, dryRun);
+        String downloadPath = downloadService.getDownloadPath(ani);
+        if (isCloudDownloadTool()) {
+            // 网盘订阅（OpenList/AList）：视频在云端，本地文件系统里根本没有这个目录，
+            // 若照旧走 new File(path) 会一律得到「订阅下载目录不存在」——纯云端订阅的手动上传
+            // 因此 100% 失败。这里改走网盘列举 + fs/put。
+            return importCloudSubtitles(downloadPath, files, dryRun);
+        }
+        return importLocalSubtitles(new File(downloadPath), files, dryRun);
     }
 
     /**
@@ -632,7 +662,7 @@ public class SubtitleService {
             return result.setFailed(files.size());
         }
 
-        VideoIndex index = buildVideoIndex(dir);
+        VideoIndex<File> index = buildVideoIndex(dir);
         int success = 0;
         for (LocalSubtitleFile f : files) {
             String originalName = StrUtil.blankToDefault(f.getFilename(), "");
@@ -694,6 +724,341 @@ public class SubtitleService {
             }
         }
         return result.setSuccess(success).setFailed(result.getTotal() - success);
+    }
+
+    /* ==================== 网盘（OpenList/AList）手动导入 ==================== */
+
+    /**
+     * 批量导入字幕到<b>网盘</b>订阅目录（OpenList/AList 离线下载的订阅）。
+     * <p>
+     * 为什么不能复用本地实现：网盘上的「目录」在本地文件系统里不存在，
+     * {@code new File(path).exists()} 恒为 {@code false}，于是每个文件都被判成
+     * 「订阅下载目录不存在」——纯云端订阅手动上传字幕因此 100% 失败。
+     * <p>
+     * 匹配规则与本地<b>完全一致</b>（同一份索引结构、同一个 {@link #matchVideo} 歧义判定、
+     * 同一个 {@link #expectedSubtitleName} 命名），区别只在两侧 IO：
+     * <ul>
+     *   <li>列举：{@code fs/list}，只读<b>一层</b>（与射手网计划一致，避免一次导入把
+     *       目录树整个递归一遍）；顶层没有视频但有子目录时才递归兜底一次；</li>
+     *   <li>写入：{@code fs/put}；同名文件存在时先 {@code fs/move} 到 {@code sub_bak/}，
+     *       与本地「覆盖前备份」的语义对齐——搬不动就直接失败，绝不无备份覆盖。</li>
+     * </ul>
+     *
+     * @param cloudDir 网盘目录（订阅下载目录）
+     * @param files    上传的字幕
+     * @param dryRun   为 {@code true} 时只做匹配预览、不写网盘
+     */
+    ImportResult importCloudSubtitles(String cloudDir, List<LocalSubtitleFile> files, boolean dryRun) {
+        ImportResult result = new ImportResult();
+        if (files == null || files.isEmpty()) {
+            return result;
+        }
+        result.setTotal(files.size());
+
+        String dir = normalizeCloudDir(cloudDir);
+        if (StrUtil.isBlank(dir)) {
+            return failAllImport(result, files, "订阅下载目录为空（网盘路径未配置）");
+        }
+
+        OpenListApi api = new OpenListApi();
+        api.setConfig(ConfigUtil.CONFIG);
+
+        List<OpenListFileInfo> entries;
+        try {
+            entries = api.fsListStrict(dir, true);
+        } catch (Exception e) {
+            return failAllImport(result, files, cloudListFailureReason(api, dir, e));
+        }
+        if (listCloudVideos(entries).isEmpty() && hasSubDirectory(entries)) {
+            // 少数人把每集放进独立子目录：顶层没有视频时递归兜底一次。
+            // 顶层压根没有子目录就不发这次请求。
+            entries = mergeCloudEntries(entries, safeFindFiles(api, dir));
+        }
+        if (listCloudVideos(entries).isEmpty()) {
+            // 目录读到了、也确实存在，就是没有视频：不能报「目录不存在」误导排查方向
+            return failAllImport(result, files,
+                    "网盘目录下没有视频文件（目录可读取）: " + dir + "（共 " + entries.size() + " 个条目）");
+        }
+        return importCloudSubtitles(dir, entries, files, dryRun, api);
+    }
+
+    /**
+     * 云端导入的核心：给定目录已列举的条目做匹配（纯逻辑，便于单测直接喂数据）。
+     *
+     * @param cloudDir 网盘目录（已规范化）
+     * @param entries  该目录下的条目（{@code getPath()} 为其父目录）
+     * @param files    上传的字幕
+     * @param dryRun   只预览不写
+     * @param api      网盘客户端（写入时才真正用到）
+     */
+    ImportResult importCloudSubtitles(String cloudDir, List<OpenListFileInfo> entries,
+                                      List<LocalSubtitleFile> files, boolean dryRun, OpenListApi api) {
+        ImportResult result = new ImportResult();
+        if (files == null || files.isEmpty()) {
+            return result;
+        }
+        result.setTotal(files.size());
+
+        VideoIndex<CloudVideo> index = buildCloudVideoIndex(entries);
+        Set<String> existing = cloudFileNames(entries);
+        int success = 0;
+        for (LocalSubtitleFile f : files) {
+            String originalName = StrUtil.blankToDefault(f.getFilename(), "");
+            String ext = FileUtil.extName(originalName).toLowerCase(Locale.ROOT);
+
+            // 1) 扩展名白名单
+            if (!SUBTITLE_EXT.contains(ext)) {
+                result.getItems().add(importItem(originalName, null, null, null, "失败",
+                        "不支持的字幕格式: " + (StrUtil.isBlank(ext) ? "(无扩展名)" : ext)));
+                continue;
+            }
+            // 2) 内容与大小
+            byte[] content = f.getContent();
+            if (content == null || content.length == 0) {
+                result.getItems().add(importItem(originalName, null, null, null, "失败", "字幕内容为空"));
+                continue;
+            }
+            if (content.length > MAX_SUBTITLE_BYTES) {
+                result.getItems().add(importItem(originalName, null, null, null, "失败", "字幕超过 20MiB 上限"));
+                continue;
+            }
+
+            // 3) 解析语言后缀 + 季集，定位到唯一视频
+            String langTag = StrUtil.blankToDefault(FileUtils.extractSubtitleLangSuffix(originalName), "");
+            int[] se = AssrtSubtitleProvider.extractSeasonEpisode(originalName);
+            CloudVideo video = matchVideo(index, se);
+            if (video == null) {
+                result.getItems().add(importItem(originalName, null, null, langTag, "失败",
+                        unmatchedReason(index, se)));
+                if (!dryRun) {
+                    SubtitleMatchLog.record(new SubtitleMatchLogEntry(
+                            System.currentTimeMillis(), "", originalName, "",
+                            se[0] >= 0 ? se[0] : null, "未命中", langTag));
+                }
+                continue;
+            }
+
+            // 4) 预览：只算目标名，不写网盘
+            String targetName = expectedSubtitleName(FileUtil.mainName(video.name()), ext, langTag);
+            if (dryRun) {
+                success++;
+                result.getItems().add(importItem(originalName, targetName, video.name(), langTag, "已匹配",
+                        existing.contains(targetName) ? "同名文件已存在，导入时会先备份到 sub_bak/" : ""));
+                continue;
+            }
+
+            // 5) 写入：先备份同名旧文件，再上传
+            try {
+                if (existing.contains(targetName)) {
+                    backupCloudSubtitle(api, video.dir(), targetName);
+                }
+                api.fsPut(video.dir(), targetName, content);
+                success++;
+                existing.add(targetName);
+                result.getItems().add(importItem(originalName, targetName, video.name(), langTag, "已匹配", ""));
+                SubtitleMatchLog.record(new SubtitleMatchLogEntry(
+                        System.currentTimeMillis(), video.name(), originalName, targetName,
+                        se[0] >= 0 ? se[0] : null, "已匹配", langTag));
+                log.info("云端字幕已写入: {}/{} ({} 字节)", video.dir(), targetName, content.length);
+            } catch (Exception e) {
+                result.getItems().add(importItem(originalName, null, video.name(), langTag, "失败",
+                        ExceptionUtils.getMessage(e)));
+            }
+        }
+        return result.setSuccess(success).setFailed(result.getTotal() - success);
+    }
+
+    /**
+     * 建立云端视频索引（与 {@link #buildVideoIndex} 同一套键，保证歧义判定一致）
+     */
+    private VideoIndex<CloudVideo> buildCloudVideoIndex(List<OpenListFileInfo> entries) {
+        VideoIndex<CloudVideo> index = new VideoIndex<>();
+        for (CloudVideo video : listCloudVideos(entries)) {
+            String key = canonicalSeasonEpisode(video.name());
+            if (key != null) {
+                index.bySeasonEpisode.putIfAbsent(key, video);
+            }
+            int[] se = AssrtSubtitleProvider.extractSeasonEpisode(video.name());
+            if (se[1] >= 0) {
+                index.byEpisode.computeIfAbsent(se[1], k -> new ArrayList<>()).add(video);
+            }
+        }
+        return index;
+    }
+
+    private static List<CloudVideo> listCloudVideos(List<OpenListFileInfo> entries) {
+        List<CloudVideo> videos = new ArrayList<>();
+        if (entries == null) {
+            return videos;
+        }
+        for (OpenListFileInfo f : entries) {
+            if (Boolean.TRUE.equals(f.getIsDir()) || StrUtil.isBlank(f.getName())) {
+                continue;
+            }
+            if (FileUtils.isVideoFormat(f.getName())) {
+                videos.add(new CloudVideo(f.getName(), StrUtil.blankToDefault(f.getPath(), "")));
+            }
+        }
+        return videos;
+    }
+
+    private static Set<String> cloudFileNames(List<OpenListFileInfo> entries) {
+        Set<String> names = new HashSet<>();
+        if (entries == null) {
+            return names;
+        }
+        for (OpenListFileInfo f : entries) {
+            if (!Boolean.TRUE.equals(f.getIsDir()) && StrUtil.isNotBlank(f.getName())) {
+                names.add(f.getName());
+            }
+        }
+        return names;
+    }
+
+    private static boolean hasSubDirectory(List<OpenListFileInfo> entries) {
+        for (OpenListFileInfo f : entries) {
+            if (Boolean.TRUE.equals(f.getIsDir())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static List<OpenListFileInfo> safeFindFiles(OpenListApi api, String dir) {
+        try {
+            return api.findFilesStrict(dir);
+        } catch (Exception e) {
+            log.warn("递归列举网盘目录失败 {}: {}", dir, ExceptionUtils.getMessage(e));
+            return List.of();
+        }
+    }
+
+    /**
+     * 合并"顶层列举"与"递归兜底列举"：同一 {@code 目录/名字} 只保留一份（先到优先）
+     */
+    private static List<OpenListFileInfo> mergeCloudEntries(List<OpenListFileInfo> first,
+                                                            List<OpenListFileInfo> second) {
+        Map<String, OpenListFileInfo> merged = new LinkedHashMap<>();
+        for (OpenListFileInfo f : first) {
+            merged.put(cloudEntryKey(f), f);
+        }
+        for (OpenListFileInfo f : second) {
+            merged.putIfAbsent(cloudEntryKey(f), f);
+        }
+        return new ArrayList<>(merged.values());
+    }
+
+    private static String cloudEntryKey(OpenListFileInfo f) {
+        return StrUtil.blankToDefault(f.getPath(), "") + "/" + StrUtil.blankToDefault(f.getName(), "");
+    }
+
+    /**
+     * 覆盖前把同名旧字幕搬到 {@code 目录/sub_bak/}。
+     * <p>
+     * 任何一步失败都往上抛：宁可这一条导入失败，也不能在没有备份的情况下覆盖用户字幕。
+     */
+    private void backupCloudSubtitle(OpenListApi api, String dir, String targetName) {
+        String backupDir = dir + "/" + SUBTITLE_BACKUP_DIR;
+        if (!cloudDirExists(api, backupDir)) {
+            api.mkdir(backupDir);
+        }
+        for (OpenListFileInfo b : api.fsList(backupDir, true)) {
+            if (!Boolean.TRUE.equals(b.getIsDir()) && targetName.equals(b.getName())) {
+                // 上一轮遗留的同名备份：先删掉，否则 fs/move 会因目标已存在而失败
+                api.fsRemove(backupDir, List.of(targetName));
+                break;
+            }
+        }
+        api.fsMove(dir, backupDir, List.of(targetName));
+        log.info("云端已存在同名字幕, 覆盖前备份至 {}/{}", backupDir, targetName);
+    }
+
+    /**
+     * 网盘目录是否存在（严格版：目录不存在是<b>确认没有</b>，其它失败按"存在"处理）
+     */
+    private boolean cloudDirExists(OpenListApi api, String dir) {
+        try {
+            api.fsListStrict(dir, false);
+            return true;
+        } catch (OpenListApi.OpenListDirNotFoundException e) {
+            return false;
+        } catch (Exception e) {
+            // 判定不了就不 mkdir：多跑一次 move 顶多失败，误建目录反而会留下垃圾
+            return true;
+        }
+    }
+
+    /**
+     * 网盘列举失败的可行动原因：区分「目录确实不存在」与「网盘本身读不了」。
+     * <p>
+     * 目录不存在时顺带列一次父目录，把<b>实际存在的子目录名</b>回给用户——
+     * 季目录名差一个空格/全角括号这种问题，看报错就能对上，不用再去别处翻。
+     */
+    private String cloudListFailureReason(OpenListApi api, String dir, Exception e) {
+        if (e instanceof OpenListApi.OpenListDirNotFoundException) {
+            return "网盘订阅下载目录不存在: " + dir + cloudSiblingHint(api, dir);
+        }
+        String message = ExceptionUtils.getMessage(e);
+        return "网盘目录读取失败: " + dir + "（" + StrUtil.blankToDefault(message, "未知错误") + "）";
+    }
+
+    private String cloudSiblingHint(OpenListApi api, String dir) {
+        int idx = dir.lastIndexOf('/');
+        if (idx <= 0) {
+            return "";
+        }
+        String parent = dir.substring(0, idx);
+        try {
+            List<String> names = new ArrayList<>();
+            for (OpenListFileInfo f : api.fsListStrict(parent, false)) {
+                if (Boolean.TRUE.equals(f.getIsDir()) && StrUtil.isNotBlank(f.getName())) {
+                    names.add(f.getName());
+                    if (names.size() >= 8) {
+                        break;
+                    }
+                }
+            }
+            if (names.isEmpty()) {
+                return "";
+            }
+            return "（父目录 " + parent + " 下实际有: " + String.join(" / ", names)
+                    + "，请核对订阅下载路径 / 季目录名）";
+        } catch (Exception ignore) {
+            return "";
+        }
+    }
+
+    private ImportResult failAllImport(ImportResult result, List<LocalSubtitleFile> files, String reason) {
+        for (LocalSubtitleFile f : files) {
+            result.getItems().add(importItem(f.getFilename(), null, null, null, "失败", reason));
+        }
+        return result.setFailed(files.size());
+    }
+
+    /**
+     * 当前下载器是否为网盘（OpenList/AList）。
+     * <p>
+     * 用能力查询而非配置字符串比较（见 {@link TorrentUtil#isOfflineTool()}）：
+     * 配置里既可能是 {@code OpenList} 也可能是 {@code Alist}，写死一个字符串就会漏判另一半。
+     */
+    private static boolean isCloudDownloadTool() {
+        try {
+            return TorrentUtil.isOfflineTool();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * 规范化网盘目录：反斜杠转正斜杠、折叠重复分隔符、去掉末尾斜杠（保留根目录的 "/"）。
+     */
+    static String normalizeCloudDir(String path) {
+        String p = StrUtil.blankToDefault(path, "").replace('\\', '/').trim();
+        p = p.replaceAll("/{2,}", "/");
+        while (p.length() > 1 && p.endsWith("/")) {
+            p = p.substring(0, p.length() - 1);
+        }
+        return p;
     }
 
     /* ==================== 射手网（ASSRT）手动获取 ==================== */
@@ -777,13 +1142,12 @@ public class SubtitleService {
             throw new IllegalStateException("所选字幕条目没有可下载的文件，请换一个候选");
         }
 
-        String toolType = StrUtil.blankToDefault(ConfigUtil.CONFIG.getDownloadToolType(), "");
         // (P1-17) 计划内字节缓存：合集压缩包候选会在下面的逐视频循环里被反复取用，
         // 不缓存的话每个视频都要把整包重新下载一遍（一季 12~24 集 = 同样一次下载做 12~24 次）。
         // 生命周期绑定"本次计划构建"，构建结束即释放，不会跨计划驻留大对象。
         Map<String, byte[]> bytesCache = new HashMap<>();
-        if ("OpenList".equals(toolType)) {
-            // OpenList 离线下载：视频落在云端，字幕需上传到云端同目录
+        if (isCloudDownloadTool()) {
+            // 网盘离线下载（OpenList/AList）：视频落在云端，字幕需上传到云端同目录
             planCloudFetch(ani, plan, candidates, lang, bytesCache);
         } else {
             // 其余下载器（qBittorrent / Transmission / aria2 / 本地路径等）均视为本地下载
@@ -1070,14 +1434,14 @@ public class SubtitleService {
     /**
      * 未命中时给出可行动的原因说明
      */
-    private static String unmatchedReason(VideoIndex index, int[] se) {
+    private static String unmatchedReason(VideoIndex<?> index, int[] se) {
         if (se[1] < 0) {
             return "无法从字幕文件名解析集数（可改名为「剧名 SxxExx.ass」后重试）";
         }
         if (se[0] >= 0) {
             return "未找到对应视频 S" + se[0] + "E" + se[1];
         }
-        List<File> candidates = index.byEpisode.get(se[1]);
+        List<?> candidates = index.byEpisode.get(se[1]);
         if (candidates != null && candidates.size() > 1) {
             return "第 " + se[1] + " 集存在多个候选视频，集数不唯一（请在字幕文件名中补上 Sxx 季数）";
         }
@@ -1087,8 +1451,8 @@ public class SubtitleService {
     /**
      * 建立目录内视频索引（递归、限量，与扫描逻辑一致）
      */
-    private VideoIndex buildVideoIndex(File dir) {
-        VideoIndex index = new VideoIndex();
+    private VideoIndex<File> buildVideoIndex(File dir) {
+        VideoIndex<File> index = new VideoIndex<>();
         for (File video : listVideoFiles(dir)) {
             String name = video.getName();
             String key = canonicalSeasonEpisode(name);
@@ -1126,18 +1490,18 @@ public class SubtitleService {
      * </ol>
      * 返回 {@code null} 表示未命中或存在歧义（歧义时宁可失败也不跨季误配）。
      */
-    private static File matchVideo(VideoIndex index, int[] se) {
+    private static <T> T matchVideo(VideoIndex<T> index, int[] se) {
         int episode = se[1];
         if (episode < 0) {
             return null;
         }
         if (se[0] >= 0) {
-            File exact = index.bySeasonEpisode.get("s" + se[0] + "e" + episode);
+            T exact = index.bySeasonEpisode.get("s" + se[0] + "e" + episode);
             if (exact != null) {
                 return exact;
             }
         }
-        List<File> candidates = index.byEpisode.get(episode);
+        List<T> candidates = index.byEpisode.get(episode);
         if (candidates == null || candidates.isEmpty()) {
             return null;
         }

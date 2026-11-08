@@ -944,6 +944,11 @@ public class AssrtSubtitleProvider {
      */
     private static String cleanTechnicalTokens(String name) {
         String s = name;
+        // 压制版本标记 [v2] / 06v2：否则末位数字会被当成集数（"… - 04 [v2]" 读成第 2 集）
+        s = s.replaceAll("(?i)\\[v\\d{1,2}]", " ");
+        s = s.replaceAll("(?i)(?<=\\d)\\s?v\\d(?!\\d)", " ");
+        // 10bit 系编码标记 Hi10P / Hi444PP：否则 "Hi10P" 里的 10 会被当成集数
+        s = s.replaceAll("(?i)\\bhi\\s?\\d{2,3}\\s?p*\\b", " ");
         s = s.replaceAll("\\d{3,4}\\s*[x×]\\s*\\d{3,4}", " ");
         s = s.replaceAll("\\b(?:480|576|720|1080|1440|2160)\\s*[ip]?\\b", " ");
         s = s.replaceAll("\\b(?:x|h)?26[45]\\b|\\b(?:hevc|avc|vp9|av1)\\b", " ");
