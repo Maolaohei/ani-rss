@@ -9,6 +9,7 @@ import ani.rss.entity.Config;
 import ani.rss.entity.web.ContentType;
 import ani.rss.entity.web.Header;
 import ani.rss.enums.BgmTokenTypeEnum;
+import ani.rss.enums.OffsetTypeEnum;
 import ani.rss.exception.ResultException;
 import ani.rss.service.DownloadService;
 import ani.rss.service.MikanService;
@@ -559,7 +560,11 @@ public class BgmUtil {
             return epId;
         }
 
-        String key = "BGM_getEpisodeId:" + subjectId;
+        // 偏移方式决定「集数」的语义：BGM_OFFSET 下以 Bangumi 的 sort 为准
+        OffsetTypeEnum offsetType = ensureOffsetType(ConfigUtil.CONFIG);
+        boolean bgmOffset = offsetType == OffsetTypeEnum.BGM_OFFSET;
+
+        String key = "BGM_getEpisodeId:" + subjectId + ":" + offsetType;
 
         List<JsonObject> episodes = CacheUtils.get(key);
         if (Objects.isNull(episodes)) {
@@ -576,17 +581,31 @@ public class BgmUtil {
                 continue;
             }
 
-            if (Objects.nonNull(epElement) && !epElement.isJsonNull() && epElement.getAsDouble() == e) {
+            if (StrUtil.isBlank(epId) && Objects.nonNull(epElement) && !epElement.isJsonNull() && epElement.getAsDouble() == e) {
                 epId = idElement.getAsString();
-                break;
             }
-            if (Objects.nonNull(sortElement) && !sortElement.isJsonNull() && sortElement.getAsDouble() == e) {
+            if (StrUtil.isBlank(sortId) && Objects.nonNull(sortElement) && !sortElement.isJsonNull() && sortElement.getAsDouble() == e) {
                 sortId = idElement.getAsString();
+            }
+            if (StrUtil.isNotBlank(epId) && StrUtil.isNotBlank(sortId)) {
                 break;
             }
         }
 
-        return StrUtil.blankToDefault(epId, sortId);
+        return bgmOffset ? StrUtil.blankToDefault(sortId, epId) : StrUtil.blankToDefault(epId, sortId);
+    }
+
+    /**
+     * 读取自动偏移方式，老配置缺字段时按 AUTO_OFFSET 处理。
+     *
+     * @param config 配置
+     * @return 偏移方式
+     */
+    private static OffsetTypeEnum ensureOffsetType(Config config) {
+        if (Objects.isNull(config) || Objects.isNull(config.getOffsetType())) {
+            return OffsetTypeEnum.AUTO_OFFSET;
+        }
+        return config.getOffsetType();
     }
 
     /**
@@ -1047,7 +1066,11 @@ public class BgmUtil {
             return episodeTitleMap;
         }
 
-        String key = "BGM_getEpisodeTitleMap:" + subjectId;
+        // BGM_OFFSET 下集数以 sort 为准，缓存 key 必须带上偏移方式，否则切模式后读到旧映射
+        OffsetTypeEnum offsetType = ensureOffsetType(ConfigUtil.CONFIG);
+        boolean bgmOffset = offsetType == OffsetTypeEnum.BGM_OFFSET;
+
+        String key = "BGM_getEpisodeTitleMap:" + subjectId + ":" + offsetType;
 
         Map<Integer, Function<Boolean, String>> cacheMap = CacheUtils.get(key);
         if (Objects.nonNull(cacheMap)) {
@@ -1058,12 +1081,16 @@ public class BgmUtil {
             List<JsonObject> data = getEpisodes(subjectId, 0);
             for (JsonObject it : data) {
                 JsonElement epElement = it.get("ep");
+                JsonElement sortElement = it.get("sort");
                 JsonElement nameElement = it.get("name");
                 if (Objects.isNull(epElement) || epElement.isJsonNull() || Objects.isNull(nameElement) || nameElement.isJsonNull()) {
                     // ep 或 name 缺失, 跳过该条
                     continue;
                 }
                 int ep = epElement.getAsInt();
+                if (bgmOffset && Objects.nonNull(sortElement) && !sortElement.isJsonNull()) {
+                    ep = sortElement.getAsInt();
+                }
                 String jpTitle = nameElement.getAsString();
 
                 JsonElement nameCnElement = it.get("name_cn");

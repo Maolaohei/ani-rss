@@ -9,6 +9,7 @@ import ani.rss.entity.NotificationConfig;
 import ani.rss.entity.QualityProfile;
 import ani.rss.enums.BgmTokenTypeEnum;
 import ani.rss.enums.NotificationStatusEnum;
+import ani.rss.enums.OffsetTypeEnum;
 import ani.rss.enums.SortTypeEnum;
 import ani.rss.service.ClearService;
 import ani.rss.service.DownloadService;
@@ -138,6 +139,7 @@ public class ConfigUtil {
                 .setDelete(false)
                 .setDeleteStandbyRSSOnly(false)
                 .setOffset(false)
+                .setOffsetType(OffsetTypeEnum.AUTO_OFFSET)
                 .setTitleYear(true)
                 .setAutoDisabled(false)
                 .setDownloadPathTemplate(downloadPathTemplate)
@@ -773,6 +775,11 @@ public class ConfigUtil {
     public static void format(Config config) {
         formatPath(config);
         formatUrl(config);
+
+        // 老配置里没有 offsetType 字段，缺失时按原有行为（从第 1 集开始编号）补默认值
+        if (config.getOffsetType() == null) {
+            config.setOffsetType(OffsetTypeEnum.AUTO_OFFSET);
+        }
 
         if (config.getQualityProfile() == null) {
             config.setQualityProfile(defaultQualityProfile());

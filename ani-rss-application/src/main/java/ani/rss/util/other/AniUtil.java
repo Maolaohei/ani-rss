@@ -4,7 +4,9 @@ import ani.rss.commons.FileUtils;
 import ani.rss.commons.GsonStatic;
 import ani.rss.entity.*;
 import ani.rss.entity.dto.RssToAniDTO;
+import ani.rss.enums.OffsetTypeEnum;
 import ani.rss.exception.ResultException;
+import ani.rss.offset.BaseOffset;
 import ani.rss.service.ClearService;
 import ani.rss.service.DownloadService;
 import ani.rss.service.MikanService;
@@ -20,6 +22,7 @@ import cn.hutool.core.io.resource.ResourceUtil;
 import cn.hutool.core.lang.Assert;
 import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.core.util.ObjectUtil;
+import cn.hutool.core.util.ReflectUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.core.util.URLUtil;
 import cn.hutool.crypto.SecureUtil;
@@ -515,7 +518,10 @@ public class AniUtil {
 
         // 自动推断剧集偏移：主 RSS 与每条备用 RSS 各算各的（#7493cc04）
         if (config.getOffset()) {
-            int offset = autoOffset(ani, url, subgroup);
+            // 同一次推断共用同一个策略实例：BgmOffset 内部按 subjectId 缓存正篇起始集，
+            // 主 RSS 与备用 RSS 命中同一缓存，不会重复请求 Bangumi
+            BaseOffset baseOffset = newBaseOffset(config);
+            int offset = autoOffset(ani, url, subgroup, baseOffset);
             log.debug("自动获取到剧集偏移为 {}", offset);
             ani.setOffset(offset);
 
@@ -526,7 +532,7 @@ public class AniUtil {
                 // 备用 RSS 的字幕组可能与主 RSS 不同，用各自的 label 解析，
                 // 否则会拿主订阅的字幕组去过滤备用 RSS，直接命中 0 条
                 String label = StrUtil.blankToDefault(rss.getLabel(), "");
-                int standbyOffset = autoOffset(ani, rss.getUrl(), label);
+                int standbyOffset = autoOffset(ani, rss.getUrl(), label, baseOffset);
                 log.debug("自动获取到备用剧集偏移为 {} ({})", standbyOffset, rss.getUrl());
                 rss.setOffset(standbyOffset);
             }
@@ -535,17 +541,37 @@ public class AniUtil {
     }
 
     /**
+     * 按配置构造自动偏移策略实例。
+     * <p>
+     * offsetType 缺失（老配置）时按原有行为处理，即从第 1 集开始编号。
+     *
+     * @param config 配置
+     * @return 偏移策略实例
+     */
+    private static BaseOffset newBaseOffset(Config config) {
+        OffsetTypeEnum offsetType = config.getOffsetType();
+        if (Objects.isNull(offsetType)) {
+            offsetType = OffsetTypeEnum.AUTO_OFFSET;
+        }
+        return ReflectUtil.newInstance(offsetType.getBaseOffsetClass());
+    }
+
+    /**
      * 自动推断某条 RSS 的剧集偏移。
      * <p>
      * 每条 RSS 单独解析：主订阅与备用订阅的首集可能不同（备用常缺首集），
      * 用同一偏移会让备用 RSS 全部错位。
+     * <p>
+     * 具体对齐规则交给 {@link BaseOffset}：默认从第 1 集开始编号，
+     * BGM_OFFSET 时跟随 Bangumi 正篇起始集数。
      *
-     * @param ani       订阅
-     * @param rssUrl    RSS 地址
-     * @param subgroup  字幕组（空字符串表示不过滤）
+     * @param ani        订阅
+     * @param rssUrl     RSS 地址
+     * @param subgroup   字幕组（空字符串表示不过滤）
+     * @param baseOffset 偏移策略
      * @return 偏移量；解析失败或无条目时为 0
      */
-    private static int autoOffset(Ani ani, String rssUrl, String subgroup) {
+    private static int autoOffset(Ani ani, String rssUrl, String subgroup, BaseOffset baseOffset) {
         List<Item> items;
         try {
             items = ItemsUtil.getItems(ani, rssUrl, subgroup);
@@ -556,14 +582,13 @@ public class AniUtil {
         if (CollUtil.isEmpty(items)) {
             return 0;
         }
-        Double minEpisode = items.stream()
-                .map(Item::getEpisode)
-                .min(Comparator.comparingDouble(i -> i))
-                .get();
-
-        // x.5 半集必须单独处理：首集为 1.5 时应偏移 -1（首集归零），
-        // 而 -(1.5 - 1) 取整后是 0，会让后续所有集数匹配整体偏一位
-        return ItemsUtil.is5(minEpisode) ? -minEpisode.intValue() : -(minEpisode.intValue() - 1);
+        try {
+            // x.5 半集与季编号的处理都在 BaseOffset 里，各策略共用同一套对齐逻辑
+            return baseOffset.getOffset(ani, items);
+        } catch (Exception e) {
+            log.warn("自动推断剧集偏移失败 {}: {}", rssUrl, e.getMessage());
+            return 0;
+        }
     }
 
 

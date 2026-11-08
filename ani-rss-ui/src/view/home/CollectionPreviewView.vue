@@ -78,6 +78,10 @@ import {computed, ref, watch} from "vue";
 import {ElMessage} from "element-plus";
 import * as http from "@/js/http.js";
 
+// props 必须先声明：下面的 segmentOrder / groups 等计算属性，以及 watch(groups) 在 setup
+// 阶段就会读取 props.data；声明写在它们后面会命中 TDZ（Cannot access 'props' before initialization）
+let props = defineProps(['data'])
+
 let dialogVisible = ref(false)
 let loading = ref(false)
 let loadError = ref('')
@@ -209,8 +213,6 @@ let applySubgroup = () => {
 }
 
 defineExpose({show})
-
-let props = defineProps(['data'])
 </script>
 <style scoped>
 .action {

@@ -22,6 +22,26 @@
 
 ---
 
+## 3.4.42 增量（2026-11）
+
+### 修：点开「订阅」页整页崩溃（Cannot access 'T' before initialization）
+
+3.4.41 里，合集预览组件把 `defineProps` 写在了 `watch(groups)` 之后。`watch` 在 setup 阶段就会同步求值一次源计算属性，于是 `groups` → `segmentOrder` → `props.data` 一路读到还没初始化的 `props`，命中 TDZ；生产构建压缩后变量名变成 `T`，所以用户看到的报错是 `Cannot access 'T' before initialization`。表现是订阅页一挂载就抛异常、整块内容渲染不出来。
+
+- `CollectionPreviewView.vue` 把 `let props = defineProps(['data'])` 提到脚本最前，早于任何读取 `props` 的计算属性与 `watch`；
+- 顺手全量扫了一遍「`props` 早于 `defineProps`」的写法：其余命中都在函数体内（setup 阶段不会执行），只有这一处是顶层同步读取，属于本版新引入的问题。
+
+### 新：自动偏移类型（移植上游「新增自动偏移类型, 可跟随 Bangumi 自动偏移」）
+
+以前「自动剧集偏移」只有一种算法：把 RSS 最小集数对齐到第 1 集。跨季连续编号的番（Bangumi 正篇从第 13 集起）会被强行拉回第 1 集，集数整体错位。
+
+- 新增 `OffsetTypeEnum`（`AUTO_OFFSET` / `BGM_OFFSET`）与 `ani.rss.offset` 策略包（`BaseOffset` / `AutoOffset` / `BgmOffset`）：`AUTO_OFFSET` 完全保持原有行为，`BGM_OFFSET` 以 Bangumi 正篇最小 `sort` 作为目标首集（目标首集大于 1 时把季统一设为 1，便于跨季连续编号）；
+- `BgmOffset` 按 subjectId 缓存正篇起始集，主 RSS 与备用 RSS 共用同一次查询，不会重复打 Bangumi；
+- 设置页「自动剧集偏移」下面新增「自动偏移类型」下拉；老配置没有该字段时按 `AUTO_OFFSET` 处理（`ConfigUtil.format` 补默认值），行为与升级前一致；
+- `BgmUtil.getEpisodeId` / `getEpisodeTitleMap` 在 `BGM_OFFSET` 下改用 `sort` 取集号，缓存 key 带上偏移方式，切换后不会读到旧映射。
+
+---
+
 ## 3.4.41 增量（2026-11）
 
 ### 修：合集拆分后三个分段挤进同一个目录

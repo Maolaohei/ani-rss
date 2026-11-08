@@ -1,6 +1,7 @@
 package ani.rss.entity;
 
 import ani.rss.enums.BgmTokenTypeEnum;
+import ani.rss.enums.OffsetTypeEnum;
 import ani.rss.enums.SortTypeEnum;
 import com.google.gson.annotations.SerializedName;
 import io.swagger.v3.oas.annotations.media.Schema;
@@ -217,6 +218,15 @@ public class Config implements Serializable {
      */
     @Schema(description = "自动推断剧集偏移")
     private Boolean offset;
+
+    /**
+     * 自动偏移方式
+     * <p>
+     * 跟随上游：AUTO_OFFSET 从第 1 集开始编号（原有行为），
+     * BGM_OFFSET 以 Bangumi 正篇起始集数为准。
+     */
+    @Schema(description = "自动偏移方式")
+    private OffsetTypeEnum offsetType;
 
     /**
      * 获取标题时带上年份
