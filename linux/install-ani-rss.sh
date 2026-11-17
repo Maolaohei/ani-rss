@@ -22,6 +22,15 @@ RUN_MODE_FILE="$INSTALL_DIR/run.mode"
 REPO_OFFICIAL="wushuo894/ani-rss"
 REPO_FORK="Maolaohei/ani-rss"
 
+# 官方仓库默认分支为 main，fork 为 master
+repo_branch() {
+    if [ "$1" = "$REPO_OFFICIAL" ]; then
+        echo "main"
+    else
+        echo "master"
+    fi
+}
+
 # 打印 Banner
 show_banner() {
     clear
@@ -45,7 +54,8 @@ check_installed() {
 # 已安装：仅更新管理脚本
 update_management_script() {
     echo -e "${YELLOW}检测到 ani-rss 已安装，更新管理脚本...${NC}"
-    if ! wget -q "https://github.com/${GITHUB_REPO}/raw/master/linux/ani-rss.sh" -O "/usr/local/bin/ani-rss"; then
+    local branch=$(repo_branch "$GITHUB_REPO")
+    if ! wget -q "https://github.com/${GITHUB_REPO}/raw/${branch}/linux/ani-rss.sh" -O "/usr/local/bin/ani-rss"; then
         echo -e "${RED}下载管理脚本失败${NC}"
         exit 1
     fi
@@ -163,15 +173,16 @@ deploy_app() {
     fi
     echo "下载完成 ani-rss.jar"
 
+    local branch=$(repo_branch "$GITHUB_REPO")
     echo "正在下载 run.sh"
-    if ! wget -q "https://github.com/${GITHUB_REPO}/raw/master/docker/run.sh" -O "$INSTALL_DIR/run.sh"; then
+    if ! wget -q "https://github.com/${GITHUB_REPO}/raw/${branch}/docker/run.sh" -O "$INSTALL_DIR/run.sh"; then
         echo -e "${RED}下载启动脚本失败${NC}"
         exit 1
     fi
     echo "下载完成 run.sh"
 
     echo "正在下载管理脚本"
-    if ! wget -q "https://github.com/${GITHUB_REPO}/raw/master/linux/ani-rss.sh" -O "/usr/local/bin/ani-rss"; then
+    if ! wget -q "https://github.com/${GITHUB_REPO}/raw/${branch}/linux/ani-rss.sh" -O "/usr/local/bin/ani-rss"; then
         echo -e "${RED}下载管理脚本失败${NC}"
         exit 1
     fi

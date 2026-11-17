@@ -23,6 +23,35 @@
 
 ---
 
+## 3.4.44 增量（2026-11）
+
+### 新：AstrBot 通知（跟进上游）
+
+支持通过 AstrBot OpenAPI 向指定会话推送通知：
+
+- 设置页新增 AstrBot 渠道，可填写服务地址、API Key、目标 UMO，并选择是否附带番剧封面；
+- 文本通知走 `POST /api/v1/im/message`；开启图片时先把本地缓存封面以 multipart 上传到 `POST /api/v1/file`，再用附件 ID 发送图文消息；
+- API Key 需要 im 权限，发图时还需要 file 权限；旧配置会自动补默认字段，默认服务地址为 `http://127.0.0.1:6185`。
+
+### 跟进：AnimeGarden 封面改直链
+
+- 搜索结果封面改为 `https://bgm.animes.garden/bangumi/subject/{id}/poster.jpeg?quality=small`，不再依赖 `cache.wushuo.top` 的 BGM 封面缓存；
+- 删除 `CacheService.getBgmCover()` 与无引用的 `getMikanScore()`。
+
+### 跟进：首页删除订阅后刷新
+
+- 首页删除订阅成功后通过 `DelAniView` 的 `callback` 刷新首页列表、统计与下载任务，同时同步订阅页缓存列表，不再需要手动刷新。
+
+### 跟进：安装脚本按仓库分支下载
+
+- `linux/ani-rss.sh`、`linux/install-ani-rss.sh` 根据仓库（官方 `wushuo894/ani-rss` / fork `Maolaohei/ani-rss`）选择 `main` / `master` 分支，修复官方安装脚本 `raw/master` 404。
+
+### 优化：自动偏移类型标签
+
+- 设置页自动偏移类型显示为 `Auto` / `Bangumi`，与实际策略含义一致。
+
+---
+
 ## 3.4.43 增量（2026-11）
 
 ### 修：网盘订阅「手动上传字幕」100% 失败（订阅下载目录不存在）

@@ -31,15 +31,6 @@ public class CacheService {
         return getScore("bgm");
     }
 
-    /**
-     * k: Mikan Id, v: Bgm Score
-     *
-     * @return
-     */
-    public JsonObject getMikanScore() {
-        return getScore("mikan");
-    }
-
     public JsonObject getScore(String source) {
         // Fork版本：跳过捐赠验证，直接获取评分
         return getScoreFromCache(source, "");
@@ -108,22 +99,4 @@ public class CacheService {
         return mikanBgmMap;
     }
 
-    public JsonObject getBgmCover() {
-        JsonObject jsonObject = new JsonObject();
-        try {
-            jsonObject = HttpReq.get("https://cache.wushuo.top/bgm/cover")
-                    .timeout(1000 * 5)
-                    .thenFunction(res -> {
-                        int status = res.getStatus();
-                        if (status == 404) {
-                            return new JsonObject();
-                        }
-                        HttpReq.assertStatus(res);
-                        return GsonStatic.fromJson(res.body(), JsonObject.class);
-                    });
-        } catch (Exception e) {
-            log.error(e.getMessage(), e);
-        }
-        return jsonObject;
-    }
 }

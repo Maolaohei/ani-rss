@@ -16,6 +16,10 @@ export let notificationTypeList = [
         label: "Bark通知"
     },
     {
+        name: "ASTRBOT",
+        label: "AstrBot"
+    },
+    {
         name: 'SYSTEM',
         label: '系统通知'
     },

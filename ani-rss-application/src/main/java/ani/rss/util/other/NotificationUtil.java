@@ -53,6 +53,7 @@ public class NotificationUtil {
         map.put(NotificationTypeEnum.FILE_MOVE, FileMoveNotification.class);
         map.put(NotificationTypeEnum.OPEN_LIST_UPLOAD, OpenListUploadNotification.class);
         map.put(NotificationTypeEnum.BARK, BarkNotification.class);
+        map.put(NotificationTypeEnum.ASTRBOT, AstrBotNotification.class);
         map.put(NotificationTypeEnum.NTFY, NtfyNotification.class);
         map.put(NotificationTypeEnum.GOTIFY, GotifyNotification.class);
         map.put(NotificationTypeEnum.PUSH_DEER, PushDeerNotification.class);

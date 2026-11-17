@@ -86,7 +86,6 @@ public class AnimeGardenService {
         }
 
         JsonObject bgmScore = cacheService.getBgmScore();
-        JsonObject bgmCover = cacheService.getBgmCover();
 
         List<String> bgmIdList = AniUtil.getAniList()
                 .stream()
@@ -120,11 +119,8 @@ public class AnimeGardenService {
                             .map(JsonElement::getAsDouble)
                             .orElse(0.0);
 
-                    String cover = Optional.ofNullable(bgmCover.get(id))
-                            .filter(e -> !e.isJsonNull())
-                            .map(it -> GsonStatic.fromJson(it, BgmInfo.Images.class))
-                            .map(BgmInfo.Images::getSmall)
-                            .orElse("");
+                    String cover = StrUtil.format(
+                            "https://bgm.animes.garden/bangumi/subject/{}/poster.jpeg?quality=small", id);
 
                     boolean exists = bgmIdList.contains(subject.getId());
 

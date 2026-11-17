@@ -14,6 +14,7 @@ public enum NotificationTypeEnum {
     FILE_MOVE,
     OPEN_LIST_UPLOAD,
     BARK,
+    ASTRBOT,
     NTFY,
     GOTIFY,
     PUSH_DEER,

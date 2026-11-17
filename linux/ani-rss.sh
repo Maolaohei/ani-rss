@@ -22,6 +22,15 @@ RUN_MODE_FILE="$INSTALL_DIR/run.mode"
 REPO_OFFICIAL="wushuo894/ani-rss"
 REPO_FORK="Maolaohei/ani-rss"
 
+# 官方仓库默认分支为 main，fork 为 master
+repo_branch() {
+    if [ "$1" = "$REPO_OFFICIAL" ]; then
+        echo "main"
+    else
+        echo "master"
+    fi
+}
+
 # 检查 root 权限
 check_root() {
     [ "$EUID" -ne 0 ] && echo -e "${RED}错误：请使用 sudo 或 root 用户执行${NC}" && exit 1
@@ -138,8 +147,9 @@ switch_version() {
         return
     fi
 
+    local branch=$(repo_branch "$GITHUB_REPO")
     echo "正在下载 run.sh"
-    if ! wget -q "https://github.com/${GITHUB_REPO}/raw/master/docker/run.sh" -O "$INSTALL_DIR/run.sh"; then
+    if ! wget -q "https://github.com/${GITHUB_REPO}/raw/${branch}/docker/run.sh" -O "$INSTALL_DIR/run.sh"; then
         echo -e "${RED}下载 run.sh 失败${NC}"
         return
     fi
