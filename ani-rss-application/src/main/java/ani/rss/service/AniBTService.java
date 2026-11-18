@@ -4,12 +4,10 @@ import ani.rss.commons.FileUtils;
 import ani.rss.commons.GroupRegexUtils;
 import ani.rss.commons.GsonStatic;
 import ani.rss.commons.WeekComparator;
-import ani.rss.entity.Ani;
 import ani.rss.entity.AniBT;
 import ani.rss.entity.GroupRegex;
 import ani.rss.entity.dto.AniBTQueryDTO;
 import ani.rss.util.basic.HttpReq;
-import ani.rss.util.other.AniUtil;
 import ani.rss.util.other.BgmUtil;
 import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.util.StrUtil;
@@ -30,13 +28,7 @@ public class AniBTService {
     public AniBT list(AniBTQueryDTO dto) {
         String title = dto.getTitle();
 
-        List<String> bgmIdList = AniUtil.getAniList()
-                .stream()
-                .map(Ani::getBgmUrl)
-                .filter(StrUtil::isNotBlank)
-                .map(BgmUtil::getSubjectId)
-                .distinct()
-                .toList();
+        List<String> bgmIdList = BgmUtil.getSubjectIdList();
 
         String bgmUrl = dto.getBgmUrl();
         String season = dto.getSeason();

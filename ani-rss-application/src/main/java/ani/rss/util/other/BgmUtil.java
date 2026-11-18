@@ -6,6 +6,7 @@ import ani.rss.entity.Ani;
 import ani.rss.entity.BgmInfo;
 import ani.rss.entity.BgmMe;
 import ani.rss.entity.Config;
+import ani.rss.entity.MikanInfo;
 import ani.rss.entity.web.ContentType;
 import ani.rss.entity.web.Header;
 import ani.rss.enums.BgmTokenTypeEnum;
@@ -27,6 +28,7 @@ import cn.hutool.core.util.*;
 import cn.hutool.extra.spring.SpringUtil;
 import cn.hutool.http.HttpRequest;
 import cn.hutool.http.HttpResponse;
+import cn.hutool.http.HttpUtil;
 import cn.hutool.json.JSONUtil;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -34,6 +36,7 @@ import com.google.gson.JsonObject;
 import lombok.extern.slf4j.Slf4j;
 import wushuo.tmdb.api.entity.Tmdb;
 
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -329,20 +332,136 @@ public class BgmUtil {
     }
 
     /**
+     * 获取所有已订阅番剧的 BGM 条目 id。
+     * <p>
+     * 统一走 {@link #getSubjectIdOrNull(Ani)}：BGM 地址缺失时，还会从订阅 RSS 的参数
+     * （AniBT 的 bgmId、AnimeGarden 的 subject）以及 Mikan 详情页回退解析。
+     * 单条订阅解析失败只跳过该条，不影响整页列表。
+     */
+    public static List<String> getSubjectIdList() {
+        return AniUtil.getAniList()
+                .stream()
+                .map(BgmUtil::getSubjectIdOrNull)
+                .filter(StrUtil::isNotBlank)
+                .distinct()
+                .toList();
+    }
+
+    /**
+     * 获取番剧id；解析失败返回 null（供列表展示等可降级场景使用）。
+     *
+     * @param ani
+     * @return BGM 条目 id 或 null
+     */
+    public static String getSubjectIdOrNull(Ani ani) {
+        if (Objects.isNull(ani)) {
+            return null;
+        }
+        try {
+            return resolveSubjectId(ani, BgmUtil::resolveMikanBgmUrl);
+        } catch (Exception e) {
+            log.debug("解析订阅 BGM 条目失败: {} ({})", ani.getTitle(), e.getMessage());
+            return null;
+        }
+    }
+
+    /**
      * 获取番剧id
      *
      * @param ani
      * @return
      */
     public static String getSubjectId(Ani ani) {
-        String bgmUrl = ani.getBgmUrl();
-        if (StrUtil.isBlank(bgmUrl) && "mikan".equals(ani.getType())) {
-            String bangumiId = AniUtil.getBangumiId(ani);
-            Assert.notBlank(bangumiId, "无法取得 bangumiId, {}", ani.getTitle());
-            MikanService.getMikanInfo(ani, "");
-            bgmUrl = ani.getUrl();
+        String subjectId = resolveSubjectId(ani, BgmUtil::resolveMikanBgmUrl);
+        Assert.notBlank(subjectId, "bgmUrl 不能为空");
+        return subjectId;
+    }
+
+    /**
+     * 解析订阅对应的 BGM 条目 id。
+     * <p>
+     * 按可靠性从高到低依次尝试：
+     * <ol>
+     *   <li>订阅已保存的 bgmUrl；</li>
+     *   <li>AniBT（bgmId）/ AnimeGarden（subject）RSS 地址里的 BGM id；</li>
+     *   <li>Mikan 的站内 bangumiId 对应的详情页 Bangumi 链接（存量订阅没有 bgmUrl 时兜底）。</li>
+     * </ol>
+     *
+     * @param ani                 订阅
+     * @param mikanBgmUrlResolver 根据 Mikan bangumiId 取 BGM 地址的解析器（测试可注入）
+     * @return BGM 条目 id；无法解析时返回 null
+     */
+    static String resolveSubjectId(Ani ani, Function<String, String> mikanBgmUrlResolver) {
+        if (Objects.isNull(ani)) {
+            return null;
         }
-        return getSubjectId(bgmUrl);
+
+        String subjectId = parseSubjectId(ani.getBgmUrl());
+        if (StrUtil.isNotBlank(subjectId)) {
+            return subjectId;
+        }
+
+        String url = ani.getUrl();
+        Map<String, String> paramMap = StrUtil.isBlank(url)
+                ? Collections.emptyMap()
+                : HttpUtil.decodeParamMap(url, StandardCharsets.UTF_8);
+
+        // AniBT 的 bgmId / AnimeGarden 的 subject 直接就是 BGM 条目 id
+        for (String key : List.of("bgmId", "subject", "subjectId")) {
+            subjectId = normalizeSubjectId(paramMap.get(key));
+            if (StrUtil.isNotBlank(subjectId)) {
+                return subjectId;
+            }
+        }
+
+        // RSS 地址本身就是 BGM 条目链接
+        subjectId = parseSubjectId(url);
+        if (StrUtil.isNotBlank(subjectId)) {
+            return subjectId;
+        }
+
+        // Mikan：RSS 里是站内 bangumiId，需要从详情页的「Bangumi番组计划链接」换出 BGM id
+        String bangumiId = paramMap.get("bangumiId");
+        if (StrUtil.isBlank(bangumiId)) {
+            bangumiId = ReUtil.get("mikanani\\.me/Home/Bangumi/(\\d+)", url, 1);
+        }
+        if (StrUtil.isNotBlank(bangumiId) && Objects.nonNull(mikanBgmUrlResolver)) {
+            String mikanBgmUrl = mikanBgmUrlResolver.apply(bangumiId);
+            subjectId = parseSubjectId(mikanBgmUrl);
+            if (StrUtil.isNotBlank(subjectId)) {
+                // 回填到内存对象，同一进程内后续列表请求不再重复解析
+                ani.setBgmUrl(mikanBgmUrl);
+                return subjectId;
+            }
+        }
+
+        return null;
+    }
+
+    private static String resolveMikanBgmUrl(String bangumiId) {
+        MikanInfo mikanInfo = MikanService.getMikanInfo(bangumiId);
+        return Objects.isNull(mikanInfo) ? null : mikanInfo.getBgmUrl();
+    }
+
+    /**
+     * 从 BGM 条目链接中提取数字 id；不是 BGM 链接时返回 null。
+     */
+    private static String parseSubjectId(String bgmUrl) {
+        if (StrUtil.isBlank(bgmUrl)) {
+            return null;
+        }
+        String cleanUrl = StrUtil.subBefore(bgmUrl.trim(), "?", false);
+        cleanUrl = StrUtil.subBefore(cleanUrl, "#", false);
+        String regStr = "^http(s)?://.+\\/(\\d+)(\\/)?$";
+        return ReUtil.get(regStr, cleanUrl, 2);
+    }
+
+    private static String normalizeSubjectId(String value) {
+        if (StrUtil.isBlank(value)) {
+            return null;
+        }
+        String id = value.trim();
+        return NumberUtil.isInteger(id) ? id : null;
     }
 
     /**
@@ -353,9 +472,9 @@ public class BgmUtil {
      */
     public static String getSubjectId(String bgmUrl) {
         Assert.notBlank(bgmUrl, "bgmUrl 不能为空");
-        String regStr = "^http(s)?://.+\\/(\\d+)(\\/)?$";
-        Assert.isTrue(ReUtil.contains(regStr, bgmUrl));
-        return ReUtil.get(regStr, bgmUrl, 2);
+        String subjectId = parseSubjectId(bgmUrl);
+        Assert.notBlank(subjectId, "bgmUrl 不能为空");
+        return subjectId;
     }
 
     /**

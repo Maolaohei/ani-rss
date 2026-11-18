@@ -23,6 +23,18 @@
 
 ---
 
+## 3.4.45 增量（2026-11）
+
+### 修：多订阅源「已订阅」状态不同步
+
+Mikan 存量订阅没有 `bgmUrl` 时，AniBT / AnimeGarden 列表只按 `Ani.bgmUrl` 提取 BGM 条目 ID，导致这些订阅永远显示未订阅；Mikan 页面本身按站内 `bangumiId` 判断，所以表现为只有 Mikan 正常。另修复 `BgmUtil.getSubjectId(Ani)` 在 Mikan 分支把 `ani.getUrl()` 当作 BGM 地址的问题。
+
+- 统一通过 `BgmUtil.getSubjectIdList()` 解析已订阅 BGM 条目 ID：优先 `bgmUrl`，其次 AniBT `bgmId` / AnimeGarden `subject` 参数，最后从 Mikan 详情页回填；
+- 单条解析失败只跳过该条，不影响整页列表；
+- `getSubjectId(String)` 兼容带 query 与尾斜杠的 BGM 链接。
+
+---
+
 ## 3.4.44 增量（2026-11）
 
 ### 新：AstrBot 通知（跟进上游）

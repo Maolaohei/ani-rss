@@ -4,12 +4,10 @@ import ani.rss.commons.FileUtils;
 import ani.rss.commons.GroupRegexUtils;
 import ani.rss.commons.GsonStatic;
 import ani.rss.commons.WeekComparator;
-import ani.rss.entity.Ani;
 import ani.rss.entity.AnimeGarden;
 import ani.rss.entity.BgmInfo;
 import ani.rss.entity.GroupRegex;
 import ani.rss.util.basic.HttpReq;
-import ani.rss.util.other.AniUtil;
 import ani.rss.util.other.BgmUtil;
 import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.date.DateUtil;
@@ -87,13 +85,7 @@ public class AnimeGardenService {
 
         JsonObject bgmScore = cacheService.getBgmScore();
 
-        List<String> bgmIdList = AniUtil.getAniList()
-                .stream()
-                .map(Ani::getBgmUrl)
-                .filter(StrUtil::isNotBlank)
-                .map(BgmUtil::getSubjectId)
-                .distinct()
-                .toList();
+        List<String> bgmIdList = BgmUtil.getSubjectIdList();
 
         List<AnimeGarden.Subject> subjectList = HttpReq.get(HOST + "/subjects")
                 .thenFunction(res -> {
