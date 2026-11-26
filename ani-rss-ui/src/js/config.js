@@ -77,7 +77,8 @@ export let configData = {
     "downloadCount": 0,
     "login": {
         "username": "admin",
-        "password": ""
+        "password": "",
+        "isDefault": false
     },
     "multiLoginForbidden": true,
     "loginEffectiveHours": 3,

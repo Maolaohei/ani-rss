@@ -93,7 +93,11 @@ public class ConfigController extends BaseController {
         String version = MavenUtils.getVersion();
         String buildInfo = buildInfo();
         Config config = ObjectUtil.clone(ConfigUtil.CONFIG);
-        config.getLogin().setPassword("");
+        // 是否为默认登录账号与密码，用于提示用户及时修改密码
+        boolean isDefault = ConfigUtil.isDefaultLogin(config.getLogin());
+        config.getLogin()
+                .setPassword("")
+                .setIsDefault(isDefault);
         // 只读令牌脱敏：/config 在只读白名单内(前端启动依赖它读取展示类配置)，
         // 但响应里带着 apiKey 等管理凭据。若不抹掉，只读者可拿 apiKey 去调 /setConfig 完成提权。
         // 脱敏按字段名匹配，后续新增 xxxToken 之类字段会自动被覆盖，不会漏。

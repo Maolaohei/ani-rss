@@ -54,6 +54,21 @@ public class ConfigUtil {
     public static volatile Config CONFIG = new Config();
     public static final String FILE_NAME = "config.v2.json";
 
+    /**
+     * 历史默认用户名与密码摘要，仅用于识别尚未修改的登录信息。
+     * fork 首启已改为随机密码，这里保留对旧配置的兼容检测。
+     */
+    public static final String DEFAULT_USERNAME = "admin";
+    public static final String DEFAULT_PASSWORD = SecureUtil.sha256("admin");
+
+    public static Boolean isDefaultLogin(Login login) {
+        if (login == null) {
+            return false;
+        }
+        return Objects.equals(DEFAULT_USERNAME, login.getUsername())
+                && Objects.equals(DEFAULT_PASSWORD, login.getPassword());
+    }
+
     /*
       默认配置
      */
@@ -487,6 +502,10 @@ public class ConfigUtil {
         newConfig.setExpirationTime(null)
                 .setOutTradeNo(null)
                 .setTryOut(null);
+        // 该字段仅用于 /config 响应，不能从请求回写并持久化
+        if (newConfig.getLogin() != null) {
+            newConfig.getLogin().setIsDefault(null);
+        }
 
         String username = current.getLogin().getUsername();
         String password = current.getLogin().getPassword();
