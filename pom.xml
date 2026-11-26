@@ -18,7 +18,7 @@
     <packaging>pom</packaging>
     <properties>
         <java.version>17</java.version>
-        <spring-ai.version>2.0.0</spring-ai.version>
+        <spring-ai.version>2.1.0-M1</spring-ai.version>
         <!-- 磁力链接元数据解析（合集下载）：见 MagnetTorrentUtil -->
         <jlibtorrent.version>2.0.12.9</jlibtorrent.version>
     </properties>
@@ -31,7 +31,7 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>4.1.0</version>
+        <version>4.2.0</version>
         <relativePath/>
     </parent>
 
